@@ -14,12 +14,21 @@ nix-manager-core.lib.mkManagerOutputs {
   rustEdition = "2024";
   srcDir = ../.;
   extraOutputs = {
+    self,
     lib,
     forAllSystems,
     pkgsFor,
     ...
-  }: {
-    lib = import ./lib.nix;
+  }: let
+    module = import ./module.nix;
+    collect = import ./collect.nix {inherit lib;};
+  in {
+    nixosModules = {
+      secretSync = module;
+      default = module;
+    };
+
+    lib = (import ./lib.nix) // {inherit collect;};
 
     packages = forAllSystems (system: let
       pkgs = pkgsFor system;
