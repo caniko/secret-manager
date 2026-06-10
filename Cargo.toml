@@ -4,7 +4,7 @@ members = ["crates/secret-manager"]
 
 [workspace.package]
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 license = "MIT"
 repository = "https://codeberg.org/caniko/secret-manager"
 authors = ["caniko"]
@@ -12,7 +12,10 @@ authors = ["caniko"]
 [workspace.dependencies]
 nix-manager-core = { git = "https://codeberg.org/caniko/nix-manager-core.git" }
 anyhow = "1"
+base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
+rand = "0.8"
+walkdir = "2"
 
 [workspace.metadata.crane]
 name = "secret-manager"
