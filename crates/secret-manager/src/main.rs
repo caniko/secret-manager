@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 
 use secret_manager::env::LocalEnv;
-use secret_manager::{add, legacy, push};
+use secret_manager::{add, legacy, push, sync};
 
 #[derive(Parser)]
 #[command(
@@ -29,6 +29,10 @@ enum Command {
 
     /// List every *.age file tracked in the repo.
     List,
+
+    /// Read collected sync targets and push each declared secret to its
+    /// declared forge repository Actions secrets.
+    Sync(sync::SyncArgs),
 
     /// Decrypt an agenix secret and push it to repo Actions secret stores
     /// (Codeberg/Forgejo, GitHub) so workflows can read it as
@@ -66,6 +70,7 @@ fn main() -> anyhow::Result<()> {
         Command::Nixos(cmd) => cmd.run(&env),
         Command::Forgejo(cmd) => cmd.run(),
         Command::List => legacy::list(),
+        Command::Sync(args) => args.run(),
         Command::Push(args) => args.run(),
         Command::Decrypt(args) => args.run(),
         Command::WgKeygen { secret_path } => legacy::wg_keygen(&secret_path),

@@ -81,7 +81,7 @@ impl DecryptArgs {
     }
 }
 
-fn decrypt_store_secret(store: &Store, secret: &str, identities: &[PathBuf]) -> Result<String> {
+pub(crate) fn decrypt_store_secret(store: &Store, secret: &str, identities: &[PathBuf]) -> Result<String> {
     let secret_path = resolve_against(&store.root, &PathBuf::from(secret));
     if !secret_path.is_file() {
         bail!("{} does not exist", secret_path.display());
