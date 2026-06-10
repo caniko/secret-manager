@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = ["crates/secret-manager"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://codeberg.org/caniko/secret-manager"
+authors = ["caniko"]
+
+[workspace.dependencies]
+nix-manager-core = { git = "https://codeberg.org/caniko/nix-manager-core.git" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+
+[workspace.metadata.crane]
+name = "secret-manager"
+
+[profile.release]
+lto = true
+strip = true

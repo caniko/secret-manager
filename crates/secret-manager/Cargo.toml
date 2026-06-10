@@ -1,0 +1,21 @@
+[package]
+name = "secret-manager"
+description = "Declarative secret management for NixOS — resolve and render age/agenix secrets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "secret-manager"
+path = "src/main.rs"
+
+[lib]
+name = "secret_manager"
+path = "src/lib.rs"
+
+[dependencies]
+nix-manager-core.workspace = true
+anyhow.workspace = true
+clap.workspace = true
