@@ -26,11 +26,3 @@
 
 - [CLI Reference](./reference/cli.md)
 - [Library API](./reference/library.md)
-
-# Plan: secret-manager-integration
-
-- [Overview](./planning/secret-manager-integration/README.md)
-- [01 — Forge via forgejo-api](./planning/secret-manager-integration/01-forge-forgejo-api.md)
-- [02 — Sync-target module](./planning/secret-manager-integration/02-sync-target-module.md)
-- [03 — Sync command](./planning/secret-manager-integration/03-sync-command.md)
-- [04 — canix integration](./planning/secret-manager-integration/04-canix-integration.md)
