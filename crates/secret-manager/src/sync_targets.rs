@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 /// Top-level document produced by `nix/collect.nix` → `builtins.toJSON`.
 ///
@@ -19,31 +19,91 @@ pub struct HostSyncConfig {
     pub targets: HashMap<String, SyncTarget>,
 }
 
-/// A single declarative sync target — push one decrypted secret to one or more
-/// forge repositories as an Actions secret.
-#[derive(Debug, Deserialize)]
+/// A single declarative sync target — push one value to one or more forge
+/// repositories. Encrypted agenix values become Actions secrets; plaintext
+/// source files become Actions variables.
+#[derive(Debug)]
 pub struct SyncTarget {
-    /// Path to the agenix-encrypted `.age` file, relative to the store root.
-    pub secret: String,
+    /// Source of the value to synchronize.
+    pub value: SyncValue,
 
-    /// Name of the Actions secret to set on each target repository.
+    /// Name of the Actions secret or variable to set on each target repository.
     pub name: String,
 
     /// Codeberg/Forgejo repositories (owner/repo) to push to.
-    #[serde(default)]
     pub codeberg: Vec<String>,
 
-    /// GitHub repositories (owner/repo) to push to.
-    #[serde(default)]
-    pub github: Vec<String>,
-
     /// Forge host for Codeberg/Forgejo token resolution.
-    #[serde(default = "default_host")]
     pub host: String,
+}
+
+/// Where a sync target's value comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyncValue {
+    /// Path to the agenix-encrypted `.age` file, relative to the store root.
+    Secret(String),
+    /// Path to a plaintext file, relative to the store root.
+    Source(String),
+}
+
+impl SyncValue {
+    pub fn path(&self) -> &str {
+        match self {
+            Self::Secret(path) | Self::Source(path) => path,
+        }
+    }
+
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Secret(_) => "secret",
+            Self::Source(_) => "variable",
+        }
+    }
 }
 
 fn default_host() -> String {
     "codeberg.org".to_string()
+}
+
+impl<'de> Deserialize<'de> for SyncTarget {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawSyncTarget {
+            secret: Option<String>,
+            source: Option<String>,
+            name: String,
+            #[serde(default)]
+            codeberg: Vec<String>,
+            #[serde(default = "default_host")]
+            host: String,
+        }
+
+        let raw = RawSyncTarget::deserialize(deserializer)?;
+        let value = match (raw.secret, raw.source) {
+            (Some(secret), None) if !secret.is_empty() => SyncValue::Secret(secret),
+            (None, Some(source)) if !source.is_empty() => SyncValue::Source(source),
+            (Some(_), Some(_)) => {
+                return Err(serde::de::Error::custom(
+                    "sync target must set exactly one of `secret` or `source`",
+                ));
+            }
+            _ => {
+                return Err(serde::de::Error::custom(
+                    "sync target must set exactly one non-empty `secret` or `source`",
+                ));
+            }
+        };
+
+        Ok(Self {
+            value,
+            name: raw.name,
+            codeberg: raw.codeberg,
+            host: raw.host,
+        })
+    }
 }
 
 impl SyncDocument {
@@ -67,14 +127,11 @@ impl SyncDocument {
     ///
     /// This is the primary accessor for the sync command (Phase 03).
     pub fn iter_targets(&self) -> impl Iterator<Item = (usize, &str, &SyncTarget)> + '_ {
-        self.hosts
-            .iter()
-            .enumerate()
-            .flat_map(|(host_idx, host)| {
-                host.targets
-                    .iter()
-                    .map(move |(name, target)| (host_idx, name.as_str(), target))
-            })
+        self.hosts.iter().enumerate().flat_map(|(host_idx, host)| {
+            host.targets
+                .iter()
+                .map(move |(name, target)| (host_idx, name.as_str(), target))
+        })
     }
 }
 
@@ -133,14 +190,12 @@ mod tests {
           "secret": "age/secrets/my-app-token.age",
           "name": "MY_APP_TOKEN",
           "codeberg": ["caniko/my-repo"],
-          "github": [],
           "host": "codeberg.org"
         },
-        "deploy-key": {
-          "secret": "age/secrets/deploy-key.age",
-          "name": "DEPLOY_KEY",
+        "public-key": {
+          "source": "age/secrets/public-key.asc",
+          "name": "PUBLIC_KEY",
           "codeberg": ["caniko/my-repo", "caniko/other-repo"],
-          "github": ["caniko/mirror-repo"],
           "host": "codeberg.org"
         }
       }
@@ -156,21 +211,22 @@ mod tests {
 
         // First target
         let t1 = doc.hosts[0].targets.get("my-app-token").unwrap();
-        assert_eq!(t1.secret, "age/secrets/my-app-token.age");
+        assert_eq!(
+            t1.value,
+            SyncValue::Secret("age/secrets/my-app-token.age".to_string())
+        );
         assert_eq!(t1.name, "MY_APP_TOKEN");
         assert_eq!(t1.codeberg, vec!["caniko/my-repo"]);
-        assert!(t1.github.is_empty());
         assert_eq!(t1.host, "codeberg.org");
 
         // Second target
-        let t2 = doc.hosts[0].targets.get("deploy-key").unwrap();
-        assert_eq!(t2.secret, "age/secrets/deploy-key.age");
-        assert_eq!(t2.name, "DEPLOY_KEY");
+        let t2 = doc.hosts[0].targets.get("public-key").unwrap();
         assert_eq!(
-            t2.codeberg,
-            vec!["caniko/my-repo", "caniko/other-repo"]
+            t2.value,
+            SyncValue::Source("age/secrets/public-key.asc".to_string())
         );
-        assert_eq!(t2.github, vec!["caniko/mirror-repo"]);
+        assert_eq!(t2.name, "PUBLIC_KEY");
+        assert_eq!(t2.codeberg, vec!["caniko/my-repo", "caniko/other-repo"]);
         assert_eq!(t2.host, "codeberg.org");
     }
 
@@ -207,8 +263,67 @@ mod tests {
         let doc: SyncDocument = serde_json::from_str(json).unwrap();
         let t = doc.hosts[0].targets.get("minimal").unwrap();
         assert!(t.codeberg.is_empty());
-        assert!(t.github.is_empty());
         assert_eq!(t.host, "codeberg.org");
+    }
+
+    #[test]
+    fn source_target_defaults_are_applied_to_absent_fields() {
+        let json = r#"{
+          "hosts": [{
+            "targets": {
+              "minimal": {
+                "source": "age/secrets/public.asc",
+                "name": "PUBLIC"
+              }
+            }
+          }]
+        }"#;
+        let doc: SyncDocument = serde_json::from_str(json).unwrap();
+        let t = doc.hosts[0].targets.get("minimal").unwrap();
+        assert_eq!(
+            t.value,
+            SyncValue::Source("age/secrets/public.asc".to_string())
+        );
+        assert!(t.codeberg.is_empty());
+        assert_eq!(t.host, "codeberg.org");
+    }
+
+    #[test]
+    fn target_with_both_secret_and_source_is_rejected() {
+        let json = r#"{
+          "hosts": [{
+            "targets": {
+              "bad": {
+                "secret": "age/secrets/private.age",
+                "source": "age/secrets/public.asc",
+                "name": "BAD"
+              }
+            }
+          }]
+        }"#;
+        let err = serde_json::from_str::<SyncDocument>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("exactly one"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn target_with_neither_secret_nor_source_is_rejected() {
+        let json = r#"{
+          "hosts": [{
+            "targets": {
+              "bad": {
+                "name": "BAD"
+              }
+            }
+          }]
+        }"#;
+        let err = serde_json::from_str::<SyncDocument>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("exactly one non-empty"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -216,7 +331,7 @@ mod tests {
         let doc: SyncDocument = serde_json::from_str(CONTRACT_JSON).unwrap();
         let mut names: Vec<&str> = doc.iter_targets().map(|(_, name, _)| name).collect();
         names.sort();
-        assert_eq!(names, vec!["deploy-key", "my-app-token"]);
+        assert_eq!(names, vec!["my-app-token", "public-key"]);
 
         let mut host_indices: Vec<usize> = doc.iter_targets().map(|(idx, _, _)| idx).collect();
         host_indices.sort();

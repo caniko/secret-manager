@@ -11,7 +11,11 @@
         secret = "age/secrets/deploy-key.age";
         name = "DEPLOY_KEY";
         codeberg = ["caniko/my-repo" "caniko/other-repo"];
-        github = ["caniko/mirror-repo"];
+      };
+      "public-key" = {
+        source = "age/secrets/public-key.asc";
+        name = "PUBLIC_KEY";
+        codeberg = ["caniko/my-repo"];
       };
     };
   };

@@ -479,6 +479,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "hostname"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "617aaa3557aef3810a6369d0a99fac8a080891b68bd9f9812a1eeda0c0730cbd"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "windows-link",
+]
+
+[[package]]
 name = "http"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -813,15 +824,19 @@ dependencies = [
 
 [[package]]
 name = "nix-manager-core"
-version = "0.1.0"
-source = "git+https://codeberg.org/caniko/nix-manager-core.git#c609908cc9cd17d15a838ca4d628e5cf8d07d6f2"
+version = "0.3.0"
+source = "git+https://codeberg.org/caniko/nix-manager-core.git?rev=85113f23b3fda856536b305125d0e791a6c97b9c#85113f23b3fda856536b305125d0e791a6c97b9c"
 dependencies = [
  "anyhow",
  "console",
  "dialoguer",
  "forgejo-api",
+ "hostname",
  "indicatif",
+ "serde",
+ "serde_json",
  "url",
+ "walkdir",
 ]
 
 [[package]]

@@ -1,19 +1,21 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::Args;
+use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
 
 use crate::push::decrypt_store_secret;
-use crate::store::Store;
-use crate::sync_targets::SyncDocument;
+use crate::store::{Store, resolve_against};
+use crate::sync_targets::{SyncDocument, SyncValue};
 use nix_manager_core::{forge, ui};
 
-/// Read collected sync targets and push each declared secret to its
-/// declared forge repository Actions secrets. The JSON input comes from
+/// Read collected sync targets and push each declared value to its
+/// declared forge repository Actions destination. The JSON input comes from
 /// `nix eval <flake>#nixosConfigurations.<host>.config.services.secretSync.targets --json`
 /// piped through `collect.nix`.
 ///
-/// Reuses the same auth resolution as `push`:
+/// Encrypted agenix values are pushed as Actions secrets. Plaintext source
+/// files are pushed as Actions variables. Reuses the same auth resolution as `push`:
 /// `$CODEBERG_TOKEN` env var, falling back to the forgejo-cli token file.
 #[derive(Args)]
 pub struct SyncArgs {
@@ -42,13 +44,11 @@ impl SyncArgs {
             for (_, name, target) in doc.iter_targets() {
                 println!();
                 println!("  target: {name}");
-                println!("  secret: {}", target.secret);
+                println!("  kind:   {}", target.value.kind());
+                println!("  source: {}", target.value.path());
                 println!("  name:   {}", target.name);
                 for repo in &target.codeberg {
                     println!("  → codeberg/{}  {}", target.host, repo);
-                }
-                for repo in &target.github {
-                    println!("  → github       {}", repo);
                 }
             }
             println!();
@@ -59,20 +59,28 @@ impl SyncArgs {
         let store = Store::discover()?;
 
         for (_, name, target) in doc.iter_targets() {
-            ui::step(format!("sync: `{}` from {}", name, target.secret));
+            ui::step(format!(
+                "sync: `{}` {} from {}",
+                name,
+                target.value.kind(),
+                target.value.path()
+            ));
 
-            let value = decrypt_store_secret(&store, &target.secret, &self.identities)?;
+            let value = sync_value(&store, &target.value, &self.identities)?;
 
             for repo in &target.codeberg {
                 ui::step(format!(
                     "  codeberg/{} → {} as {}",
                     target.host, repo, target.name
                 ));
-                forge::push_codeberg_secret(&target.host, repo, &target.name, &value)?;
-            }
-            for repo in &target.github {
-                ui::step(format!("  github → {} as {}", repo, target.name));
-                forge::push_github_secret(repo, &target.name, &value)?;
+                match &target.value {
+                    SyncValue::Secret(_) => {
+                        forge::push_codeberg_secret(&target.host, repo, &target.name, &value)?;
+                    }
+                    SyncValue::Source(_) => {
+                        forge::push_codeberg_variable(&target.host, repo, &target.name, &value)?;
+                    }
+                }
             }
         }
 
@@ -90,14 +98,32 @@ impl SyncArgs {
                     .read_to_string(&mut buf)
                     .map_err(|e| anyhow::anyhow!("reading stdin: {e}"))?;
                 if buf.trim().is_empty() {
-                    anyhow::bail!(
-                        "no input — pipe a JSON document or pass --config <path>"
-                    );
+                    anyhow::bail!("no input — pipe a JSON document or pass --config <path>");
                 }
                 SyncDocument::from_json(&buf).map_err(Into::into)
             }
         }
     }
+}
+
+fn sync_value(store: &Store, value: &SyncValue, identities: &[PathBuf]) -> Result<String> {
+    match value {
+        SyncValue::Secret(secret) => decrypt_store_secret(store, secret, identities),
+        SyncValue::Source(source) => read_plaintext_source(store, source),
+    }
+}
+
+fn read_plaintext_source(store: &Store, source: &str) -> Result<String> {
+    let source_path = resolve_against(&store.root, &PathBuf::from(source));
+    if !source_path.is_file() {
+        bail!("{} does not exist", source_path.display());
+    }
+    let value = fs::read_to_string(&source_path)
+        .map_err(|e| anyhow::anyhow!("reading plaintext source {}: {e}", source_path.display()))?;
+    if value.is_empty() {
+        bail!("plaintext source {} is empty", source_path.display());
+    }
+    Ok(value)
 }
 
 #[cfg(test)]
@@ -113,14 +139,12 @@ mod tests {
           "secret": "age/secrets/my-app-token.age",
           "name": "MY_APP_TOKEN",
           "codeberg": ["caniko/my-repo"],
-          "github": [],
           "host": "codeberg.org"
         },
         "deploy-key": {
-          "secret": "age/secrets/deploy-key.age",
+          "source": "age/secrets/deploy-key.pub",
           "name": "DEPLOY_KEY",
           "codeberg": ["caniko/my-repo", "caniko/other-repo"],
-          "github": ["caniko/mirror-repo"],
           "host": "git.example.com"
         }
       }
@@ -134,26 +158,45 @@ mod tests {
         assert_eq!(doc.total_targets(), 2);
 
         // Verify target expansion and per-target host handling
-        let mut targets: Vec<(&str, &str, &str, &str)> = doc
+        let mut targets: Vec<(&str, &str, &str, &str, &str)> = doc
             .iter_targets()
             .flat_map(|(_, _name, target)| {
                 let host: &str = &target.host;
-                let secret: &str = &target.secret;
+                let source: &str = target.value.path();
+                let kind: &str = target.value.kind();
                 let secret_name: &str = &target.name;
                 target
                     .codeberg
                     .iter()
-                    .map(move |repo| (host, secret, secret_name, repo.as_str()))
+                    .map(move |repo| (kind, host, source, secret_name, repo.as_str()))
             })
             .collect();
-        targets.sort_by_key(|t| (t.2, t.3));
+        targets.sort_by_key(|t| (t.3, t.4));
 
         assert_eq!(
             targets,
             vec![
-                ("git.example.com", "age/secrets/deploy-key.age", "DEPLOY_KEY", "caniko/my-repo"),
-                ("git.example.com", "age/secrets/deploy-key.age", "DEPLOY_KEY", "caniko/other-repo"),
-                ("codeberg.org", "age/secrets/my-app-token.age", "MY_APP_TOKEN", "caniko/my-repo"),
+                (
+                    "variable",
+                    "git.example.com",
+                    "age/secrets/deploy-key.pub",
+                    "DEPLOY_KEY",
+                    "caniko/my-repo"
+                ),
+                (
+                    "variable",
+                    "git.example.com",
+                    "age/secrets/deploy-key.pub",
+                    "DEPLOY_KEY",
+                    "caniko/other-repo"
+                ),
+                (
+                    "secret",
+                    "codeberg.org",
+                    "age/secrets/my-app-token.age",
+                    "MY_APP_TOKEN",
+                    "caniko/my-repo"
+                ),
             ],
             "dry-run planning should expand all codeberg repos per target, \
              honoring each target's host"
@@ -182,5 +225,31 @@ mod tests {
         // Just verify load_document succeeds — dry-run doesn't need a store
         let doc = args.load_document().unwrap();
         assert_eq!(doc.total_targets(), 2);
+    }
+
+    #[test]
+    fn read_plaintext_source_preserves_content() {
+        let dir = crate::io::TempDir::new().unwrap();
+        let source = dir.path.join("public.asc");
+        let content = "line one\nline two\n";
+        std::fs::write(&source, content).unwrap();
+        let store = Store {
+            root: dir.path.clone(),
+        };
+
+        let got = read_plaintext_source(&store, "public.asc").unwrap();
+        assert_eq!(got, content);
+    }
+
+    #[test]
+    fn read_plaintext_source_rejects_empty_file() {
+        let dir = crate::io::TempDir::new().unwrap();
+        std::fs::write(dir.path.join("empty"), "").unwrap();
+        let store = Store {
+            root: dir.path.clone(),
+        };
+
+        let err = read_plaintext_source(&store, "empty").unwrap_err();
+        assert!(err.to_string().contains("is empty"));
     }
 }

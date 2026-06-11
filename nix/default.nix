@@ -28,7 +28,7 @@ nix-manager-core.lib.mkManagerOutputs {
       default = module;
     };
 
-    lib = (import ./lib.nix) // {inherit collect;};
+    lib = (import ./lib.nix {inherit lib;}) // {inherit collect;};
 
     packages = forAllSystems (system: let
       pkgs = pkgsFor system;

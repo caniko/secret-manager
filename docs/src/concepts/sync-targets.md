@@ -1,7 +1,7 @@
 # Sync Targets
 
-`secret-manager` can push decrypted secrets to forge Actions secret stores
-(Codeberg/Forgejo, GitHub) so CI workflows can read them as `${{ secrets.<NAME> }}`.
+`secret-manager` can push encrypted values to Codeberg/Forgejo Actions secret
+stores and plaintext non-secret values to Codeberg/Forgejo Actions variables.
 
 Sync targets are **declared declaratively** via Nix module options — the
 `services.secretSync` namespace — rather than passed as ad-hoc CLI flags.
@@ -24,11 +24,10 @@ a JSON document that `secret-manager sync` reads (coming in Phase 03).
         codeberg = ["caniko/my-repo"];
       };
 
-      "deploy-key" = {
-        secret   = "age/secrets/deploy-key.age";
-        name     = "DEPLOY_KEY";
+      "public-key" = {
+        source   = "age/secrets/public-key.asc";
+        name     = "PUBLIC_KEY";
         codeberg = ["caniko/my-repo" "caniko/other-repo"];
-        github   = ["caniko/mirror-repo"];
       };
     };
   };
@@ -39,11 +38,13 @@ a JSON document that `secret-manager sync` reads (coming in Phase 03).
 
 | Option    | Type           | Default          | Description                                    |
 |-----------|----------------|------------------|------------------------------------------------|
-| `secret`  | `str`          | required         | `.age` path relative to the store root         |
-| `name`    | `str`          | required         | Actions secret name (`${{ secrets.<NAME> }}`) |
+| `secret`  | `null or str`  | `null`           | `.age` path pushed as an Actions secret        |
+| `source`  | `null or str`  | `null`           | plaintext path pushed as an Actions variable   |
+| `name`    | `str`          | required         | Actions secret/variable name                   |
 | `codeberg`| `list of str`  | `[]`             | `owner/repo` targets on Codeberg/Forgejo       |
-| `github`  | `list of str`  | `[]`             | `owner/repo` targets on GitHub                 |
 | `host`    | `str`          | `"codeberg.org"` | Forge host for Codeberg/Forgejo token lookup   |
+
+Each target must set exactly one of `secret` or `source`.
 
 ## Relation to mkSecret
 
@@ -73,7 +74,12 @@ document of the shape:
           "secret": "age/secrets/ci-token.age",
           "name": "CI_TOKEN",
           "codeberg": ["caniko/my-repo"],
-          "github": [],
+          "host": "codeberg.org"
+        },
+        "public-key": {
+          "source": "age/secrets/public-key.asc",
+          "name": "PUBLIC_KEY",
+          "codeberg": ["caniko/my-repo"],
           "host": "codeberg.org"
         }
       }

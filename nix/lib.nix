@@ -1,4 +1,4 @@
-let
+{lib}: let
   mkSecret = {
     name,
     stack,
