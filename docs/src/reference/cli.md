@@ -132,6 +132,12 @@ secret-manager sync --config sync-targets.json \
 Use `--dry-run` to print the planned pushes without decrypting or contacting
 the forge. If `--config` is omitted, `sync` reads the JSON document from stdin.
 
+`sync` records the remote Actions secrets and variables it manages in
+`<secret-store>/.secret-manager/sync-state.toml` by default. Pass
+`--state <PATH>` to use a different state file. Entries that were previously
+managed but no longer appear in the collected config are reported as stale.
+They are only deleted from Forgejo when `--prune` is passed.
+
 ### `decrypt` — Decrypt to stdout
 
 Decrypt an agenix secret and print plaintext to stdout.

@@ -8,6 +8,12 @@ Sync targets are **declared declaratively** via Nix module options — the
 A host must opt in with `enable = true`; its targets are then collected into
 a JSON document that `secret-manager sync` reads.
 
+`secret-manager sync` keeps a store-local TOML state file at
+`<secret-store>/.secret-manager/sync-state.toml`. The state records only
+non-secret destination metadata so later syncs can identify stale entries that
+the tool previously managed. Stale entries are reported by default and deleted
+only when `sync --prune` is used.
+
 ## Declaring sync targets
 
 ```nix

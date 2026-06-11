@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -7,13 +7,12 @@ use std::path::{Path, PathBuf};
 use nix_manager_core::exec;
 
 use crate::io::{
-    adopt_age_file, display_rel, encrypt_plaintext_to_age, read_plaintext,
+    TempDir, adopt_age_file, display_rel, encrypt_plaintext_to_age, read_plaintext,
     read_plaintext_editor_when_tty, splice_import, stage_and_rekey, validate_ident, validate_slug,
-    TempDir,
 };
 use crate::render::{
-    camel, default_forgejo_ssh_key_age_name, nix_string, render_modules, GeneratorSpec,
-    RenderedModule, TargetSpec, LIB_BINDING,
+    GeneratorSpec, LIB_BINDING, RenderedModule, TargetSpec, camel,
+    default_forgejo_ssh_key_age_name, nix_string, render_modules,
 };
 
 #[derive(Debug, Clone, Default)]

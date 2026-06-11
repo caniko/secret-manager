@@ -16,5 +16,6 @@ pub mod push;
 pub mod render;
 pub mod store;
 pub mod sync;
+pub mod sync_state;
 pub mod sync_targets;
 pub mod target;

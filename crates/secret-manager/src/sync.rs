@@ -6,6 +6,10 @@ use std::path::PathBuf;
 
 use crate::push::decrypt_store_secret;
 use crate::store::{Store, resolve_against};
+use crate::sync_state::{
+    ManagedKind, ManagedRecord, Scope, SyncState, desired_records, retained_without_prune,
+    stale_records,
+};
 use crate::sync_targets::{SyncDocument, SyncValue};
 use nix_manager_core::{forge, ui};
 
@@ -32,12 +36,29 @@ pub struct SyncArgs {
     /// Print planned pushes without decrypting or contacting any forge.
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Delete previously managed remote entries that are no longer declared.
+    #[arg(long)]
+    pub prune: bool,
+
+    /// Path to the sync state TOML file.
+    /// Defaults to <secret-store>/.secret-manager/sync-state.toml.
+    #[arg(long, value_name = "PATH")]
+    pub state: Option<PathBuf>,
 }
 
 impl SyncArgs {
     pub fn run(self) -> Result<()> {
         let doc = self.load_document()?;
         let total = doc.total_targets();
+        let store = Store::discover()?;
+        let state_path = self
+            .state
+            .clone()
+            .unwrap_or_else(|| default_state_path(&store));
+        let previous_state = SyncState::load(&state_path)?.unwrap_or_else(SyncState::empty);
+        let desired_state = desired_records(&doc)?;
+        let stale = stale_records(&previous_state.managed, &desired_state);
 
         if self.dry_run {
             println!("Planned pushes (--dry-run):");
@@ -57,12 +78,11 @@ impl SyncArgs {
                     println!("  → codeberg/{} user  authenticated", target.host);
                 }
             }
+            print_stale_records(&stale, self.prune);
             println!();
             println!("total targets: {total}");
             return Ok(());
         }
-
-        let store = Store::discover()?;
 
         for (_, name, target) in doc.iter_targets() {
             ui::step(format!(
@@ -125,6 +145,21 @@ impl SyncArgs {
             }
         }
 
+        if self.prune {
+            for record in &stale {
+                delete_managed_record(record)?;
+            }
+        } else {
+            report_stale_records(&stale);
+        }
+
+        let next_records = if self.prune {
+            desired_state
+        } else {
+            retained_without_prune(&previous_state.managed, &desired_state)
+        };
+        SyncState::new(next_records).write_atomic(&state_path)?;
+
         ui::success(format!("synced {total} target(s)"));
         Ok(())
     }
@@ -144,6 +179,61 @@ impl SyncArgs {
                 SyncDocument::from_json(&buf).map_err(Into::into)
             }
         }
+    }
+}
+
+fn default_state_path(store: &Store) -> PathBuf {
+    store.root.join(".secret-manager").join("sync-state.toml")
+}
+
+fn print_stale_records(stale: &[ManagedRecord], prune: bool) {
+    for line in stale_record_lines(stale, prune) {
+        println!("{line}");
+    }
+}
+
+fn stale_record_lines(stale: &[ManagedRecord], prune: bool) -> Vec<String> {
+    if stale.is_empty() {
+        return Vec::new();
+    }
+
+    let mut lines = vec![
+        String::new(),
+        if prune {
+            "Planned prunes (--prune):".to_string()
+        } else {
+            "Stale managed entries (pass --prune to delete):".to_string()
+        },
+    ];
+
+    for record in stale {
+        lines.push(String::new());
+        lines.push(format!("  target: {}", record.target));
+        lines.push(format!("  kind:   {}", kind_label(record.kind)));
+        lines.push(format!("  source: {}", record.source));
+        lines.push(format!("  name:   {}", record.name));
+        lines.push(format!("  → {}", record.destination_label()));
+    }
+
+    lines
+}
+
+fn report_stale_records(stale: &[ManagedRecord]) {
+    if stale.is_empty() {
+        return;
+    }
+    ui::warn(format!(
+        "{} stale managed sync entr{} remain; rerun with --prune to delete them",
+        stale.len(),
+        if stale.len() == 1 { "y" } else { "ies" }
+    ));
+    for record in stale {
+        ui::warn(format!(
+            "  stale {} `{}` at {}",
+            kind_label(record.kind),
+            record.name,
+            record.destination_label()
+        ));
     }
 }
 
@@ -173,6 +263,106 @@ fn codeberg_client(host: &str, bearer: &str) -> Result<forgejo_api::sync::Forgej
 
     forgejo_api::sync::Forgejo::new(forgejo_api::Auth::Token(bearer), base_url)
         .map_err(|e| anyhow::anyhow!("failed to create forgejo client for {host}: {e}"))
+}
+
+fn delete_managed_record(record: &ManagedRecord) -> Result<()> {
+    let action = delete_action_for(record)?;
+    ui::step(format!(
+        "  pruning codeberg/{} {} `{}`",
+        record.host,
+        action.description(),
+        record.name
+    ));
+    let bearer = forge::codeberg_bearer_token(&record.host)?;
+    let api = codeberg_client(&record.host, &bearer)?;
+
+    let result = match action {
+        DeleteAction::RepoSecret { owner, repo } => {
+            api.delete_repo_secret(owner, repo, &record.name).send()
+        }
+        DeleteAction::RepoVariable { owner, repo } => {
+            api.delete_repo_variable(owner, repo, &record.name).send()
+        }
+        DeleteAction::OrgSecret { org } => api.delete_org_secret(org, &record.name).send(),
+        DeleteAction::OrgVariable { org } => api.delete_org_variable(org, &record.name).send(),
+        DeleteAction::UserSecret => api.delete_user_secret(&record.name).send(),
+        DeleteAction::UserVariable => api.delete_user_variable(&record.name).send(),
+    };
+
+    match result {
+        Ok(()) => Ok(()),
+        Err(err) if is_not_found(&err) => Ok(()),
+        Err(err) => Err(anyhow::anyhow!(
+            "failed to prune {} `{}` from {}: {err}",
+            kind_label(record.kind),
+            record.name,
+            record.destination_label()
+        )),
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DeleteAction<'a> {
+    RepoSecret { owner: &'a str, repo: &'a str },
+    RepoVariable { owner: &'a str, repo: &'a str },
+    OrgSecret { org: &'a str },
+    OrgVariable { org: &'a str },
+    UserSecret,
+    UserVariable,
+}
+
+impl DeleteAction<'_> {
+    fn description(&self) -> &'static str {
+        match self {
+            Self::RepoSecret { .. } => "repo secret",
+            Self::RepoVariable { .. } => "repo variable",
+            Self::OrgSecret { .. } => "org secret",
+            Self::OrgVariable { .. } => "org variable",
+            Self::UserSecret => "user secret",
+            Self::UserVariable => "user variable",
+        }
+    }
+}
+
+fn delete_action_for(record: &ManagedRecord) -> Result<DeleteAction<'_>> {
+    match (record.scope, record.kind) {
+        (Scope::Repo, ManagedKind::Secret) => Ok(DeleteAction::RepoSecret {
+            owner: required_field(record.owner.as_deref(), record, "owner")?,
+            repo: required_field(record.repo.as_deref(), record, "repo")?,
+        }),
+        (Scope::Repo, ManagedKind::Variable) => Ok(DeleteAction::RepoVariable {
+            owner: required_field(record.owner.as_deref(), record, "owner")?,
+            repo: required_field(record.repo.as_deref(), record, "repo")?,
+        }),
+        (Scope::Org, ManagedKind::Secret) => Ok(DeleteAction::OrgSecret {
+            org: required_field(record.org.as_deref(), record, "org")?,
+        }),
+        (Scope::Org, ManagedKind::Variable) => Ok(DeleteAction::OrgVariable {
+            org: required_field(record.org.as_deref(), record, "org")?,
+        }),
+        (Scope::User, ManagedKind::Secret) => Ok(DeleteAction::UserSecret),
+        (Scope::User, ManagedKind::Variable) => Ok(DeleteAction::UserVariable),
+    }
+}
+
+fn required_field<'a>(
+    value: Option<&'a str>,
+    record: &ManagedRecord,
+    field: &str,
+) -> Result<&'a str> {
+    value.ok_or_else(|| {
+        anyhow::anyhow!(
+            "sync state record for `{}` is missing required {field} field",
+            record.name
+        )
+    })
+}
+
+fn kind_label(kind: ManagedKind) -> &'static str {
+    match kind {
+        ManagedKind::Secret => "secret",
+        ManagedKind::Variable => "variable",
+    }
 }
 
 fn push_codeberg_organization_secret(host: &str, org: &str, name: &str, value: &str) -> Result<()> {
@@ -464,6 +654,8 @@ mod tests {
             config: Some(path),
             identities: vec![],
             dry_run: true,
+            prune: false,
+            state: None,
         };
         // Just verify load_document succeeds — dry-run doesn't need a store
         let doc = args.load_document().unwrap();
@@ -494,5 +686,95 @@ mod tests {
 
         let err = read_plaintext_source(&store, "empty").unwrap_err();
         assert!(err.to_string().contains("is empty"));
+    }
+
+    #[test]
+    fn delete_dispatch_maps_every_scope_and_kind() {
+        assert_eq!(
+            delete_action_for(&repo_record(ManagedKind::Secret)).unwrap(),
+            DeleteAction::RepoSecret {
+                owner: "caniko",
+                repo: "repo"
+            }
+        );
+        assert_eq!(
+            delete_action_for(&repo_record(ManagedKind::Variable)).unwrap(),
+            DeleteAction::RepoVariable {
+                owner: "caniko",
+                repo: "repo"
+            }
+        );
+        assert_eq!(
+            delete_action_for(&org_record(ManagedKind::Secret)).unwrap(),
+            DeleteAction::OrgSecret { org: "infra" }
+        );
+        assert_eq!(
+            delete_action_for(&org_record(ManagedKind::Variable)).unwrap(),
+            DeleteAction::OrgVariable { org: "infra" }
+        );
+        assert_eq!(
+            delete_action_for(&user_record(ManagedKind::Secret)).unwrap(),
+            DeleteAction::UserSecret
+        );
+        assert_eq!(
+            delete_action_for(&user_record(ManagedKind::Variable)).unwrap(),
+            DeleteAction::UserVariable
+        );
+    }
+
+    #[test]
+    fn stale_planning_output_distinguishes_report_from_prune() {
+        let stale = vec![repo_record(ManagedKind::Secret)];
+        let report = stale_record_lines(&stale, false).join("\n");
+        assert!(report.contains("Stale managed entries (pass --prune to delete):"));
+        assert!(report.contains("target: token"));
+        assert!(report.contains("name:   TOKEN"));
+        assert!(report.contains("codeberg/codeberg.org repo  caniko/repo"));
+
+        let prune = stale_record_lines(&stale, true).join("\n");
+        assert!(prune.contains("Planned prunes (--prune):"));
+        assert!(!prune.contains("pass --prune"));
+    }
+
+    fn repo_record(kind: ManagedKind) -> ManagedRecord {
+        ManagedRecord {
+            host: "codeberg.org".to_string(),
+            scope: Scope::Repo,
+            owner: Some("caniko".to_string()),
+            repo: Some("repo".to_string()),
+            org: None,
+            kind,
+            name: "TOKEN".to_string(),
+            target: "token".to_string(),
+            source: "age/secrets/token.age".to_string(),
+        }
+    }
+
+    fn org_record(kind: ManagedKind) -> ManagedRecord {
+        ManagedRecord {
+            host: "codeberg.org".to_string(),
+            scope: Scope::Org,
+            owner: None,
+            repo: None,
+            org: Some("infra".to_string()),
+            kind,
+            name: "TOKEN".to_string(),
+            target: "token".to_string(),
+            source: "age/secrets/token.age".to_string(),
+        }
+    }
+
+    fn user_record(kind: ManagedKind) -> ManagedRecord {
+        ManagedRecord {
+            host: "codeberg.org".to_string(),
+            scope: Scope::User,
+            owner: None,
+            repo: None,
+            org: None,
+            kind,
+            name: "TOKEN".to_string(),
+            target: "token".to_string(),
+            source: "age/secrets/token.age".to_string(),
+        }
     }
 }

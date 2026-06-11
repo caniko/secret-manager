@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use clap::{Args, Subcommand};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -6,13 +6,13 @@ use std::path::PathBuf;
 use crate::env::StoreEnv;
 use crate::io::{default_slug, validate_ident, validate_slug, validate_unit_name};
 use crate::plan::{
+    AddPlan, CommonSourceArgs, ForgejoGpgKeyPairPlan, ForgejoSshKeyPlan, SourceKind,
     build_forgejo_gpg_key_pair_plan, build_forgejo_ssh_plan, run_forgejo_gpg_key_pair_plan,
-    run_forgejo_ssh_key_plan, run_plan, AddPlan, CommonSourceArgs, ForgejoGpgKeyPairPlan,
-    ForgejoSshKeyPlan, SourceKind,
+    run_forgejo_ssh_key_plan, run_plan,
 };
 use crate::render::{
-    default_forgejo_age_name, ForgejoTarget, GeneratorSpec, HomeTarget, SharedHomeTarget,
-    SystemTarget, TargetSpec,
+    ForgejoTarget, GeneratorSpec, HomeTarget, SharedHomeTarget, SystemTarget, TargetSpec,
+    default_forgejo_age_name,
 };
 
 #[derive(Subcommand, Debug)]
@@ -1087,7 +1087,7 @@ fn validate_passphrase_length(length: u32) -> Result<()> {
 mod tests {
     use super::*;
     use crate::env::TestEnv;
-    use crate::render::{default_forgejo_ssh_key_age_name, Stack};
+    use crate::render::{Stack, default_forgejo_ssh_key_age_name};
 
     fn hm_base() -> HmBaseArgs {
         HmBaseArgs {
@@ -1613,11 +1613,12 @@ mod tests {
             algorithm: "ed25519".to_string(),
             exec: ExecutionArgs::default(),
         };
-        assert!(ssh
-            .build_plan(&TestEnv)
-            .unwrap_err()
-            .to_string()
-            .contains("does not accept --file"));
+        assert!(
+            ssh.build_plan(&TestEnv)
+                .unwrap_err()
+                .to_string()
+                .contains("does not accept --file")
+        );
 
         let file = HmFileArgs {
             target: hm_shared_base(),
@@ -1627,11 +1628,12 @@ mod tests {
             exec: ExecutionArgs::default(),
         };
         let source = file_source_kind(&file.source);
-        assert!(file
-            .build_plan(&source, &TestEnv)
-            .unwrap_err()
-            .to_string()
-            .contains("does not accept --file"));
+        assert!(
+            file.build_plan(&source, &TestEnv)
+                .unwrap_err()
+                .to_string()
+                .contains("does not accept --file")
+        );
     }
 
     #[test]
@@ -1643,11 +1645,12 @@ mod tests {
             algorithm: "ed25519".to_string(),
             exec: ExecutionArgs::default(),
         };
-        assert!(ssh
-            .build_plan(&TestEnv)
-            .unwrap_err()
-            .to_string()
-            .contains("requires --file"));
+        assert!(
+            ssh.build_plan(&TestEnv)
+                .unwrap_err()
+                .to_string()
+                .contains("requires --file")
+        );
 
         let file = HmFileArgs {
             target: hm_base(),
@@ -1657,11 +1660,12 @@ mod tests {
             exec: ExecutionArgs::default(),
         };
         let source = file_source_kind(&file.source);
-        assert!(file
-            .build_plan(&source, &TestEnv)
-            .unwrap_err()
-            .to_string()
-            .contains("requires --file"));
+        assert!(
+            file.build_plan(&source, &TestEnv)
+                .unwrap_err()
+                .to_string()
+                .contains("requires --file")
+        );
     }
 
     #[test]
