@@ -234,7 +234,11 @@ let
       mkSecret ({
           inherit source generator algorithm length stack;
         }
-        // lib.optionalAttrs (userId != null) {inherit userId;}
+        // (
+          if userId != null
+          then {inherit userId;}
+          else {}
+        )
         // args);
 
     optionalStack = stack: args:
