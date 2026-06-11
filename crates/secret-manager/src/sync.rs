@@ -10,7 +10,7 @@ use crate::sync_targets::{SyncDocument, SyncValue};
 use nix_manager_core::{forge, ui};
 
 /// Read collected sync targets and push each declared value to its
-/// declared forge repository Actions destination. The JSON input comes from
+/// declared forge Actions destinations. The JSON input comes from
 /// `nix eval <flake>#nixosConfigurations.<host>.config.services.secretSync.targets --json`
 /// piped through `collect.nix`.
 ///
@@ -48,7 +48,13 @@ impl SyncArgs {
                 println!("  source: {}", target.value.path());
                 println!("  name:   {}", target.name);
                 for repo in &target.codeberg {
-                    println!("  → codeberg/{}  {}", target.host, repo);
+                    println!("  → codeberg/{} repo  {}", target.host, repo);
+                }
+                for org in &target.codeberg_orgs {
+                    println!("  → codeberg/{} org   {}", target.host, org);
+                }
+                if target.codeberg_user {
+                    println!("  → codeberg/{} user  authenticated", target.host);
                 }
             }
             println!();
@@ -70,7 +76,7 @@ impl SyncArgs {
 
             for repo in &target.codeberg {
                 ui::step(format!(
-                    "  codeberg/{} → {} as {}",
+                    "  codeberg/{} repo → {} as {}",
                     target.host, repo, target.name
                 ));
                 match &target.value {
@@ -79,6 +85,41 @@ impl SyncArgs {
                     }
                     SyncValue::Source(_) => {
                         forge::push_codeberg_variable(&target.host, repo, &target.name, &value)?;
+                    }
+                }
+            }
+
+            for org in &target.codeberg_orgs {
+                ui::step(format!(
+                    "  codeberg/{} org → {} as {}",
+                    target.host, org, target.name
+                ));
+                match &target.value {
+                    SyncValue::Secret(_) => {
+                        push_codeberg_organization_secret(&target.host, org, &target.name, &value)?;
+                    }
+                    SyncValue::Source(_) => {
+                        push_codeberg_organization_variable(
+                            &target.host,
+                            org,
+                            &target.name,
+                            &value,
+                        )?;
+                    }
+                }
+            }
+
+            if target.codeberg_user {
+                ui::step(format!(
+                    "  codeberg/{} user → authenticated as {}",
+                    target.host, target.name
+                ));
+                match &target.value {
+                    SyncValue::Secret(_) => {
+                        push_codeberg_user_secret(&target.host, &target.name, &value)?;
+                    }
+                    SyncValue::Source(_) => {
+                        push_codeberg_user_variable(&target.host, &target.name, &value)?;
                     }
                 }
             }
@@ -126,6 +167,164 @@ fn read_plaintext_source(store: &Store, source: &str) -> Result<String> {
     Ok(value)
 }
 
+fn codeberg_client(host: &str, bearer: &str) -> Result<forgejo_api::sync::Forgejo> {
+    let base_url = url::Url::parse(&format!("https://{host}"))
+        .map_err(|e| anyhow::anyhow!("invalid host `{host}`: {e}"))?;
+
+    forgejo_api::sync::Forgejo::new(forgejo_api::Auth::Token(bearer), base_url)
+        .map_err(|e| anyhow::anyhow!("failed to create forgejo client for {host}: {e}"))
+}
+
+fn push_codeberg_organization_secret(host: &str, org: &str, name: &str, value: &str) -> Result<()> {
+    ui::step(format!(
+        "codeberg/{host}: setting `{name}` organization secret on {org}"
+    ));
+    let bearer = forge::codeberg_bearer_token(host)?;
+    let api = codeberg_client(host, &bearer)?;
+
+    api.update_org_secret(
+        org,
+        name,
+        forgejo_api::structs::CreateOrUpdateSecretOption {
+            data: value.to_string(),
+        },
+    )
+    .send()
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "failed to set organization secret `{name}` on {host}/{org}: {e}\n\
+             check that the stored token can manage organization Actions secrets for {org}"
+        )
+    })?;
+
+    Ok(())
+}
+
+fn push_codeberg_organization_variable(
+    host: &str,
+    org: &str,
+    name: &str,
+    value: &str,
+) -> Result<()> {
+    ui::step(format!(
+        "codeberg/{host}: setting `{name}` organization variable on {org}"
+    ));
+    let bearer = forge::codeberg_bearer_token(host)?;
+    let api = codeberg_client(host, &bearer)?;
+
+    let update = api
+        .update_org_variable(
+            org,
+            name,
+            forgejo_api::structs::UpdateVariableOption {
+                name: None,
+                value: value.to_string(),
+            },
+        )
+        .send();
+
+    if let Err(err) = update {
+        if !is_not_found(&err) {
+            return Err(anyhow::anyhow!(
+                "failed to update organization variable `{name}` on {host}/{org}: {err}\n\
+                 check that the stored token can manage organization Actions variables for {org}"
+            ));
+        }
+
+        api.create_org_variable(
+            org,
+            name,
+            forgejo_api::structs::CreateVariableOption {
+                value: value.to_string(),
+            },
+        )
+        .send()
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "failed to create organization variable `{name}` on {host}/{org}: {e}\n\
+                 check that the stored token can manage organization Actions variables for {org}"
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
+fn push_codeberg_user_secret(host: &str, name: &str, value: &str) -> Result<()> {
+    ui::step(format!(
+        "codeberg/{host}: setting `{name}` user secret on authenticated user"
+    ));
+    let bearer = forge::codeberg_bearer_token(host)?;
+    let api = codeberg_client(host, &bearer)?;
+
+    api.update_user_secret(
+        name,
+        forgejo_api::structs::CreateOrUpdateSecretOption {
+            data: value.to_string(),
+        },
+    )
+    .send()
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "failed to set user secret `{name}` on {host}: {e}\n\
+             check that the stored token can manage authenticated-user Actions secrets"
+        )
+    })?;
+
+    Ok(())
+}
+
+fn push_codeberg_user_variable(host: &str, name: &str, value: &str) -> Result<()> {
+    ui::step(format!(
+        "codeberg/{host}: setting `{name}` user variable on authenticated user"
+    ));
+    let bearer = forge::codeberg_bearer_token(host)?;
+    let api = codeberg_client(host, &bearer)?;
+
+    let update = api
+        .update_user_variable(
+            name,
+            forgejo_api::structs::UpdateVariableOption {
+                name: None,
+                value: value.to_string(),
+            },
+        )
+        .send();
+
+    if let Err(err) = update {
+        if !is_not_found(&err) {
+            return Err(anyhow::anyhow!(
+                "failed to update user variable `{name}` on {host}: {err}\n\
+                 check that the stored token can manage authenticated-user Actions variables"
+            ));
+        }
+
+        api.create_user_variable(
+            name,
+            forgejo_api::structs::CreateVariableOption {
+                value: value.to_string(),
+            },
+        )
+        .send()
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "failed to create user variable `{name}` on {host}: {e}\n\
+                 check that the stored token can manage authenticated-user Actions variables"
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
+fn is_not_found(err: &forgejo_api::ForgejoError) -> bool {
+    matches!(
+        err,
+        forgejo_api::ForgejoError::ApiError(api)
+            if matches!(api.error_kind(), forgejo_api::ApiErrorKind::NotFound { .. })
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,12 +338,16 @@ mod tests {
           "secret": "age/secrets/my-app-token.age",
           "name": "MY_APP_TOKEN",
           "codeberg": ["caniko/my-repo"],
+          "codebergOrgs": ["caniko"],
+          "codebergUser": true,
           "host": "codeberg.org"
         },
         "deploy-key": {
           "source": "age/secrets/deploy-key.pub",
           "name": "DEPLOY_KEY",
           "codeberg": ["caniko/my-repo", "caniko/other-repo"],
+          "codebergOrgs": ["infra"],
+          "codebergUser": false,
           "host": "git.example.com"
         }
       }
@@ -158,20 +361,33 @@ mod tests {
         assert_eq!(doc.total_targets(), 2);
 
         // Verify target expansion and per-target host handling
-        let mut targets: Vec<(&str, &str, &str, &str, &str)> = doc
+        let mut targets: Vec<(&str, &str, &str, &str, &str, &str)> = doc
             .iter_targets()
             .flat_map(|(_, _name, target)| {
                 let host: &str = &target.host;
                 let source: &str = target.value.path();
                 let kind: &str = target.value.kind();
                 let secret_name: &str = &target.name;
-                target
+                let repos = target
                     .codeberg
                     .iter()
-                    .map(move |repo| (kind, host, source, secret_name, repo.as_str()))
+                    .map(move |repo| (kind, host, source, secret_name, "repo", repo.as_str()));
+                let orgs = target
+                    .codeberg_orgs
+                    .iter()
+                    .map(move |org| (kind, host, source, secret_name, "org", org.as_str()));
+                let user = target.codeberg_user.then_some((
+                    kind,
+                    host,
+                    source,
+                    secret_name,
+                    "user",
+                    "authenticated",
+                ));
+                repos.chain(orgs).chain(user)
             })
             .collect();
-        targets.sort_by_key(|t| (t.3, t.4));
+        targets.sort_by_key(|t| (t.3, t.4, t.5));
 
         assert_eq!(
             targets,
@@ -181,6 +397,15 @@ mod tests {
                     "git.example.com",
                     "age/secrets/deploy-key.pub",
                     "DEPLOY_KEY",
+                    "org",
+                    "infra"
+                ),
+                (
+                    "variable",
+                    "git.example.com",
+                    "age/secrets/deploy-key.pub",
+                    "DEPLOY_KEY",
+                    "repo",
                     "caniko/my-repo"
                 ),
                 (
@@ -188,6 +413,7 @@ mod tests {
                     "git.example.com",
                     "age/secrets/deploy-key.pub",
                     "DEPLOY_KEY",
+                    "repo",
                     "caniko/other-repo"
                 ),
                 (
@@ -195,7 +421,24 @@ mod tests {
                     "codeberg.org",
                     "age/secrets/my-app-token.age",
                     "MY_APP_TOKEN",
+                    "org",
+                    "caniko"
+                ),
+                (
+                    "secret",
+                    "codeberg.org",
+                    "age/secrets/my-app-token.age",
+                    "MY_APP_TOKEN",
+                    "repo",
                     "caniko/my-repo"
+                ),
+                (
+                    "secret",
+                    "codeberg.org",
+                    "age/secrets/my-app-token.age",
+                    "MY_APP_TOKEN",
+                    "user",
+                    "authenticated"
                 ),
             ],
             "dry-run planning should expand all codeberg repos per target, \

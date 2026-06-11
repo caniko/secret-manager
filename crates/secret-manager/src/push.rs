@@ -2,8 +2,9 @@ use anyhow::{Result, bail};
 use clap::Args;
 use std::path::PathBuf;
 
+use crate::age;
 use crate::store::{Store, resolve_against};
-use nix_manager_core::{age, forge, ui};
+use nix_manager_core::{forge, ui};
 
 /// Decrypt an agenix-encrypted secret and push it to repository Actions
 /// secret stores (Codeberg/Forgejo and/or GitHub). The plaintext only ever
@@ -81,7 +82,11 @@ impl DecryptArgs {
     }
 }
 
-pub(crate) fn decrypt_store_secret(store: &Store, secret: &str, identities: &[PathBuf]) -> Result<String> {
+pub(crate) fn decrypt_store_secret(
+    store: &Store,
+    secret: &str,
+    identities: &[PathBuf],
+) -> Result<String> {
     let secret_path = resolve_against(&store.root, &PathBuf::from(secret));
     if !secret_path.is_file() {
         bail!("{} does not exist", secret_path.display());

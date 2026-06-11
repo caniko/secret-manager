@@ -30,8 +30,8 @@ enum Command {
     /// List every *.age file tracked in the repo.
     List,
 
-    /// Read collected sync targets and push each declared secret to its
-    /// declared forge repository Actions secrets.
+    /// Read collected sync targets and push each declared value to its
+    /// declared forge Actions destinations.
     Sync(sync::SyncArgs),
 
     /// Decrypt an agenix secret and push it to repo Actions secret stores

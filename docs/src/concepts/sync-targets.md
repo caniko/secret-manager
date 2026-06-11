@@ -6,7 +6,7 @@ stores and plaintext non-secret values to Codeberg/Forgejo Actions variables.
 Sync targets are **declared declaratively** via Nix module options — the
 `services.secretSync` namespace — rather than passed as ad-hoc CLI flags.
 A host must opt in with `enable = true`; its targets are then collected into
-a JSON document that `secret-manager sync` reads (coming in Phase 03).
+a JSON document that `secret-manager sync` reads.
 
 ## Declaring sync targets
 
@@ -24,10 +24,18 @@ a JSON document that `secret-manager sync` reads (coming in Phase 03).
         codeberg = ["caniko/my-repo"];
       };
 
+      "org-token" = {
+        secret       = "age/secrets/org-token.age";
+        name         = "ORG_TOKEN";
+        codebergOrgs = ["caniko"];
+      };
+
       "public-key" = {
-        source   = "age/secrets/public-key.asc";
-        name     = "PUBLIC_KEY";
-        codeberg = ["caniko/my-repo" "caniko/other-repo"];
+        source       = "age/secrets/public-key.asc";
+        name         = "PUBLIC_KEY";
+        codeberg     = ["caniko/my-repo" "caniko/other-repo"];
+        codebergOrgs = ["caniko"];
+        codebergUser = true;
       };
     };
   };
@@ -36,13 +44,15 @@ a JSON document that `secret-manager sync` reads (coming in Phase 03).
 
 ## Target fields
 
-| Option    | Type           | Default          | Description                                    |
-|-----------|----------------|------------------|------------------------------------------------|
-| `secret`  | `null or str`  | `null`           | `.age` path pushed as an Actions secret        |
-| `source`  | `null or str`  | `null`           | plaintext path pushed as an Actions variable   |
-| `name`    | `str`          | required         | Actions secret/variable name                   |
-| `codeberg`| `list of str`  | `[]`             | `owner/repo` targets on Codeberg/Forgejo       |
-| `host`    | `str`          | `"codeberg.org"` | Forge host for Codeberg/Forgejo token lookup   |
+| Option         | Type          | Default          | Description                                      |
+|----------------|---------------|------------------|--------------------------------------------------|
+| `secret`       | `null or str` | `null`           | `.age` path pushed as an Actions secret          |
+| `source`       | `null or str` | `null`           | plaintext path pushed as an Actions variable     |
+| `name`         | `str`         | required         | Actions secret/variable name                     |
+| `codeberg`     | `list of str` | `[]`             | `owner/repo` repository targets                  |
+| `codebergOrgs` | `list of str` | `[]`             | organization/account-scope targets               |
+| `codebergUser` | `bool`        | `false`          | authenticated-user account-scope target          |
+| `host`         | `str`         | `"codeberg.org"` | Forge host for Codeberg/Forgejo token lookup     |
 
 Each target must set exactly one of `secret` or `source`.
 
@@ -54,8 +64,9 @@ address different concerns:
 
 - **mkSecret delivery:** how a decrypted secret reaches a consumer **on the host**
   (as an environment variable, file, or systemd LoadCredential).
-- **Sync targets:** which external forge repositories receive the plaintext
-  as an Actions secret.
+- **Sync targets:** which external forge repositories, organizations, or
+  authenticated-user account scopes receive a decrypted agenix value as an
+  Actions secret, or a plaintext source file as an Actions variable.
 
 A single agenix secret can have both local delivery *and* remote sync targets,
 neither, or either.
@@ -74,12 +85,16 @@ document of the shape:
           "secret": "age/secrets/ci-token.age",
           "name": "CI_TOKEN",
           "codeberg": ["caniko/my-repo"],
+          "codebergOrgs": ["caniko"],
+          "codebergUser": true,
           "host": "codeberg.org"
         },
         "public-key": {
           "source": "age/secrets/public-key.asc",
           "name": "PUBLIC_KEY",
           "codeberg": ["caniko/my-repo"],
+          "codebergOrgs": ["caniko"],
+          "codebergUser": false,
           "host": "codeberg.org"
         }
       }

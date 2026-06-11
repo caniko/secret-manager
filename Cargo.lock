@@ -1199,10 +1199,13 @@ dependencies = [
  "anyhow",
  "base64",
  "clap",
+ "forgejo-api",
  "nix-manager-core",
  "rand 0.8.6",
  "serde",
  "serde_json",
+ "tempfile",
+ "url",
  "walkdir",
 ]
 

@@ -7,6 +7,7 @@
 //! thin shim over this library.
 
 pub mod add;
+pub mod age;
 pub mod env;
 pub mod io;
 pub mod legacy;

@@ -20,18 +20,24 @@ pub struct HostSyncConfig {
 }
 
 /// A single declarative sync target — push one value to one or more forge
-/// repositories. Encrypted agenix values become Actions secrets; plaintext
+/// destinations. Encrypted agenix values become Actions secrets; plaintext
 /// source files become Actions variables.
 #[derive(Debug)]
 pub struct SyncTarget {
     /// Source of the value to synchronize.
     pub value: SyncValue,
 
-    /// Name of the Actions secret or variable to set on each target repository.
+    /// Name of the Actions secret or variable to set on each target.
     pub name: String,
 
     /// Codeberg/Forgejo repositories (owner/repo) to push to.
     pub codeberg: Vec<String>,
+
+    /// Codeberg/Forgejo organizations to push to at account scope.
+    pub codeberg_orgs: Vec<String>,
+
+    /// Whether to push to the authenticated user's account scope.
+    pub codeberg_user: bool,
 
     /// Forge host for Codeberg/Forgejo token resolution.
     pub host: String,
@@ -77,6 +83,10 @@ impl<'de> Deserialize<'de> for SyncTarget {
             name: String,
             #[serde(default)]
             codeberg: Vec<String>,
+            #[serde(default, rename = "codebergOrgs")]
+            codeberg_orgs: Vec<String>,
+            #[serde(default, rename = "codebergUser")]
+            codeberg_user: bool,
             #[serde(default = "default_host")]
             host: String,
         }
@@ -101,6 +111,8 @@ impl<'de> Deserialize<'de> for SyncTarget {
             value,
             name: raw.name,
             codeberg: raw.codeberg,
+            codeberg_orgs: raw.codeberg_orgs,
+            codeberg_user: raw.codeberg_user,
             host: raw.host,
         })
     }
@@ -125,7 +137,7 @@ impl SyncDocument {
 
     /// Return an iterator over `(host_index, target_name, &SyncTarget)`.
     ///
-    /// This is the primary accessor for the sync command (Phase 03).
+    /// This is the primary accessor for the sync command.
     pub fn iter_targets(&self) -> impl Iterator<Item = (usize, &str, &SyncTarget)> + '_ {
         self.hosts.iter().enumerate().flat_map(|(host_idx, host)| {
             host.targets
@@ -190,12 +202,16 @@ mod tests {
           "secret": "age/secrets/my-app-token.age",
           "name": "MY_APP_TOKEN",
           "codeberg": ["caniko/my-repo"],
+          "codebergOrgs": ["caniko"],
+          "codebergUser": true,
           "host": "codeberg.org"
         },
         "public-key": {
           "source": "age/secrets/public-key.asc",
           "name": "PUBLIC_KEY",
           "codeberg": ["caniko/my-repo", "caniko/other-repo"],
+          "codebergOrgs": ["caniko"],
+          "codebergUser": false,
           "host": "codeberg.org"
         }
       }
@@ -217,6 +233,8 @@ mod tests {
         );
         assert_eq!(t1.name, "MY_APP_TOKEN");
         assert_eq!(t1.codeberg, vec!["caniko/my-repo"]);
+        assert_eq!(t1.codeberg_orgs, vec!["caniko"]);
+        assert!(t1.codeberg_user);
         assert_eq!(t1.host, "codeberg.org");
 
         // Second target
@@ -227,6 +245,8 @@ mod tests {
         );
         assert_eq!(t2.name, "PUBLIC_KEY");
         assert_eq!(t2.codeberg, vec!["caniko/my-repo", "caniko/other-repo"]);
+        assert_eq!(t2.codeberg_orgs, vec!["caniko"]);
+        assert!(!t2.codeberg_user);
         assert_eq!(t2.host, "codeberg.org");
     }
 
@@ -263,6 +283,8 @@ mod tests {
         let doc: SyncDocument = serde_json::from_str(json).unwrap();
         let t = doc.hosts[0].targets.get("minimal").unwrap();
         assert!(t.codeberg.is_empty());
+        assert!(t.codeberg_orgs.is_empty());
+        assert!(!t.codeberg_user);
         assert_eq!(t.host, "codeberg.org");
     }
 
@@ -285,7 +307,30 @@ mod tests {
             SyncValue::Source("age/secrets/public.asc".to_string())
         );
         assert!(t.codeberg.is_empty());
+        assert!(t.codeberg_orgs.is_empty());
+        assert!(!t.codeberg_user);
         assert_eq!(t.host, "codeberg.org");
+    }
+
+    #[test]
+    fn account_scope_destinations_deserialize() {
+        let json = r#"{
+          "hosts": [{
+            "targets": {
+              "account": {
+                "secret": "age/secrets/account.age",
+                "name": "ACCOUNT_SECRET",
+                "codebergOrgs": ["caniko", "infra"],
+                "codebergUser": true
+              }
+            }
+          }]
+        }"#;
+        let doc: SyncDocument = serde_json::from_str(json).unwrap();
+        let t = doc.hosts[0].targets.get("account").unwrap();
+        assert!(t.codeberg.is_empty());
+        assert_eq!(t.codeberg_orgs, vec!["caniko", "infra"]);
+        assert!(t.codeberg_user);
     }
 
     #[test]

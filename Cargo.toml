@@ -14,9 +14,12 @@ nix-manager-core = { git = "https://codeberg.org/caniko/nix-manager-core.git", r
 anyhow = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
+forgejo-api = { version = "0.10", default-features = false, features = ["sync", "rustls-tls"] }
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tempfile = "3"
+url = "2"
 walkdir = "2"
 
 [workspace.metadata.crane]

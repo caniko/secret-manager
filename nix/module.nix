@@ -36,7 +36,7 @@
         type = lib.types.str;
         description = ''
           Name of the Actions secret or variable to set on each target
-          repository. Workflows reference this name at runtime.
+          destination. Workflows reference this name at runtime.
         '';
         example = "MY_CI_TOKEN";
       };
@@ -46,11 +46,33 @@
         default = [];
         description = ''
           Codeberg repositories (in `owner/repo` format) to push this
-          secret to. Repeats for multiple repos.
+          value to. Repeats for multiple repos.
           Auth: `$CODEBERG_TOKEN`, falling back to the forgejo-cli token
           at `~/.local/share/forgejo-cli/<host>/TOKEN`.
         '';
         example = ["caniko/my-repo"];
+      };
+
+      codebergOrgs = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [];
+        description = ''
+          Codeberg/Forgejo organization names to push this value to at
+          organization Actions scope. Repeats for multiple organizations.
+          Auth: `$CODEBERG_TOKEN`, falling back to the forgejo-cli token
+          at `~/.local/share/forgejo-cli/<host>/TOKEN`.
+        '';
+        example = ["caniko"];
+      };
+
+      codebergUser = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Whether to push this value to the authenticated user's Actions
+          account scope on the selected Forge host.
+        '';
+        example = true;
       };
 
       host = lib.mkOption {
@@ -59,7 +81,7 @@
         description = ''
           Forge host for Codeberg/Forgejo token resolution. The token is
           read from `~/.local/share/forgejo-cli/<host>/TOKEN`.
-          Only meaningful when `codeberg` is non-empty.
+          Only meaningful when a Codeberg/Forgejo destination is configured.
         '';
         example = "codeberg.org";
       };
@@ -87,7 +109,8 @@ in {
         to the store operator. Targets with `secret` declare one agenix secret
         that should be pushed as an Actions secret; targets with `source`
         declare one plaintext non-secret file that should be pushed as an
-        Actions variable.
+        Actions variable. Destinations may be repositories, organizations, the
+        authenticated user's account scope, or any combination of those.
       '';
     };
   };

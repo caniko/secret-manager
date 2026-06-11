@@ -117,6 +117,21 @@ secret-manager push <SECRET.age> \
   --identity <IDENTITY.pub>
 ```
 
+### `sync` — Push declared sync targets
+
+Read a collected `services.secretSync` JSON document and push each declared
+target to Codeberg/Forgejo repository, organization, or authenticated-user
+Actions scopes. Encrypted `secret` targets are pushed as Actions secrets;
+plaintext `source` targets are pushed as Actions variables.
+
+```sh
+secret-manager sync --config sync-targets.json \
+  --identity <IDENTITY.pub>
+```
+
+Use `--dry-run` to print the planned pushes without decrypting or contacting
+the forge. If `--config` is omitted, `sync` reads the JSON document from stdin.
+
 ### `decrypt` — Decrypt to stdout
 
 Decrypt an agenix secret and print plaintext to stdout.
