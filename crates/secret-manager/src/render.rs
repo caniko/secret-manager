@@ -24,6 +24,7 @@ pub enum SourceExpr {
 pub enum GeneratorSpec {
     Passphrase { length: u32 },
     SshKey { algorithm: String },
+    GpgKeyPair { user_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,6 +213,12 @@ fn render_generator(generator: Option<&GeneratorSpec>) -> String {
             format!(
                 "      generator = \"ssh-key\";\n      algorithm = \"{}\";\n",
                 nix_string(algorithm)
+            )
+        }
+        Some(GeneratorSpec::GpgKeyPair { user_id }) => {
+            format!(
+                "      generator = \"gpg-key-pair\";\n      userId = \"{}\";\n",
+                nix_string(user_id)
             )
         }
     }

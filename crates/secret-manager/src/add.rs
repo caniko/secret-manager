@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow, bail};
+use anyhow::{anyhow, bail, Result};
 use clap::{Args, Subcommand};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -6,12 +6,13 @@ use std::path::PathBuf;
 use crate::env::StoreEnv;
 use crate::io::{default_slug, validate_ident, validate_slug, validate_unit_name};
 use crate::plan::{
-    AddPlan, CommonSourceArgs, ForgejoSshKeyPlan, SourceKind, build_forgejo_ssh_plan,
-    run_forgejo_ssh_key_plan, run_plan,
+    build_forgejo_gpg_key_pair_plan, build_forgejo_ssh_plan, run_forgejo_gpg_key_pair_plan,
+    run_forgejo_ssh_key_plan, run_plan, AddPlan, CommonSourceArgs, ForgejoGpgKeyPairPlan,
+    ForgejoSshKeyPlan, SourceKind,
 };
 use crate::render::{
-    ForgejoTarget, GeneratorSpec, HomeTarget, SharedHomeTarget, SystemTarget, TargetSpec,
-    default_forgejo_age_name,
+    default_forgejo_age_name, ForgejoTarget, GeneratorSpec, HomeTarget, SharedHomeTarget,
+    SystemTarget, TargetSpec,
 };
 
 #[derive(Subcommand, Debug)]
@@ -42,6 +43,9 @@ pub enum NixosCmd {
 pub enum ForgejoCmd {
     /// Generate or refresh a Forgejo Actions SSH deploy key source.
     Ssh(ForgejoSshArgs),
+    /// Generate, adopt, or refresh an OpenPGP signing key source.
+    #[command(name = "gpg-key-pair")]
+    GpgKeyPair(ForgejoGpgKeyPairArgs),
     /// Generate a passphrase and expose it as a runner credential.
     Password(ForgejoPasswordArgs),
     /// Encrypt text from stdin or --from-file and expose it as a runner credential.
@@ -313,6 +317,41 @@ pub struct ForgejoSshArgs {
 
 #[derive(Args, Debug)]
 #[command(arg_required_else_help = true)]
+pub struct ForgejoGpgKeyPairArgs {
+    /// Secret slug used for the agenix source path.
+    #[arg(long)]
+    pub name: String,
+
+    /// Forgejo Actions secret name for the private key.
+    #[arg(long)]
+    pub cred: String,
+
+    /// Module-secret directory under age/secrets/modules.
+    #[arg(long = "module-dir", default_value = "repos/apt")]
+    pub module_dir: String,
+
+    /// User ID for newly generated OpenPGP keys.
+    #[arg(long = "user-id")]
+    pub user_id: Option<String>,
+
+    /// Read an armored OpenPGP private key from this plaintext file.
+    #[arg(long = "from-file", conflicts_with = "from_age")]
+    pub from_file: Option<PathBuf>,
+
+    /// Adopt an existing encrypted .age file containing an armored OpenPGP private key.
+    #[arg(long = "from-age", conflicts_with = "from_file")]
+    pub from_age: Option<PathBuf>,
+
+    /// Rotate the private key instead of preserving an existing one.
+    #[arg(long, default_value_t = false)]
+    pub rotate: bool,
+
+    #[command(flatten)]
+    pub exec: ExecutionArgs,
+}
+
+#[derive(Args, Debug)]
+#[command(arg_required_else_help = true)]
 pub struct ForgejoPasswordArgs {
     /// Secret slug used for the agenix source path.
     #[arg(long)]
@@ -405,6 +444,7 @@ impl ForgejoCmd {
     pub fn run(self) -> Result<()> {
         match self {
             ForgejoCmd::Ssh(args) => args.run(),
+            ForgejoCmd::GpgKeyPair(args) => args.run(),
             ForgejoCmd::Password(args) => args.run(),
             ForgejoCmd::Text(args) => args.run(),
             ForgejoCmd::File(args) => args.run(),
@@ -733,6 +773,25 @@ impl ForgejoSshArgs {
     }
 }
 
+impl ForgejoGpgKeyPairArgs {
+    pub fn run(self) -> Result<()> {
+        let plan = self.build_plan()?;
+        run_forgejo_gpg_key_pair_plan(&plan, self.exec.no_stage, self.exec.no_rekey)
+    }
+
+    fn build_plan(&self) -> Result<ForgejoGpgKeyPairPlan> {
+        build_forgejo_gpg_key_pair_plan(
+            &self.name,
+            &self.cred,
+            &self.module_dir,
+            self.user_id.as_deref(),
+            self.from_file.clone(),
+            self.from_age.clone(),
+            self.rotate,
+        )
+    }
+}
+
 impl ForgejoPasswordArgs {
     pub fn run(self) -> Result<()> {
         let plan = self.build_plan()?;
@@ -1028,7 +1087,7 @@ fn validate_passphrase_length(length: u32) -> Result<()> {
 mod tests {
     use super::*;
     use crate::env::TestEnv;
-    use crate::render::{Stack, default_forgejo_ssh_key_age_name};
+    use crate::render::{default_forgejo_ssh_key_age_name, Stack};
 
     fn hm_base() -> HmBaseArgs {
         HmBaseArgs {
@@ -1428,6 +1487,44 @@ mod tests {
     }
 
     #[test]
+    fn forgejo_gpg_key_pair_defaults_to_repos_apt_source_only_path() {
+        let args = ForgejoGpgKeyPairArgs {
+            name: "modde-apt-repo-gpg-key".to_string(),
+            cred: "modde_apt_repo_gpg_key".to_string(),
+            module_dir: "repos/apt".to_string(),
+            user_id: None,
+            from_file: None,
+            from_age: Some(PathBuf::from(
+                "age/secrets/modules/repos/apt/modde-apt-repo-gpg-key.age",
+            )),
+            rotate: false,
+            exec: ExecutionArgs::default(),
+        };
+        let plan = args.build_plan().unwrap();
+        assert_eq!(
+            plan.secret_path,
+            PathBuf::from("age/secrets/modules/repos/apt/modde-apt-repo-gpg-key.age")
+        );
+        assert_eq!(plan.credential_name, "modde_apt_repo_gpg_key");
+    }
+
+    #[test]
+    fn forgejo_gpg_key_pair_rejects_public_metadata_slugs() {
+        let args = ForgejoGpgKeyPairArgs {
+            name: "modde-apt-repo-gpg-key-id".to_string(),
+            cred: "modde_apt_repo_gpg_key_id".to_string(),
+            module_dir: "repos/apt".to_string(),
+            user_id: None,
+            from_file: None,
+            from_age: None,
+            rotate: false,
+            exec: ExecutionArgs::default(),
+        };
+        let err = args.build_plan().unwrap_err();
+        assert!(err.to_string().contains("public GPG metadata"));
+    }
+
+    #[test]
     fn forgejo_ssh_injected_instances_are_sorted_and_deduped() {
         let args = ForgejoSshArgs {
             name: "aur-ssh-key".to_string(),
@@ -1516,12 +1613,11 @@ mod tests {
             algorithm: "ed25519".to_string(),
             exec: ExecutionArgs::default(),
         };
-        assert!(
-            ssh.build_plan(&TestEnv)
-                .unwrap_err()
-                .to_string()
-                .contains("does not accept --file")
-        );
+        assert!(ssh
+            .build_plan(&TestEnv)
+            .unwrap_err()
+            .to_string()
+            .contains("does not accept --file"));
 
         let file = HmFileArgs {
             target: hm_shared_base(),
@@ -1531,12 +1627,11 @@ mod tests {
             exec: ExecutionArgs::default(),
         };
         let source = file_source_kind(&file.source);
-        assert!(
-            file.build_plan(&source, &TestEnv)
-                .unwrap_err()
-                .to_string()
-                .contains("does not accept --file")
-        );
+        assert!(file
+            .build_plan(&source, &TestEnv)
+            .unwrap_err()
+            .to_string()
+            .contains("does not accept --file"));
     }
 
     #[test]
@@ -1548,12 +1643,11 @@ mod tests {
             algorithm: "ed25519".to_string(),
             exec: ExecutionArgs::default(),
         };
-        assert!(
-            ssh.build_plan(&TestEnv)
-                .unwrap_err()
-                .to_string()
-                .contains("requires --file")
-        );
+        assert!(ssh
+            .build_plan(&TestEnv)
+            .unwrap_err()
+            .to_string()
+            .contains("requires --file"));
 
         let file = HmFileArgs {
             target: hm_base(),
@@ -1563,12 +1657,11 @@ mod tests {
             exec: ExecutionArgs::default(),
         };
         let source = file_source_kind(&file.source);
-        assert!(
-            file.build_plan(&source, &TestEnv)
-                .unwrap_err()
-                .to_string()
-                .contains("requires --file")
-        );
+        assert!(file
+            .build_plan(&source, &TestEnv)
+            .unwrap_err()
+            .to_string()
+            .contains("requires --file"));
     }
 
     #[test]

@@ -8,6 +8,7 @@ Codeberg/Forgejo CI credential stores.
 | Subcommand  | Source               | Delivery                        |
 |-------------|----------------------|---------------------------------|
 | `ssh`       | Generated Ed25519    | Runner credential or source only |
+| `gpg-key-pair` | Generated or adopted OpenPGP private key | Source only plus public metadata |
 | `password`  | Generated passphrase | Runner credential               |
 | `text`      | Plaintext from stdin/file | Runner credential          |
 | `file`      | Plaintext or existing `.age` | Runner credential       |
@@ -32,6 +33,21 @@ secret-manager forgejo ssh \
 
 The public key is printed to stdout and embedded as a Nix comment in the
 generated module.
+
+## GPG key pair
+
+Store only the armored OpenPGP private key as an agenix secret. The command
+derives plaintext `.asc` and `.fingerprint` files beside the encrypted source.
+
+```sh
+secret-manager forgejo gpg-key-pair \
+  --name modde-apt-repo-gpg-key \
+  --cred modde_apt_repo_gpg_key \
+  --from-age age/secrets/modules/repos/apt/modde-apt-repo-gpg-key.age
+```
+
+New keys are generated when neither `--from-age` nor `--from-file` is passed.
+Use `--rotate` to replace an existing private-key source.
 
 ## Passphrase credential
 

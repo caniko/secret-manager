@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow, bail};
+use anyhow::{anyhow, bail, Result};
 use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -7,12 +7,13 @@ use std::path::{Path, PathBuf};
 use nix_manager_core::exec;
 
 use crate::io::{
-    TempDir, adopt_age_file, display_rel, encrypt_plaintext_to_age, read_plaintext,
+    adopt_age_file, display_rel, encrypt_plaintext_to_age, read_plaintext,
     read_plaintext_editor_when_tty, splice_import, stage_and_rekey, validate_ident, validate_slug,
+    TempDir,
 };
 use crate::render::{
-    GeneratorSpec, LIB_BINDING, RenderedModule, TargetSpec, camel,
-    default_forgejo_ssh_key_age_name, nix_string, render_modules,
+    camel, default_forgejo_ssh_key_age_name, nix_string, render_modules, GeneratorSpec,
+    RenderedModule, TargetSpec, LIB_BINDING,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -46,6 +47,24 @@ pub struct ForgejoSshKeyPlan {
     pub pubkey_var: String,
     pub rotate: bool,
     pub target: TargetSpec,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GpgKeyPairSource {
+    Generate,
+    FromFile(PathBuf),
+    FromAge(PathBuf),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForgejoGpgKeyPairPlan {
+    pub slug: String,
+    pub credential_name: String,
+    pub module_dir: String,
+    pub user_id: String,
+    pub source: GpgKeyPairSource,
+    pub rotate: bool,
+    pub secret_path: PathBuf,
 }
 
 pub fn run_plan(args: &CommonSourceArgs, plan: AddPlan) -> Result<()> {
@@ -85,6 +104,138 @@ pub fn run_plan(args: &CommonSourceArgs, plan: AddPlan) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+pub fn build_forgejo_gpg_key_pair_plan(
+    name: &str,
+    cred: &str,
+    module_dir: &str,
+    user_id: Option<&str>,
+    from_file: Option<PathBuf>,
+    from_age: Option<PathBuf>,
+    rotate: bool,
+) -> Result<ForgejoGpgKeyPairPlan> {
+    validate_slug(name)?;
+    validate_ident(cred, "cred")?;
+    validate_module_dir(module_dir)?;
+    validate_gpg_key_pair_slug(name)?;
+
+    let source = match (from_file, from_age) {
+        (Some(path), None) => GpgKeyPairSource::FromFile(path),
+        (None, Some(path)) => GpgKeyPairSource::FromAge(path),
+        (None, None) => GpgKeyPairSource::Generate,
+        (Some(_), Some(_)) => bail!("--from-file and --from-age are mutually exclusive"),
+    };
+
+    let user_id = user_id
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{name} <{name}@secrets.invalid>"));
+    if user_id.trim().is_empty() {
+        bail!("--user-id must not be empty");
+    }
+
+    Ok(ForgejoGpgKeyPairPlan {
+        slug: name.to_string(),
+        credential_name: cred.to_string(),
+        module_dir: module_dir.trim_matches('/').to_string(),
+        user_id,
+        source,
+        rotate,
+        secret_path: PathBuf::from(format!(
+            "age/secrets/modules/{}/{}.age",
+            module_dir.trim_matches('/'),
+            name
+        )),
+    })
+}
+
+pub fn run_forgejo_gpg_key_pair_plan(
+    plan: &ForgejoGpgKeyPairPlan,
+    no_stage: bool,
+    no_rekey: bool,
+) -> Result<()> {
+    let repo_root = std::env::current_dir()?;
+    let secret_path = repo_root.join(&plan.secret_path);
+    let public_path = secret_path.with_extension("asc");
+    let fingerprint_path = secret_path.with_extension("fingerprint");
+
+    if let Some(parent) = secret_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let should_write_private = plan.rotate || !secret_path.exists();
+    if should_write_private {
+        match &plan.source {
+            GpgKeyPairSource::Generate => {
+                let private_key = generate_gpg_private_key(&plan.user_id)?;
+                encrypt_plaintext_to_age(&secret_path, &private_key)?;
+            }
+            GpgKeyPairSource::FromFile(path) => {
+                let private_key = read_plaintext(Some(path))?;
+                validate_armored_private_gpg_key(&private_key)?;
+                encrypt_plaintext_to_age(&secret_path, &private_key)?;
+            }
+            GpgKeyPairSource::FromAge(path) => {
+                if path == &plan.secret_path || repo_root.join(path) == secret_path {
+                    if !secret_path.exists() {
+                        bail!(
+                            "--from-age points at {}, but that destination does not exist",
+                            display_rel(&repo_root, &secret_path)
+                        );
+                    }
+                } else {
+                    adopt_age_file(&repo_root, path, &secret_path, false)?;
+                }
+            }
+        }
+    } else {
+        eprintln!(
+            "preserving existing private key source: {}",
+            display_rel(&repo_root, &secret_path)
+        );
+    }
+
+    let private_key = view_age_secret(&plan.secret_path)?;
+    validate_armored_private_gpg_key(&private_key)?;
+    let public = derive_gpg_public_metadata(&private_key)?;
+    fs::write(&public_path, &public.public_key)?;
+    fs::write(&fingerprint_path, format!("{}\n", public.fingerprint))?;
+
+    let mut paths = vec![secret_path, public_path, fingerprint_path];
+    paths.sort();
+    stage_paths(&repo_root, &paths, no_stage)?;
+
+    if should_write_private && !no_rekey {
+        exec::run("agenix", ["rekey", "-a"])?;
+    } else if should_write_private {
+        eprintln!();
+        eprintln!("skipped rekey — run `agenix rekey -a` before deploying.");
+    }
+
+    eprintln!();
+    eprintln!("private key Actions secret: {}", plan.credential_name);
+    eprintln!(
+        "private key source: {}",
+        display_rel(&repo_root, &repo_root.join(&plan.secret_path))
+    );
+    eprintln!(
+        "public key: {}",
+        display_rel(
+            &repo_root,
+            &repo_root.join(&plan.secret_path).with_extension("asc")
+        )
+    );
+    eprintln!(
+        "fingerprint: {}",
+        display_rel(
+            &repo_root,
+            &repo_root
+                .join(&plan.secret_path)
+                .with_extension("fingerprint")
+        )
+    );
+    println!("{}", public.fingerprint);
     Ok(())
 }
 
@@ -583,6 +734,195 @@ fn validate_nix_identifier(value: &str, label: &str) -> Result<()> {
         bail!("{label} `{value}` must use ASCII alphanumerics or `_`");
     }
     Ok(())
+}
+
+fn validate_module_dir(value: &str) -> Result<()> {
+    let trimmed = value.trim_matches('/');
+    if trimmed.is_empty() {
+        bail!("--module-dir must not be empty");
+    }
+    if trimmed
+        .split('/')
+        .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        bail!("--module-dir `{value}` must be a relative module-secret directory");
+    }
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/'))
+    {
+        bail!("--module-dir `{value}` must use ASCII alphanumerics, '-', '_', or '/'");
+    }
+    Ok(())
+}
+
+fn validate_gpg_key_pair_slug(slug: &str) -> Result<()> {
+    let lower = slug.to_ascii_lowercase();
+    if lower.ends_with("-id")
+        || lower.ends_with("-key-id")
+        || lower.ends_with("-fingerprint")
+        || lower.ends_with("-public-key")
+        || lower.ends_with("-pub")
+    {
+        bail!("`{slug}` looks like public GPG metadata; only the private key should be encrypted");
+    }
+    Ok(())
+}
+
+fn validate_armored_private_gpg_key(value: &str) -> Result<()> {
+    if !value.contains("-----BEGIN PGP PRIVATE KEY BLOCK-----") {
+        bail!("expected an ASCII-armored OpenPGP private key");
+    }
+    Ok(())
+}
+
+fn view_age_secret(secret_path: &Path) -> Result<String> {
+    let rel = secret_path.display().to_string();
+    exec::capture("agenix", ["view", rel.as_str()])
+}
+
+fn generate_gpg_private_key(user_id: &str) -> Result<String> {
+    let tmp = TempDir::new()?;
+    let gnupg = tmp.path.join("gnupg");
+    fs::create_dir_all(&gnupg)?;
+    fs::set_permissions(&gnupg, fs::Permissions::from_mode(0o700))?;
+    run_with_env(
+        "gpg",
+        [
+            "--batch",
+            "--pinentry-mode",
+            "loopback",
+            "--passphrase",
+            "",
+            "--quick-generate-key",
+            user_id,
+            "rsa4096",
+            "sign",
+            "0",
+        ],
+        [("GNUPGHOME", gnupg.as_os_str())],
+    )?;
+    let metadata = export_gpg_public_metadata(&gnupg)?;
+    capture_with_env(
+        "gpg",
+        [
+            "--batch",
+            "--pinentry-mode",
+            "loopback",
+            "--passphrase",
+            "",
+            "--armor",
+            "--export-secret-keys",
+            &metadata.fingerprint,
+        ],
+        [("GNUPGHOME", gnupg.as_os_str())],
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GpgPublicMetadata {
+    fingerprint: String,
+    public_key: String,
+}
+
+fn derive_gpg_public_metadata(private_key: &str) -> Result<GpgPublicMetadata> {
+    let tmp = TempDir::new()?;
+    let gnupg = tmp.path.join("gnupg");
+    fs::create_dir_all(&gnupg)?;
+    fs::set_permissions(&gnupg, fs::Permissions::from_mode(0o700))?;
+    let key_path = tmp.path.join("private.asc");
+    fs::write(&key_path, private_key)?;
+    fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600))?;
+    run_with_env(
+        "gpg",
+        [
+            "--batch",
+            "--import",
+            key_path
+                .to_str()
+                .ok_or_else(|| anyhow!("non-utf8 tmp key path"))?,
+        ],
+        [("GNUPGHOME", gnupg.as_os_str())],
+    )?;
+    export_gpg_public_metadata(&gnupg)
+}
+
+fn export_gpg_public_metadata(gnupg: &Path) -> Result<GpgPublicMetadata> {
+    let listing = capture_with_env(
+        "gpg",
+        ["--batch", "--with-colons", "--list-secret-keys"],
+        [("GNUPGHOME", gnupg.as_os_str())],
+    )?;
+    let fingerprint = listing
+        .lines()
+        .find_map(|line| {
+            let fields = line.split(':').collect::<Vec<_>>();
+            if fields.first() == Some(&"fpr") {
+                fields.get(9).map(|value| value.to_string())
+            } else {
+                None
+            }
+        })
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("gpg import produced no secret-key fingerprint"))?;
+    let public_key = capture_with_env(
+        "gpg",
+        ["--batch", "--armor", "--export", &fingerprint],
+        [("GNUPGHOME", gnupg.as_os_str())],
+    )?;
+    if !public_key.contains("-----BEGIN PGP PUBLIC KEY BLOCK-----") {
+        bail!("gpg public-key export did not produce an armored public key");
+    }
+    Ok(GpgPublicMetadata {
+        fingerprint,
+        public_key,
+    })
+}
+
+fn run_with_env<I, S, K, V>(
+    program: &str,
+    args: I,
+    envs: impl IntoIterator<Item = (K, V)>,
+) -> Result<()>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+    K: AsRef<std::ffi::OsStr>,
+    V: AsRef<std::ffi::OsStr>,
+{
+    let captured = exec::cap_with_env(program, args, envs);
+    if captured.ok() {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "{program} exited with status {}: {}",
+            captured.exit_code,
+            captured.stderr.trim()
+        ))
+    }
+}
+
+fn capture_with_env<I, S, K, V>(
+    program: &str,
+    args: I,
+    envs: impl IntoIterator<Item = (K, V)>,
+) -> Result<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+    K: AsRef<std::ffi::OsStr>,
+    V: AsRef<std::ffi::OsStr>,
+{
+    let captured = exec::cap_with_env(program, args, envs);
+    if captured.ok() {
+        Ok(captured.stdout.trim().to_string())
+    } else {
+        Err(anyhow!(
+            "{program} exited with status {}: {}",
+            captured.exit_code,
+            captured.stderr.trim()
+        ))
+    }
 }
 
 fn touched_paths(

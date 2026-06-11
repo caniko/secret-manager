@@ -5,6 +5,7 @@ let
     source,
     generator ? null,
     algorithm ? "ed25519",
+    userId ? name,
     length ? 32,
     owner ? null,
     group ? null,
@@ -68,6 +69,8 @@ let
         else if algorithm == "rsa"
         then "ssh-rsa-pub"
         else throw "mkSecret ${name}: ssh algorithm must be ed25519|rsa"
+      else if generator == "gpg-key-pair"
+      then "gpg-key-pair"
       else throw "mkSecret ${name}: unknown generator ${generator}";
 
     core = {
@@ -221,6 +224,7 @@ let
     source,
     generator ? null,
     algorithm ? "ed25519",
+    userId ? null,
     length ? 32,
     home ? null,
     system ? null,
@@ -230,6 +234,7 @@ let
       mkSecret ({
           inherit source generator algorithm length stack;
         }
+        // lib.optionalAttrs (userId != null) {inherit userId;}
         // args);
 
     optionalStack = stack: args:

@@ -75,6 +75,7 @@ Add an agenix secret for Forgejo Actions or runner credentials.
 | Command    | Description                                      |
 |------------|--------------------------------------------------|
 | `ssh`      | Generate or refresh a Forgejo Actions SSH deploy key |
+| `gpg-key-pair` | Generate or adopt an OpenPGP private key and derive public metadata |
 | `password` | Generate a passphrase as a runner credential       |
 | `text`     | Encrypt text as a runner credential               |
 | `file`     | Encrypt a file payload as a runner credential      |
@@ -87,6 +88,8 @@ Add an agenix secret for Forgejo Actions or runner credentials.
 | `--cred <NAME>`          | Runner credential name                             |
 | `--instance <INSTANCE>`  | Runner instance (repeatable)                       |
 | `--pubkey-var <VAR>`     | Nix variable name for the generated public key     |
+| `--module-dir <DIR>`     | Module-secret directory for `gpg-key-pair` sources |
+| `--user-id <UID>`        | OpenPGP user ID for newly generated keys           |
 | `--rotate`               | Force SSH key rotation                             |
 | `--from-file <PATH>`     | Read plaintext from file                          |
 | `--from-age <PATH>`      | Adopt an existing encrypted .age file              |
