@@ -1,54 +1,73 @@
 //! age decryption with identity fallback.
 //!
-//! [`decrypt_with_identities`] tries each identity in turn with
-//! `rage --decrypt --identity <path>`. stderr / stdin stay on the terminal so
-//! hardware-key PIN/touch prompts work; only stdout (the plaintext) is captured.
-//! A single trailing newline is stripped because agenix payloads are commonly
-//! newline-terminated, while downstream secret stores expect the bare value.
+//! [`decrypt_with_identities`] passes every candidate identity to one
+//! `rage --decrypt` invocation. stderr / stdin stay on the terminal so
+//! hardware-key PIN/touch prompts work; only stdout (the plaintext) is
+//! captured. A single trailing newline is stripped because agenix payloads are
+//! commonly newline-terminated, while downstream secret stores expect the bare
+//! value.
 
 use anyhow::{Result, anyhow, bail};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use nix_manager_core::ui;
 
-/// Try each identity in turn with `rage --decrypt`. The first successful
-/// decryption wins. Returns the plaintext with one trailing newline stripped.
+/// Decrypt with all identities passed to one `rage --decrypt` invocation.
+/// Returns the plaintext with one trailing newline stripped.
 pub fn decrypt_with_identities(secret: &Path, identities: &[PathBuf]) -> Result<String> {
-    let mut last_err = None;
-    for identity in identities {
-        ui::step(format!(
-            "decrypting {} with {}",
-            secret.display(),
-            identity.display()
-        ));
-        let out = Command::new("rage")
-            .arg("--decrypt")
-            .arg("--identity")
-            .arg(identity)
-            .arg(secret)
-            .stdin(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .output()
-            .map_err(|e| anyhow!("failed to spawn rage: {e}"))?;
-        if out.status.success() {
-            let mut value = String::from_utf8(out.stdout)
-                .map_err(|_| anyhow!("decrypted payload is not valid UTF-8"))?;
-            if value.ends_with('\n') {
-                value.pop();
-            }
-            if value.is_empty() {
-                bail!("decrypted payload is empty");
-            }
-            return Ok(value);
-        }
-        last_err = Some(anyhow!(
-            "rage --decrypt --identity {} exited with {}",
-            identity.display(),
-            out.status
-        ));
+    if identities.is_empty() {
+        bail!("no identities attempted");
     }
-    Err(last_err.unwrap_or_else(|| anyhow!("no identities attempted")))
+
+    ui::step(format!(
+        "decrypting {} with {}",
+        secret.display(),
+        describe_identities(identities)
+    ));
+    let out = Command::new("rage")
+        .args(rage_decrypt_args(secret, identities))
+        .stdin(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .output()
+        .map_err(|e| anyhow!("failed to spawn rage: {e}"))?;
+    if !out.status.success() {
+        bail!(
+            "rage --decrypt with identities {} exited with {}. Check that the matching hardware key is present and touch it when prompted.",
+            describe_identities(identities),
+            out.status
+        );
+    }
+
+    let mut value = String::from_utf8(out.stdout)
+        .map_err(|_| anyhow!("decrypted payload is not valid UTF-8"))?;
+    if value.ends_with('\n') {
+        value.pop();
+    }
+    if value.is_empty() {
+        bail!("decrypted payload is empty");
+    }
+    Ok(value)
+}
+
+fn rage_decrypt_args(secret: &Path, identities: &[PathBuf]) -> Vec<OsString> {
+    let mut args = Vec::with_capacity(1 + identities.len() * 2 + 1);
+    args.push(OsString::from("--decrypt"));
+    for identity in identities {
+        args.push(OsString::from("--identity"));
+        args.push(identity.as_os_str().to_owned());
+    }
+    args.push(secret.as_os_str().to_owned());
+    args
+}
+
+fn describe_identities(identities: &[PathBuf]) -> String {
+    identities
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(test)]
@@ -123,6 +142,40 @@ mod tests {
 
         let result = decrypt_with_identities(&encrypted, &[f.identity]).unwrap();
         assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn builds_single_rage_command_with_multiple_identities() {
+        let secret = PathBuf::from("secret.age");
+        let first = PathBuf::from("age/master-a-identity.pub");
+        let second = PathBuf::from("age/master_b_identity.pub");
+
+        let args = rage_decrypt_args(&secret, &[first.clone(), second.clone()]);
+
+        assert_eq!(
+            args,
+            vec![
+                OsString::from("--decrypt"),
+                OsString::from("--identity"),
+                first.into_os_string(),
+                OsString::from("--identity"),
+                second.into_os_string(),
+                secret.into_os_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn decrypts_with_second_identity_in_single_rage_invocation() {
+        let wrong = setup_fixture();
+        let right = setup_fixture();
+        let dir = tempfile::tempdir().unwrap();
+        let encrypted = encrypt(&right.pub_key, "matched second\n", &dir);
+
+        let result =
+            decrypt_with_identities(&encrypted, &[wrong.identity, right.identity]).unwrap();
+
+        assert_eq!(result, "matched second");
     }
 
     #[test]
