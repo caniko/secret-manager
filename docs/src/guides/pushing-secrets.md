@@ -23,8 +23,9 @@ Diagnostics and hardware-key prompts stay on stderr.
 
 ## Authentication
 
-- **Codeberg**: `$CODEBERG_TOKEN`, falling back to the forgejo-cli token at
-  `~/.local/share/forgejo-cli/codeberg.org/TOKEN` (set up with `fj auth login`).
+- **Codeberg**: the `fj` auth store at
+  `${XDG_DATA_HOME:-$HOME/.local/share}/forgejo-cli/keys.json` (set up with
+  `fj auth login --host codeberg.org` or `fj auth add-key <user>`).
 - **GitHub**: requires `gh` authenticated.
 
 ## Identity resolution
