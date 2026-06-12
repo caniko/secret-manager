@@ -48,7 +48,7 @@
           Codeberg repositories (in `owner/repo` format) to push this
           value to. Repeats for multiple repos.
           Auth comes from `fj` at
-          `${XDG_DATA_HOME:-$HOME/.local/share}/forgejo-cli/keys.json`.
+          `''${XDG_DATA_HOME:-$HOME/.local/share}/forgejo-cli/keys.json`.
         '';
         example = ["caniko/my-repo"];
       };
@@ -60,7 +60,7 @@
           Codeberg/Forgejo organization names to push this value to at
           organization Actions scope. Repeats for multiple organizations.
           Auth comes from `fj` at
-          `${XDG_DATA_HOME:-$HOME/.local/share}/forgejo-cli/keys.json`.
+          `''${XDG_DATA_HOME:-$HOME/.local/share}/forgejo-cli/keys.json`.
         '';
         example = ["caniko"];
       };
