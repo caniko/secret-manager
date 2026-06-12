@@ -30,10 +30,20 @@ Diagnostics and hardware-key prompts stay on stderr.
 
 ## Identity resolution
 
-By default, the engine discovers master identity stubs from
-`age/master-*.pub` in the store root. Pass explicit identities with
-`--identity`:
+Identities are resolved in precedence order:
+
+1. Explicit `--identity` flags (repeatable).
+2. The `SECRET_MANAGER_AGE_IDENTITIES` environment variable — a
+   colon-separated list of identity paths, mirroring the DNS flow's
+   `CANIX_DNS_AGE_IDENTITIES` contract.
+3. Master identity stubs discovered from `age/master-*.pub` /
+   `age/master_*.pub` in the store root.
+
+Relative paths resolve against the store root.
 
 ```sh
 secret-manager decrypt secret.age --identity age/my-key.pub
+# or, once per shell:
+export SECRET_MANAGER_AGE_IDENTITIES=age/master_nitro3c_identity.pub:age/master_nitro3_2_identity.pub
+secret-manager sync
 ```

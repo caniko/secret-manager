@@ -29,7 +29,8 @@ pub struct PushArgs {
     pub github: Vec<String>,
 
     /// age identity file for decryption. Repeat to try several. Defaults to
-    /// the store's master identities (hardware key; rage will prompt).
+    /// SECRET_MANAGER_AGE_IDENTITIES (colon-separated), then the store's
+    /// master identities (hardware key; rage will prompt).
     #[arg(long = "identity", value_name = "PATH")]
     pub identities: Vec<PathBuf>,
 }
@@ -43,7 +44,8 @@ pub struct DecryptArgs {
     pub secret: String,
 
     /// age identity file for decryption. Repeat to try several. Defaults to
-    /// the store's master identities (hardware key; rage will prompt).
+    /// SECRET_MANAGER_AGE_IDENTITIES (colon-separated), then the store's
+    /// master identities (hardware key; rage will prompt).
     #[arg(long = "identity", value_name = "PATH")]
     pub identities: Vec<PathBuf>,
 }
@@ -98,19 +100,7 @@ pub(crate) fn decrypt_store_secret(
         );
     }
 
-    let identities: Vec<PathBuf> = if identities.is_empty() {
-        store.master_identities()
-    } else {
-        identities
-            .iter()
-            .map(|p| resolve_against(&store.root, p))
-            .collect()
-    };
-    let identities: Vec<PathBuf> = identities.into_iter().filter(|p| p.is_file()).collect();
-    if identities.is_empty() {
-        bail!("no usable age identity files found — pass --identity");
-    }
-
+    let identities = store.resolve_identities(identities)?;
     let value = age::decrypt_with_identities(&secret_path, &identities)?;
     if value.is_empty() {
         bail!("decrypted payload is empty");

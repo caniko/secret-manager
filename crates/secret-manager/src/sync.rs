@@ -38,7 +38,8 @@ pub struct SyncArgs {
     pub no_flake: bool,
 
     /// age identity file(s) for decryption.
-    /// Repeatable. Defaults to the store's master identities.
+    /// Repeatable. Defaults to SECRET_MANAGER_AGE_IDENTITIES
+    /// (colon-separated), then the store's master identities.
     #[arg(long = "identity", value_name = "PATH")]
     pub identities: Vec<PathBuf>,
 
