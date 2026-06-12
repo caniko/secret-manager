@@ -125,12 +125,23 @@ Actions scopes. Encrypted `secret` targets are pushed as Actions secrets;
 plaintext `source` targets are pushed as Actions variables.
 
 ```sh
-secret-manager sync --config sync-targets.json \
-  --identity <IDENTITY.pub>
+secret-manager sync --dry-run
+secret-manager sync --identity <IDENTITY.pub>
 ```
 
-Use `--dry-run` to print the planned pushes without decrypting or contacting
-the forge. If `--config` is omitted, `sync` reads the JSON document from stdin.
+By default, `sync` discovers the nearest flake root and evaluates that flake's
+`secret-manager.lib.collect` output over `nixosConfigurations`. Use `--dry-run`
+to print the planned pushes without decrypting or contacting the forge.
+
+For portable scripts, pass an explicit collected JSON document:
+
+```sh
+secret-manager sync --config sync-targets.json --identity <IDENTITY.pub>
+```
+
+If `--config` is omitted and stdin is not a terminal, `sync` reads the JSON
+document from stdin. Pass `--no-flake` to disable flake auto-detection and
+require one of those explicit input paths.
 
 `sync` records the remote Actions secrets and variables it manages in
 `<secret-store>/.secret-manager/sync-state.toml` by default. Pass

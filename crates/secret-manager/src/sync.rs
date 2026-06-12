@@ -1,22 +1,22 @@
-use anyhow::{Result, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::Args;
 use std::fs;
 use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
+use std::process::Command;
 
 use crate::push::decrypt_store_secret;
-use crate::store::{Store, resolve_against};
+use crate::store::{resolve_against, Store};
 use crate::sync_state::{
-    ManagedKind, ManagedRecord, Scope, SyncState, desired_records, retained_without_prune,
-    stale_records,
+    desired_records, retained_without_prune, stale_records, ManagedKind, ManagedRecord, Scope,
+    SyncState,
 };
 use crate::sync_targets::{SyncDocument, SyncValue};
 use nix_manager_core::{forge, ui};
 
 /// Read collected sync targets and push each declared value to its
-/// declared forge Actions destinations. The JSON input comes from
-/// `nix eval <flake>#nixosConfigurations.<host>.config.services.secretSync.targets --json`
-/// piped through `collect.nix`.
+/// declared forge Actions destinations. When no explicit JSON input is passed,
+/// the nearest flake is evaluated via `secret-manager.lib.collect`.
 ///
 /// Encrypted agenix values are pushed as Actions secrets. Plaintext source
 /// files are pushed as Actions variables. Reuses the same auth resolution as `push`:
@@ -24,9 +24,18 @@ use nix_manager_core::{forge, ui};
 #[derive(Args)]
 pub struct SyncArgs {
     /// Path to the collected sync-targets JSON document.
-    /// If omitted, reads from stdin (for piping `nix eval` output).
+    /// If omitted, reads stdin when piped, otherwise auto-collects from a flake.
     #[arg(long, value_name = "PATH")]
     pub config: Option<PathBuf>,
+
+    /// Flake root or flake reference to collect sync targets from.
+    /// Defaults to the nearest flake root when no explicit JSON input is present.
+    #[arg(long, value_name = "FLAKE")]
+    pub flake: Option<String>,
+
+    /// Disable flake auto-collection; require --config or piped JSON.
+    #[arg(long)]
+    pub no_flake: bool,
 
     /// age identity file(s) for decryption.
     /// Repeatable. Defaults to the store's master identities.
@@ -169,22 +178,110 @@ impl SyncArgs {
             Some(path) => SyncDocument::from_path(path).map_err(Into::into),
             None => {
                 let stdin = std::io::stdin();
-                if stdin.is_terminal() {
-                    anyhow::bail!("no input — pipe a JSON document or pass --config <path>");
+                if !stdin.is_terminal() {
+                    let mut buf = String::new();
+                    stdin
+                        .lock()
+                        .read_to_string(&mut buf)
+                        .map_err(|e| anyhow!("reading stdin: {e}"))?;
+                    if !buf.trim().is_empty() {
+                        return SyncDocument::from_json(&buf).map_err(Into::into);
+                    }
                 }
 
-                let mut buf = String::new();
-                stdin
-                    .lock()
-                    .read_to_string(&mut buf)
-                    .map_err(|e| anyhow::anyhow!("reading stdin: {e}"))?;
-                if buf.trim().is_empty() {
-                    anyhow::bail!("no input — pipe a JSON document or pass --config <path>");
+                if self.no_flake {
+                    bail!(NO_INPUT);
                 }
-                SyncDocument::from_json(&buf).map_err(Into::into)
+
+                let flake = self.resolve_flake()?;
+                let json = collect_flake_sync_targets(&flake)?;
+                SyncDocument::from_json(&json).map_err(Into::into)
             }
         }
     }
+
+    fn resolve_flake(&self) -> Result<FlakeRef> {
+        if let Some(flake) = &self.flake {
+            return Ok(FlakeRef::Explicit(flake.clone()));
+        }
+        Store::discover()
+            .map(|store| FlakeRef::Path(store.root))
+            .map_err(|e| anyhow!("{NO_INPUT}: {e}"))
+    }
+}
+
+const NO_INPUT: &str =
+    "no input — pipe JSON, pass --config, or run from a flake with secret-manager.lib.collect";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FlakeRef {
+    Path(PathBuf),
+    Explicit(String),
+}
+
+impl FlakeRef {
+    fn label(&self) -> String {
+        match self {
+            FlakeRef::Path(path) => path.display().to_string(),
+            FlakeRef::Explicit(flake) => flake.clone(),
+        }
+    }
+
+    fn nix_expr(&self) -> String {
+        let flake_ref = match self {
+            FlakeRef::Path(path) => format!("(toString {})", nix_path_literal(path)),
+            FlakeRef::Explicit(flake) => nix_string(flake),
+        };
+        format!(
+            "let flake = builtins.getFlake {flake_ref}; in flake.inputs.secret-manager.lib.collect {{ inherit (flake) nixosConfigurations; }}"
+        )
+    }
+}
+
+fn collect_flake_sync_targets(flake: &FlakeRef) -> Result<String> {
+    ui::step(format!("collecting sync targets from {}", flake.label()));
+    let output = Command::new("nix")
+        .args([
+            "eval",
+            "--json",
+            "--impure",
+            "--expr",
+            &flake.nix_expr(),
+            "--accept-flake-config",
+            "--no-update-lock-file",
+        ])
+        .output()
+        .map_err(|e| anyhow!("failed to spawn nix: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("attribute 'secret-manager' missing")
+            || stderr.contains("attribute 'collect' missing")
+            || stderr.contains("attribute 'lib' missing")
+        {
+            bail!(
+                "flake {} does not expose inputs.secret-manager.lib.collect; \
+                 add the secret-manager input or pass --config <path>\n{}",
+                flake.label(),
+                stderr.trim()
+            );
+        }
+        bail!(
+            "nix eval failed while collecting sync targets from {}\n{}",
+            flake.label(),
+            stderr.trim()
+        );
+    }
+
+    String::from_utf8(output.stdout).context("nix eval returned non-UTF-8 JSON")
+}
+
+fn nix_string(value: &str) -> String {
+    serde_json::to_string(value).expect("JSON string encoding is infallible")
+}
+
+fn nix_path_literal(path: &std::path::Path) -> String {
+    path.to_string_lossy().replace(' ', "\\ ")
 }
 
 fn default_state_path(store: &Store) -> PathBuf {
@@ -657,6 +754,8 @@ mod tests {
 
         let args = SyncArgs {
             config: Some(path),
+            flake: None,
+            no_flake: false,
             identities: vec![],
             dry_run: true,
             prune: false,
@@ -665,6 +764,38 @@ mod tests {
         // Just verify load_document succeeds — dry-run doesn't need a store
         let doc = args.load_document().unwrap();
         assert_eq!(doc.total_targets(), 2);
+    }
+
+    #[test]
+    fn flake_path_expression_uses_secret_manager_collect() {
+        let flake = FlakeRef::Path(PathBuf::from("/tmp/example-flake"));
+        let expr = flake.nix_expr();
+        assert!(expr.contains("builtins.getFlake (toString /tmp/example-flake)"));
+        assert!(expr.contains("flake.inputs.secret-manager.lib.collect"));
+        assert!(expr.contains("inherit (flake) nixosConfigurations"));
+    }
+
+    #[test]
+    fn explicit_flake_reference_is_quoted() {
+        let flake = FlakeRef::Explicit("github:caniko/example".to_string());
+        let expr = flake.nix_expr();
+        assert!(expr.contains(r#"builtins.getFlake "github:caniko/example""#));
+    }
+
+    #[test]
+    fn no_flake_without_config_keeps_explicit_input_error() {
+        let args = SyncArgs {
+            config: None,
+            flake: None,
+            no_flake: true,
+            identities: vec![],
+            dry_run: true,
+            prune: false,
+            state: None,
+        };
+        let err = args.load_document().unwrap_err();
+        assert!(err.to_string().contains("no input"));
+        assert!(err.to_string().contains("--config"));
     }
 
     #[test]

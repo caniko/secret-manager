@@ -110,4 +110,7 @@ document of the shape:
 ```
 
 This JSON is the Nix↔Rust contract. The `secret-manager` binary reads it via
-the `SyncDocument` deserialization type.
+the `SyncDocument` deserialization type. In normal flake-root use,
+`secret-manager sync` evaluates this collection automatically; `--config` and
+piped stdin remain available for scripts that want to provide the JSON
+explicitly.
