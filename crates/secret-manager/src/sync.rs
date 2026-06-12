@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
 use std::fs;
 use std::io::{IsTerminal, Read};
@@ -6,10 +6,10 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use crate::push::decrypt_store_secret;
-use crate::store::{resolve_against, Store};
+use crate::store::{Store, resolve_against};
 use crate::sync_state::{
-    desired_records, retained_without_prune, stale_records, ManagedKind, ManagedRecord, Scope,
-    SyncState,
+    ManagedKind, ManagedRecord, Scope, SyncState, desired_records, retained_without_prune,
+    stale_records,
 };
 use crate::sync_targets::{SyncDocument, SyncValue};
 use nix_manager_core::{forge, ui};
@@ -50,6 +50,10 @@ pub struct SyncArgs {
     #[arg(long)]
     pub prune: bool,
 
+    /// Print diagnostic progress details without exposing secret values.
+    #[arg(long)]
+    pub verbose: bool,
+
     /// Path to the sync state TOML file.
     /// Defaults to <secret-store>/.secret-manager/sync-state.toml.
     #[arg(long, value_name = "PATH")]
@@ -60,14 +64,32 @@ impl SyncArgs {
     pub fn run(self) -> Result<()> {
         let doc = self.load_document()?;
         let total = doc.total_targets();
+        ui::step("discovering secret store");
         let store = Store::discover()?;
+        if self.verbose {
+            ui::info(format!("store root: {}", store.root.display()));
+        }
         let state_path = self
             .state
             .clone()
             .unwrap_or_else(|| default_state_path(&store));
+        ui::step("loading sync state");
+        if self.verbose {
+            ui::info(format!("sync state path: {}", state_path.display()));
+        }
         let previous_state = SyncState::load(&state_path)?.unwrap_or_else(SyncState::empty);
         let desired_state = desired_records(&doc)?;
+        ui::step("checking stale managed entries");
         let stale = stale_records(&previous_state.managed, &desired_state);
+        if stale.is_empty() {
+            ui::step_success("no stale managed entries");
+        } else {
+            ui::step(format!(
+                "found {} stale managed entr{}",
+                stale.len(),
+                plural_y(stale.len())
+            ));
+        }
 
         if self.dry_run {
             println!("Planned pushes (--dry-run):");
@@ -100,6 +122,9 @@ impl SyncArgs {
                 target.value.kind(),
                 target.value.path()
             ));
+            if self.verbose {
+                ui::info(format!("destinations: {}", destination_count(target)));
+            }
 
             let value = sync_value(&store, &target.value, &self.identities)?;
 
@@ -155,10 +180,16 @@ impl SyncArgs {
         }
 
         if self.prune {
+            ui::step(format!(
+                "pruning {} stale managed entr{}",
+                stale.len(),
+                plural_y(stale.len())
+            ));
             for record in &stale {
                 delete_managed_record(record)?;
             }
         } else {
+            ui::step("reporting stale managed entries");
             report_stale_records(&stale);
         }
 
@@ -167,6 +198,10 @@ impl SyncArgs {
         } else {
             retained_without_prune(&previous_state.managed, &desired_state)
         };
+        ui::step("writing sync state");
+        if self.verbose {
+            ui::info(format!("sync state path: {}", state_path.display()));
+        }
         SyncState::new(next_records).write_atomic(&state_path)?;
 
         ui::success(format!("synced {total} target(s)"));
@@ -174,8 +209,11 @@ impl SyncArgs {
     }
 
     fn load_document(&self) -> Result<SyncDocument> {
-        match &self.config {
-            Some(path) => SyncDocument::from_path(path).map_err(Into::into),
+        let doc = match &self.config {
+            Some(path) => {
+                ui::step(format!("reading sync targets from {}", path.display()));
+                SyncDocument::from_path(path).map_err(anyhow::Error::from)
+            }
             None => {
                 let stdin = std::io::stdin();
                 if !stdin.is_terminal() {
@@ -185,7 +223,13 @@ impl SyncArgs {
                         .read_to_string(&mut buf)
                         .map_err(|e| anyhow!("reading stdin: {e}"))?;
                     if !buf.trim().is_empty() {
-                        return SyncDocument::from_json(&buf).map_err(Into::into);
+                        ui::step("reading sync targets from stdin");
+                        if self.verbose {
+                            ui::info(format!("sync JSON bytes: {}", buf.len()));
+                        }
+                        return summarize_document(
+                            SyncDocument::from_json(&buf).map_err(anyhow::Error::from)?,
+                        );
                     }
                 }
 
@@ -194,10 +238,19 @@ impl SyncArgs {
                 }
 
                 let flake = self.resolve_flake()?;
-                let json = collect_flake_sync_targets(&flake)?;
-                SyncDocument::from_json(&json).map_err(Into::into)
+                ui::step(format!(
+                    "auto-collecting sync targets from {}",
+                    flake.label()
+                ));
+                let json = collect_flake_sync_targets(&flake, self.verbose)?;
+                if self.verbose {
+                    ui::info(format!("sync JSON bytes: {}", json.len()));
+                }
+                SyncDocument::from_json(&json).map_err(anyhow::Error::from)
             }
-        }
+        }?;
+
+        summarize_document(doc)
     }
 
     fn resolve_flake(&self) -> Result<FlakeRef> {
@@ -238,22 +291,28 @@ impl FlakeRef {
     }
 }
 
-fn collect_flake_sync_targets(flake: &FlakeRef) -> Result<String> {
-    ui::step(format!("collecting sync targets from {}", flake.label()));
-    let output = Command::new("nix")
-        .args([
-            "eval",
-            "--json",
-            "--impure",
-            "--expr",
-            &flake.nix_expr(),
-            "--accept-flake-config",
-            "--no-update-lock-file",
-        ])
-        .output()
-        .map_err(|e| anyhow!("failed to spawn nix: {e}"))?;
+fn collect_flake_sync_targets(flake: &FlakeRef, verbose: bool) -> Result<String> {
+    ui::step(format!("evaluating sync targets from {}", flake.label()));
+    let args = nix_eval_args(flake);
+    if verbose {
+        ui::info(format!(
+            "nix argv: {:?}",
+            std::iter::once("nix")
+                .chain(args.iter().map(String::as_str))
+                .collect::<Vec<_>>()
+        ));
+    }
+    let pb = ui::spinner(format!("nix eval {}", flake.label()));
+    let output = match Command::new("nix").args(&args).output() {
+        Ok(output) => output,
+        Err(err) => {
+            ui::fail_spinner(pb, "failed to spawn nix");
+            return Err(anyhow!("failed to spawn nix: {err}"));
+        }
+    };
 
     if !output.status.success() {
+        ui::fail_spinner(pb, "nix eval failed");
         let stderr = String::from_utf8_lossy(&output.stderr);
         if stderr.contains("attribute 'secret-manager' missing")
             || stderr.contains("attribute 'collect' missing")
@@ -273,7 +332,20 @@ fn collect_flake_sync_targets(flake: &FlakeRef) -> Result<String> {
         );
     }
 
+    ui::finish_spinner(pb, format!("collected sync targets from {}", flake.label()));
     String::from_utf8(output.stdout).context("nix eval returned non-UTF-8 JSON")
+}
+
+fn nix_eval_args(flake: &FlakeRef) -> Vec<String> {
+    vec![
+        "eval".to_string(),
+        "--json".to_string(),
+        "--impure".to_string(),
+        "--expr".to_string(),
+        flake.nix_expr(),
+        "--accept-flake-config".to_string(),
+        "--no-update-lock-file".to_string(),
+    ]
 }
 
 fn nix_string(value: &str) -> String {
@@ -286,6 +358,43 @@ fn nix_path_literal(path: &std::path::Path) -> String {
 
 fn default_state_path(store: &Store) -> PathBuf {
     store.root.join(".secret-manager").join("sync-state.toml")
+}
+
+fn summarize_document(doc: SyncDocument) -> Result<SyncDocument> {
+    let summary = document_summary(&doc);
+    ui::step_success(format!(
+        "loaded {} enabled host{} with {} sync target{}",
+        summary.hosts,
+        plural_s(summary.hosts),
+        summary.targets,
+        plural_s(summary.targets)
+    ));
+    Ok(doc)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SyncDocumentSummary {
+    hosts: usize,
+    targets: usize,
+}
+
+fn document_summary(doc: &SyncDocument) -> SyncDocumentSummary {
+    SyncDocumentSummary {
+        hosts: doc.hosts.len(),
+        targets: doc.total_targets(),
+    }
+}
+
+fn destination_count(target: &crate::sync_targets::SyncTarget) -> usize {
+    target.codeberg.len() + target.codeberg_orgs.len() + usize::from(target.codeberg_user)
+}
+
+fn plural_s(count: usize) -> &'static str {
+    if count == 1 { "" } else { "s" }
+}
+
+fn plural_y(count: usize) -> &'static str {
+    if count == 1 { "y" } else { "ies" }
 }
 
 fn print_stale_records(stale: &[ManagedRecord], prune: bool) {
@@ -759,6 +868,7 @@ mod tests {
             identities: vec![],
             dry_run: true,
             prune: false,
+            verbose: false,
             state: None,
         };
         // Just verify load_document succeeds — dry-run doesn't need a store
@@ -783,6 +893,65 @@ mod tests {
     }
 
     #[test]
+    fn nix_eval_args_use_secret_manager_collect() {
+        let flake = FlakeRef::Explicit("github:caniko/example".to_string());
+        let args = nix_eval_args(&flake);
+        assert_eq!(args[0], "eval");
+        assert!(args.iter().any(|arg| arg == "--json"));
+        assert!(args.iter().any(|arg| arg == "--no-update-lock-file"));
+        let expr = args
+            .iter()
+            .position(|arg| arg == "--expr")
+            .and_then(|idx| args.get(idx + 1))
+            .expect("--expr should be followed by an expression");
+        assert!(expr.contains("flake.inputs.secret-manager.lib.collect"));
+        assert!(expr.contains("inherit (flake) nixosConfigurations"));
+    }
+
+    #[test]
+    fn sync_args_accept_verbose_flag() {
+        #[derive(clap::Parser)]
+        struct TestCli {
+            #[command(flatten)]
+            sync: SyncArgs,
+        }
+
+        let cli = <TestCli as clap::Parser>::try_parse_from([
+            "test",
+            "--config",
+            "sync-targets.json",
+            "--verbose",
+        ])
+        .unwrap();
+
+        assert!(cli.sync.verbose);
+        assert_eq!(cli.sync.config, Some(PathBuf::from("sync-targets.json")));
+    }
+
+    #[test]
+    fn document_summary_counts_enabled_hosts_and_targets() {
+        let doc: SyncDocument = serde_json::from_str(FIXTURE).unwrap();
+        assert_eq!(
+            document_summary(&doc),
+            SyncDocumentSummary {
+                hosts: 1,
+                targets: 2
+            }
+        );
+    }
+
+    #[test]
+    fn destination_count_counts_repos_orgs_and_user_scope() {
+        let doc: SyncDocument = serde_json::from_str(FIXTURE).unwrap();
+        let mut counts: Vec<(&str, usize)> = doc
+            .iter_targets()
+            .map(|(_, name, target)| (name, destination_count(target)))
+            .collect();
+        counts.sort_by_key(|(name, _)| *name);
+        assert_eq!(counts, vec![("deploy-key", 3), ("my-app-token", 3)]);
+    }
+
+    #[test]
     fn no_flake_without_config_keeps_explicit_input_error() {
         let args = SyncArgs {
             config: None,
@@ -791,6 +960,7 @@ mod tests {
             identities: vec![],
             dry_run: true,
             prune: false,
+            verbose: false,
             state: None,
         };
         let err = args.load_document().unwrap_err();
