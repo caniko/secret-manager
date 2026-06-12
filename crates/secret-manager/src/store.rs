@@ -51,7 +51,7 @@ impl Store {
                 let path = entry.path();
                 let name = entry.file_name();
                 let name = name.to_string_lossy();
-                if name.starts_with("master-") && name.ends_with(".pub") && path.is_file() {
+                if is_master_identity_stub(&name) && path.is_file() {
                     out.push(path);
                 }
             }
@@ -59,6 +59,10 @@ impl Store {
         out.sort();
         out
     }
+}
+
+fn is_master_identity_stub(name: &str) -> bool {
+    (name.starts_with("master-") || name.starts_with("master_")) && name.ends_with(".pub")
 }
 
 /// Resolve a path argument against a base when relative.
@@ -82,6 +86,7 @@ mod tests {
         fs::create_dir_all(&age).unwrap();
         fs::write(age.join("master-b-identity.pub"), "").unwrap();
         fs::write(age.join("master-a-identity.pub"), "").unwrap();
+        fs::write(age.join("master_nitro3c_identity.pub"), "").unwrap();
         fs::write(age.join("not-a-master.pub"), "").unwrap();
         fs::write(age.join("master-c-identity.txt"), "").unwrap();
 
@@ -95,7 +100,11 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec!["master-a-identity.pub", "master-b-identity.pub"]
+            vec![
+                "master-a-identity.pub",
+                "master-b-identity.pub",
+                "master_nitro3c_identity.pub"
+            ]
         );
     }
 
