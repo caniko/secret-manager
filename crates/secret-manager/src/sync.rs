@@ -1,7 +1,7 @@
 use anyhow::{Result, bail};
 use clap::Args;
 use std::fs;
-use std::io::Read;
+use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 
 use crate::push::decrypt_store_secret;
@@ -20,7 +20,7 @@ use nix_manager_core::{forge, ui};
 ///
 /// Encrypted agenix values are pushed as Actions secrets. Plaintext source
 /// files are pushed as Actions variables. Reuses the same auth resolution as `push`:
-/// `$CODEBERG_TOKEN` env var, falling back to the forgejo-cli token file.
+/// the `fj` auth store.
 #[derive(Args)]
 pub struct SyncArgs {
     /// Path to the collected sync-targets JSON document.
@@ -168,8 +168,13 @@ impl SyncArgs {
         match &self.config {
             Some(path) => SyncDocument::from_path(path).map_err(Into::into),
             None => {
+                let stdin = std::io::stdin();
+                if stdin.is_terminal() {
+                    anyhow::bail!("no input — pipe a JSON document or pass --config <path>");
+                }
+
                 let mut buf = String::new();
-                std::io::stdin()
+                stdin
                     .lock()
                     .read_to_string(&mut buf)
                     .map_err(|e| anyhow::anyhow!("reading stdin: {e}"))?;

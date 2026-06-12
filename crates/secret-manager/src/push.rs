@@ -19,8 +19,8 @@ pub struct PushArgs {
     pub name: String,
 
     /// Codeberg repo (owner/repo) to push to. Repeat for multiple repos.
-    /// Auth: `$CODEBERG_TOKEN`, falling back to the forgejo-cli token at
-    /// `~/.local/share/forgejo-cli/codeberg.org/TOKEN` (`fj auth login`).
+    /// Auth: `fj` auth store at
+    /// `${XDG_DATA_HOME:-$HOME/.local/share}/forgejo-cli/keys.json`.
     #[arg(long = "codeberg", value_name = "OWNER/REPO")]
     pub codeberg: Vec<String>,
 
