@@ -13,6 +13,10 @@ nix-manager-core.lib.mkManagerOutputs {
   crateName = "secret-manager";
   rustEdition = "2024";
   srcDir = ../.;
+  extraRuntimePackages = pkgs: [
+    pkgs.age-plugin-fido2-hmac
+    pkgs.rage
+  ];
   extraOutputs = {
     self,
     lib,

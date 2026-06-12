@@ -47,8 +47,8 @@
         description = ''
           Codeberg repositories (in `owner/repo` format) to push this
           value to. Repeats for multiple repos.
-          Auth: `$CODEBERG_TOKEN`, falling back to the forgejo-cli token
-          at `~/.local/share/forgejo-cli/<host>/TOKEN`.
+          Auth comes from `fj` at
+          `${XDG_DATA_HOME:-$HOME/.local/share}/forgejo-cli/keys.json`.
         '';
         example = ["caniko/my-repo"];
       };
@@ -59,8 +59,8 @@
         description = ''
           Codeberg/Forgejo organization names to push this value to at
           organization Actions scope. Repeats for multiple organizations.
-          Auth: `$CODEBERG_TOKEN`, falling back to the forgejo-cli token
-          at `~/.local/share/forgejo-cli/<host>/TOKEN`.
+          Auth comes from `fj` at
+          `${XDG_DATA_HOME:-$HOME/.local/share}/forgejo-cli/keys.json`.
         '';
         example = ["caniko"];
       };
@@ -80,7 +80,7 @@
         default = "codeberg.org";
         description = ''
           Forge host for Codeberg/Forgejo token resolution. The token is
-          read from `~/.local/share/forgejo-cli/<host>/TOKEN`.
+          read from `fj`'s auth store under `hosts.<host>.token`.
           Only meaningful when a Codeberg/Forgejo destination is configured.
         '';
         example = "codeberg.org";
