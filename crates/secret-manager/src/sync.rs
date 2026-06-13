@@ -151,10 +151,15 @@ impl SyncArgs {
                 ));
                 match &target.value {
                     SyncValue::Secret(_) => {
-                        push_codeberg_organization_secret(&target.host, org, &target.name, &value)?;
+                        forge::push_codeberg_organization_secret(
+                            &target.host,
+                            org,
+                            &target.name,
+                            &value,
+                        )?;
                     }
                     SyncValue::Source(_) => {
-                        push_codeberg_organization_variable(
+                        forge::push_codeberg_organization_variable(
                             &target.host,
                             org,
                             &target.name,
@@ -165,16 +170,18 @@ impl SyncArgs {
             }
 
             if target.codeberg_user {
-                ui::step(format!(
-                    "  codeberg/{} user → authenticated as {}",
-                    target.host, target.name
+                let auth = forge::codeberg_auth(&target.host)?;
+                ui::step(user_scope_push_label(
+                    &target.host,
+                    auth.username(),
+                    &target.name,
                 ));
                 match &target.value {
                     SyncValue::Secret(_) => {
-                        push_codeberg_user_secret(&target.host, &target.name, &value)?;
+                        forge::push_codeberg_user_secret(&target.host, &target.name, &value)?;
                     }
                     SyncValue::Source(_) => {
-                        push_codeberg_user_variable(&target.host, &target.name, &value)?;
+                        forge::push_codeberg_user_variable(&target.host, &target.name, &value)?;
                     }
                 }
             }
@@ -469,11 +476,15 @@ fn read_plaintext_source(store: &Store, source: &str) -> Result<String> {
     Ok(value)
 }
 
-fn codeberg_client(host: &str, bearer: &str) -> Result<forgejo_api::sync::Forgejo> {
+fn user_scope_push_label(host: &str, username: &str, name: &str) -> String {
+    format!("  codeberg/{host} user → {username} as {name}")
+}
+
+fn codeberg_client(host: &str, auth: &forge::CodebergAuth) -> Result<forgejo_api::sync::Forgejo> {
     let base_url = url::Url::parse(&format!("https://{host}"))
         .map_err(|e| anyhow::anyhow!("invalid host `{host}`: {e}"))?;
 
-    forgejo_api::sync::Forgejo::new(forgejo_api::Auth::Token(bearer), base_url)
+    forgejo_api::sync::Forgejo::new(auth.forgejo_auth(), base_url)
         .map_err(|e| anyhow::anyhow!("failed to create forgejo client for {host}: {e}"))
 }
 
@@ -485,8 +496,8 @@ fn delete_managed_record(record: &ManagedRecord) -> Result<()> {
         action.description(),
         record.name
     ));
-    let bearer = forge::codeberg_bearer_token(&record.host)?;
-    let api = codeberg_client(&record.host, &bearer)?;
+    let auth = forge::codeberg_auth(&record.host)?;
+    let api = codeberg_client(&record.host, &auth)?;
 
     let result = match action {
         DeleteAction::RepoSecret { owner, repo } => {
@@ -575,148 +586,6 @@ fn kind_label(kind: ManagedKind) -> &'static str {
         ManagedKind::Secret => "secret",
         ManagedKind::Variable => "variable",
     }
-}
-
-fn push_codeberg_organization_secret(host: &str, org: &str, name: &str, value: &str) -> Result<()> {
-    ui::step(format!(
-        "codeberg/{host}: setting `{name}` organization secret on {org}"
-    ));
-    let bearer = forge::codeberg_bearer_token(host)?;
-    let api = codeberg_client(host, &bearer)?;
-
-    api.update_org_secret(
-        org,
-        name,
-        forgejo_api::structs::CreateOrUpdateSecretOption {
-            data: value.to_string(),
-        },
-    )
-    .send()
-    .map_err(|e| {
-        anyhow::anyhow!(
-            "failed to set organization secret `{name}` on {host}/{org}: {e}\n\
-             check that the stored token can manage organization Actions secrets for {org}"
-        )
-    })?;
-
-    Ok(())
-}
-
-fn push_codeberg_organization_variable(
-    host: &str,
-    org: &str,
-    name: &str,
-    value: &str,
-) -> Result<()> {
-    ui::step(format!(
-        "codeberg/{host}: setting `{name}` organization variable on {org}"
-    ));
-    let bearer = forge::codeberg_bearer_token(host)?;
-    let api = codeberg_client(host, &bearer)?;
-
-    let update = api
-        .update_org_variable(
-            org,
-            name,
-            forgejo_api::structs::UpdateVariableOption {
-                name: None,
-                value: value.to_string(),
-            },
-        )
-        .send();
-
-    if let Err(err) = update {
-        if !is_not_found(&err) {
-            return Err(anyhow::anyhow!(
-                "failed to update organization variable `{name}` on {host}/{org}: {err}\n\
-                 check that the stored token can manage organization Actions variables for {org}"
-            ));
-        }
-
-        api.create_org_variable(
-            org,
-            name,
-            forgejo_api::structs::CreateVariableOption {
-                value: value.to_string(),
-            },
-        )
-        .send()
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "failed to create organization variable `{name}` on {host}/{org}: {e}\n\
-                 check that the stored token can manage organization Actions variables for {org}"
-            )
-        })?;
-    }
-
-    Ok(())
-}
-
-fn push_codeberg_user_secret(host: &str, name: &str, value: &str) -> Result<()> {
-    ui::step(format!(
-        "codeberg/{host}: setting `{name}` user secret on authenticated user"
-    ));
-    let bearer = forge::codeberg_bearer_token(host)?;
-    let api = codeberg_client(host, &bearer)?;
-
-    api.update_user_secret(
-        name,
-        forgejo_api::structs::CreateOrUpdateSecretOption {
-            data: value.to_string(),
-        },
-    )
-    .send()
-    .map_err(|e| {
-        anyhow::anyhow!(
-            "failed to set user secret `{name}` on {host}: {e}\n\
-             check that the stored token can manage authenticated-user Actions secrets"
-        )
-    })?;
-
-    Ok(())
-}
-
-fn push_codeberg_user_variable(host: &str, name: &str, value: &str) -> Result<()> {
-    ui::step(format!(
-        "codeberg/{host}: setting `{name}` user variable on authenticated user"
-    ));
-    let bearer = forge::codeberg_bearer_token(host)?;
-    let api = codeberg_client(host, &bearer)?;
-
-    let update = api
-        .update_user_variable(
-            name,
-            forgejo_api::structs::UpdateVariableOption {
-                name: None,
-                value: value.to_string(),
-            },
-        )
-        .send();
-
-    if let Err(err) = update {
-        if !is_not_found(&err) {
-            return Err(anyhow::anyhow!(
-                "failed to update user variable `{name}` on {host}: {err}\n\
-                 check that the stored token can manage authenticated-user Actions variables"
-            ));
-        }
-
-        api.create_user_variable(
-            name,
-            forgejo_api::structs::CreateVariableOption {
-                value: value.to_string(),
-            },
-        )
-        .send()
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "failed to create user variable `{name}` on {host}: {e}\n\
-                 check that the stored token can manage authenticated-user Actions variables"
-            )
-        })?;
-    }
-
-    Ok(())
 }
 
 fn is_not_found(err: &forgejo_api::ForgejoError) -> bool {
@@ -950,6 +819,14 @@ mod tests {
             .collect();
         counts.sort_by_key(|(name, _)| *name);
         assert_eq!(counts, vec![("deploy-key", 3), ("my-app-token", 3)]);
+    }
+
+    #[test]
+    fn user_scope_push_label_names_account_and_secret() {
+        assert_eq!(
+            user_scope_push_label("codeberg.org", "caniko", "CHOCOLATEY_API_KEY"),
+            "  codeberg/codeberg.org user → caniko as CHOCOLATEY_API_KEY"
+        );
     }
 
     #[test]
