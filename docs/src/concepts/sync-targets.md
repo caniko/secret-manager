@@ -50,15 +50,15 @@ only when `sync --prune` is used.
 
 ## Target fields
 
-| Option         | Type          | Default          | Description                                      |
-|----------------|---------------|------------------|--------------------------------------------------|
-| `secret`       | `null or str` | `null`           | `.age` path pushed as an Actions secret          |
-| `source`       | `null or str` | `null`           | plaintext path pushed as an Actions variable     |
-| `name`         | `str`         | required         | Actions secret/variable name                     |
-| `codeberg`     | `list of str` | `[]`             | `owner/repo` repository targets                  |
-| `codebergOrgs` | `list of str` | `[]`             | organization/account-scope targets               |
-| `codebergUser` | `bool`        | `false`          | authenticated-user account-scope target          |
-| `host`         | `str`         | `"codeberg.org"` | Forge host for Codeberg/Forgejo token lookup     |
+| Option         | Type          | Default          | Description                                  |
+| -------------- | ------------- | ---------------- | -------------------------------------------- |
+| `secret`       | `null or str` | `null`           | `.age` path pushed as an Actions secret      |
+| `source`       | `null or str` | `null`           | plaintext path pushed as an Actions variable |
+| `name`         | `str`         | required         | Actions secret/variable name                 |
+| `codeberg`     | `list of str` | `[]`             | `owner/repo` repository targets              |
+| `codebergOrgs` | `list of str` | `[]`             | organization/account-scope targets           |
+| `codebergUser` | `bool`        | `false`          | authenticated-user account-scope target      |
+| `host`         | `str`         | `"codeberg.org"` | Forge host for Codeberg/Forgejo token lookup |
 
 Each target must set exactly one of `secret` or `source`.
 
@@ -74,7 +74,7 @@ address different concerns:
   authenticated-user account scopes receive a decrypted agenix value as an
   Actions secret, or a plaintext source file as an Actions variable.
 
-A single agenix secret can have both local delivery *and* remote sync targets,
+A single agenix secret can have both local delivery _and_ remote sync targets,
 neither, or either.
 
 ## Collection contract

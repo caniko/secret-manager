@@ -5,12 +5,12 @@ targets either a specific user or the shared profile (`--shared`).
 
 ## Secret types
 
-| Subcommand  | Source             | Delivery               |
-|-------------|--------------------|------------------------|
-| `ssh`       | Generated Ed25519  | `--file` path          |
-| `password`  | Generated passphrase | `--env` vars or `--file` |
-| `text`      | Plaintext from stdin/file | `--env` vars      |
-| `file`      | Plaintext or existing `.age` | `--file` path   |
+| Subcommand | Source                       | Delivery                 |
+| ---------- | ---------------------------- | ------------------------ |
+| `ssh`      | Generated Ed25519            | `--file` path            |
+| `password` | Generated passphrase         | `--env` vars or `--file` |
+| `text`     | Plaintext from stdin/file    | `--env` vars             |
+| `file`     | Plaintext or existing `.age` | `--file` path            |
 
 ## SSH key (file delivery)
 

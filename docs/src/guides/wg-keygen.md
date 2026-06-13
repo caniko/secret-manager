@@ -21,6 +21,7 @@ secret-manager rauthy-env age/secrets/hosts/thething/rauthy-env.age
 ```
 
 This generates:
+
 - Encryption keys (via `rauthy generate-enc-key`)
 - Cluster secrets (via `rauthy generate-secrets`)
 - An Argon2id password hash (interactive prompt)

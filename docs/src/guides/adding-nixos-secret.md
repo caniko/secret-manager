@@ -5,12 +5,12 @@ specific host via `--host`.
 
 ## Secret types
 
-| Subcommand  | Source             | Delivery                     |
-|-------------|--------------------|------------------------------|
-| `ssh`       | Generated Ed25519  | `--file` path                |
-| `password`  | Generated passphrase | `--env` + `--service` or `--file` |
-| `text`      | Plaintext from stdin/file | `--env` + `--service`   |
-| `file`      | Plaintext or existing `.age` | `--file` path          |
+| Subcommand | Source                       | Delivery                          |
+| ---------- | ---------------------------- | --------------------------------- |
+| `ssh`      | Generated Ed25519            | `--file` path                     |
+| `password` | Generated passphrase         | `--env` + `--service` or `--file` |
+| `text`     | Plaintext from stdin/file    | `--env` + `--service`             |
+| `file`     | Plaintext or existing `.age` | `--file` path                     |
 
 ## SSH key
 

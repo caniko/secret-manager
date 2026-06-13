@@ -8,11 +8,11 @@ generated and how the secret is delivered to consumers.
 Targets home-manager profiles — per-user or shared. Secrets can be delivered
 as environment variables or files on the home filesystem.
 
-| Field     | Purpose                               |
-|-----------|---------------------------------------|
-| `user`    | Home-manager user profile             |
-| `env`     | Shell environment variable names      |
-| `file`    | File path within the home profile     |
+| Field  | Purpose                           |
+| ------ | --------------------------------- |
+| `user` | Home-manager user profile         |
+| `env`  | Shell environment variable names  |
+| `file` | File path within the home profile |
 
 Generated module path: `home/user/<user>/repositories/<slug>.nix`  
 Secret path: `age/secrets/users/<user>/<slug>.age`
@@ -22,12 +22,12 @@ Secret path: `age/secrets/users/<user>/<slug>.age`
 Targets NixOS hosts. Secrets can be delivered as systemd environment files
 or files on the host filesystem.
 
-| Field      | Purpose                               |
-|------------|---------------------------------------|
-| `host`     | NixOS host name                       |
-| `env`      | Environment variable names            |
+| Field      | Purpose                                 |
+| ---------- | --------------------------------------- |
+| `host`     | NixOS host name                         |
+| `env`      | Environment variable names              |
 | `services` | Systemd services receiving the env file |
-| `file`     | File path on the host                 |
+| `file`     | File path on the host                   |
 
 Generated module path: `root/hosts/<host>/server/<slug>.nix`  
 Secret path: `age/secrets/hosts/<host>/<slug>.age`
@@ -37,9 +37,9 @@ Secret path: `age/secrets/hosts/<host>/<slug>.age`
 Targets Forgejo Actions runner credentials. Secrets can be delivered as
 runner credentials or source-only (e.g., SSH keys without credential binding).
 
-| Field        | Purpose                             |
-|--------------|-------------------------------------|
-| `credential` | Credential name in the runner store  |
+| Field        | Purpose                                   |
+| ------------ | ----------------------------------------- |
+| `credential` | Credential name in the runner store       |
 | `instances`  | Runner instances receiving the credential |
 
 Generated module path: `root/modules/server/forgejo-runner-secrets/<slug>.nix`  

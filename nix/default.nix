@@ -26,13 +26,106 @@ nix-manager-core.lib.mkManagerOutputs {
   }: let
     module = import ./module.nix;
     collectLib = import ./collect.nix {inherit lib;};
+    secretLib = import ./lib.nix {inherit lib;};
+
+    rendererCheckFor = pkgs: let
+      catalog = {
+        with-sync = {
+          source.relative = "age/secrets/with-sync.age";
+          env = ["WITH_SYNC_TOKEN"];
+          marker = "custom-extra";
+          sync = {
+            target = "with-sync-target";
+            name = "WITH_SYNC_TOKEN";
+            codebergUser = true;
+          };
+        };
+
+        env-only = {
+          source.relative = "age/secrets/env-only.age";
+          env = ["ENV_ONLY_TOKEN"];
+        };
+
+        sync-only = {
+          source.relative = "age/secrets/sync-only.age";
+          sync = {
+            target = "sync-only-target";
+            name = "SYNC_ONLY_TOKEN";
+            codeberg = ["caniko/example"];
+          };
+        };
+      };
+
+      plain = {
+        public-value = {
+          source = "age/secrets/public-value.txt";
+          value = "not-secret";
+          sync = {
+            target = "public-value-target";
+            name = "PUBLIC_VALUE";
+            codeberg = ["caniko/example"];
+          };
+        };
+
+        unsynced-public.value = "local-only";
+      };
+
+      renderedHome = lib.evalModules {
+        modules =
+          [
+            {
+              options.renderedSecrets = lib.mkOption {
+                type = lib.types.attrsOf lib.types.raw;
+                default = {};
+              };
+            }
+          ]
+          ++ secretLib.mkHomeEnvSecretModules {
+            inherit catalog;
+            mkSecret = args: {
+              config.renderedSecrets.${args.name} =
+                builtins.removeAttrs args ["extraConfig"]
+                // {
+                  extra = args.extraConfig "/run/example-secret";
+                };
+            };
+            resolveSource = source: source.relative;
+            extraConfig = name: entry: path: {
+              inherit name path;
+              marker = entry.marker or "default";
+            };
+          };
+      };
+
+      renderedSync = secretLib.mkSecretSyncTargets {
+        inherit catalog plain;
+      };
+
+      homeSecrets = renderedHome.config.renderedSecrets;
+    in
+      assert builtins.attrNames homeSecrets == ["env-only" "with-sync"];
+      assert homeSecrets.with-sync.source == "age/secrets/with-sync.age";
+      assert homeSecrets.with-sync.targets.home.env == ["WITH_SYNC_TOKEN"];
+      assert homeSecrets.with-sync.extra
+      == {
+        name = "with-sync";
+        path = "/run/example-secret";
+        marker = "custom-extra";
+      };
+      assert renderedSync.with-sync-target.secret == "age/secrets/with-sync.age";
+      assert renderedSync.with-sync-target.name == "WITH_SYNC_TOKEN";
+      assert renderedSync.sync-only-target.secret == "age/secrets/sync-only.age";
+      assert renderedSync.public-value-target.source == "age/secrets/public-value.txt";
+      assert !(renderedSync ? env-only);
+      assert !(renderedSync ? unsynced-public);
+        pkgs.runCommand "secret-manager-catalog-renderers" {} "touch $out";
   in {
     nixosModules = {
       secretSync = module;
       default = module;
     };
 
-    lib = (import ./lib.nix {inherit lib;}) // collectLib;
+    lib = secretLib // collectLib;
 
     packages = forAllSystems (system: let
       pkgs = pkgsFor system;
@@ -52,6 +145,10 @@ nix-manager-core.lib.mkManagerOutputs {
           cp -r docs/book "$out"
         '';
       };
+    });
+
+    checks = forAllSystems (system: {
+      catalog-renderers = rendererCheckFor (pkgsFor system);
     });
   };
 }

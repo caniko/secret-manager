@@ -5,13 +5,13 @@ Codeberg/Forgejo CI credential stores.
 
 ## Secret types
 
-| Subcommand  | Source               | Delivery                        |
-|-------------|----------------------|---------------------------------|
-| `ssh`       | Generated Ed25519    | Runner credential or source only |
+| Subcommand     | Source                                   | Delivery                         |
+| -------------- | ---------------------------------------- | -------------------------------- |
+| `ssh`          | Generated Ed25519                        | Runner credential or source only |
 | `gpg-key-pair` | Generated or adopted OpenPGP private key | Source only plus public metadata |
-| `password`  | Generated passphrase | Runner credential               |
-| `text`      | Plaintext from stdin/file | Runner credential          |
-| `file`      | Plaintext or existing `.age` | Runner credential       |
+| `password`     | Generated passphrase                     | Runner credential                |
+| `text`         | Plaintext from stdin/file                | Runner credential                |
+| `file`         | Plaintext or existing `.age`             | Runner credential                |
 
 ## SSH deploy key
 

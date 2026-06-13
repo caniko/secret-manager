@@ -19,27 +19,29 @@ canixLib.mkSecret {
 
 ### Parameters
 
-| Parameter    | Description                                    |
-|--------------|------------------------------------------------|
-| `name`       | agenix secret name (maps to age file identity) |
-| `stack`      | `"home"`, `"system"`, or `"forgejo"`           |
-| `source`     | Path expression resolving to the `.age` file   |
-| `generator`  | Optional: `"passphrase"` or `"ssh-key"`        |
-| `length`     | Passphrase length (32, 48, or 64)              |
-| `algorithm`  | SSH key algorithm (`"ed25519"` or `"rsa"`)     |
-| `targets`    | Delivery target configuration (stack-specific) |
-| `owner`      | File owner (for system file delivery)          |
-| `group`      | File group                                     |
-| `mode`       | File mode                                      |
+| Parameter   | Description                                    |
+| ----------- | ---------------------------------------------- |
+| `name`      | agenix secret name (maps to age file identity) |
+| `stack`     | `"home"`, `"system"`, or `"forgejo"`           |
+| `source`    | Path expression resolving to the `.age` file   |
+| `generator` | Optional: `"passphrase"` or `"ssh-key"`        |
+| `length`    | Passphrase length (32, 48, or 64)              |
+| `algorithm` | SSH key algorithm (`"ed25519"` or `"rsa"`)     |
+| `targets`   | Delivery target configuration (stack-specific) |
+| `owner`     | File owner (for system file delivery)          |
+| `group`     | File group                                     |
+| `mode`      | File mode                                      |
 
 ### Target shapes
 
 **Home env delivery:**
+
 ```nix
 targets.home.env = ["APP_TOKEN" "API_KEY"];
 ```
 
 **Home file delivery:**
+
 ```nix
 targets.home.file = {
   path = "~/.ssh/deploy-key";
@@ -48,6 +50,7 @@ targets.home.file = {
 ```
 
 **System env delivery:**
+
 ```nix
 targets.system.env = {
   vars = ["VIKUNJA_MAILER_PASSWORD"];
@@ -56,6 +59,7 @@ targets.system.env = {
 ```
 
 **System file delivery:**
+
 ```nix
 targets.system.file = {
   path = "/run/secrets/vikunja-mailer";
@@ -65,6 +69,7 @@ targets.system.file = {
 ```
 
 **Forgejo credential delivery:**
+
 ```nix
 targets.forgejo.credential = {
   name = "copr-token";

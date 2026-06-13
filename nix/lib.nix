@@ -252,6 +252,52 @@
 
   pubOf = ageSrc:
     (builtins.substring 0 ((builtins.stringLength ageSrc) - 4) ageSrc) + ".pub";
+
+  mkHomeEnvSecretModules = {
+    catalog,
+    mkSecret,
+    resolveSource,
+    extraConfig ? (_name: _entry: _path: {}),
+  }: let
+    envEntries = lib.filterAttrs (_name: entry: (entry.env or []) != []) catalog;
+  in
+    lib.mapAttrsToList (
+      name: entry:
+        mkSecret {
+          inherit name;
+          stack = "home";
+          source = resolveSource entry.source;
+          targets.home.env = entry.env;
+          extraConfig = path: extraConfig name entry path;
+        }
+    )
+    envEntries;
+
+  mkSecretSyncTargets = {
+    catalog,
+    plain ? {},
+    secretSource ? (_name: entry:
+      entry.source.relative
+      or (throw "secret-manager.lib.mkSecretSyncTargets: encrypted entry is missing source.relative")),
+    plainSource ? (_name: entry: entry.source),
+  }: let
+    syncEntries = lib.filterAttrs (_name: entry: entry ? sync) catalog;
+    plainSyncEntries = lib.filterAttrs (_name: entry: entry ? sync) plain;
+
+    renderTarget = sourceAttr: name: entry: {
+      name = entry.sync.target or (throw "secret-manager.lib.mkSecretSyncTargets: ${name} is missing sync.target");
+      value =
+        builtins.removeAttrs entry.sync ["target"]
+        // {
+          ${sourceAttr} =
+            if sourceAttr == "secret"
+            then secretSource name entry
+            else plainSource name entry;
+        };
+    };
+  in
+    lib.mapAttrs' (renderTarget "secret") syncEntries
+    // lib.mapAttrs' (renderTarget "source") plainSyncEntries;
 in {
-  inherit mkSecret mkSharedSecret pubOf;
+  inherit mkHomeEnvSecretModules mkSecret mkSecretSyncTargets mkSharedSecret pubOf;
 }
