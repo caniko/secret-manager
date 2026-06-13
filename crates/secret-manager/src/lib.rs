@@ -7,7 +7,6 @@
 //! thin shim over this library.
 
 pub mod add;
-pub mod age;
 pub mod env;
 pub mod io;
 pub mod legacy;
@@ -19,3 +18,7 @@ pub mod sync;
 pub mod sync_state;
 pub mod sync_targets;
 pub mod target;
+
+/// age decryption and identity resolution live in the shared engine core;
+/// re-exported so `secret_manager::age` keeps working for embedders.
+pub use nix_manager_core::age;

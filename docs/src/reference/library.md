@@ -14,6 +14,7 @@ The `secret_manager` library provides the building blocks used by the CLI.
 | `push`    | Decrypt and push secrets to Codeberg/GitHub Actions        |
 | `render`  | Nix module rendering — `TargetSpec`, `render_body`, `camel` |
 | `store`   | `Store` discovery, master identity resolution              |
+| `age`     | Re-export of `nix_manager_core::age` — rage decryption and the shared flags → env → stubs identity resolution |
 
 ## Core types
 
@@ -28,7 +29,8 @@ pub struct Store {
 Methods:
 - `Store::current_dir()` — root at cwd
 - `Store::discover()` — from `$SECRET_MANAGER_STORE` or nearest `flake.nix`
-- `store.master_identities()` — sorted `age/master-*.pub` stubs
+- `store.master_identities()` — sorted `age/master-*.pub` / `age/master_*.pub` stubs
+- `store.resolve_identities(flags)` — flags → `SECRET_MANAGER_AGE_IDENTITIES` → stubs
 
 ### `TargetSpec`
 
