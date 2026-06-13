@@ -9,16 +9,47 @@
 # and returns `{ hosts = [ { targets = { ... } } ] }`. Only hosts that set
 # `services.secretSync.enable = true` are included. Each host's targets are the
 # raw option values — already JSON-serializable by construction.
-{lib}: syncConfig: let
-  nixosConfigurations = syncConfig.nixosConfigurations or {};
+{lib}: let
+  module = import ./module.nix;
 
-  enabledHosts = lib.filter (
-    host: host.config.services.secretSync.enable or false
-  ) (lib.attrValues nixosConfigurations);
+  collect = syncConfig: let
+    nixosConfigurations = syncConfig.nixosConfigurations or {};
 
-  hostRaw = host: {
-    targets = host.config.services.secretSync.targets;
+    enabledHosts = lib.filter (
+      host: host.config.services.secretSync.enable or false
+    ) (lib.attrValues nixosConfigurations);
+
+    hostRaw = host: {
+      targets = host.config.services.secretSync.targets;
+    };
+  in {
+    hosts = map hostRaw enabledHosts;
   };
-in {
-  hosts = map hostRaw enabledHosts;
-}
+
+  collectModules = {
+    modules ? null,
+    hosts ? null,
+  }: let
+    hostSpecs =
+      if modules != null && hosts == null
+      then [{inherit modules;}]
+      else if modules == null && hosts != null
+      then hosts
+      else
+        throw ''
+          secret-manager.lib.collectModules: set exactly one of `modules` or `hosts`
+        '';
+
+    evalHost = spec: let
+      eval = lib.evalModules {
+        modules = [module] ++ spec.modules;
+        specialArgs = spec.specialArgs or {};
+      };
+    in
+      lib.optional (eval.config.services.secretSync.enable or false) {
+        targets = eval.config.services.secretSync.targets;
+      };
+  in {
+    hosts = lib.concatMap evalHost hostSpecs;
+  };
+in {inherit collect collectModules;}

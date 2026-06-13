@@ -25,14 +25,14 @@ nix-manager-core.lib.mkManagerOutputs {
     ...
   }: let
     module = import ./module.nix;
-    collect = import ./collect.nix {inherit lib;};
+    collectLib = import ./collect.nix {inherit lib;};
   in {
     nixosModules = {
       secretSync = module;
       default = module;
     };
 
-    lib = (import ./lib.nix {inherit lib;}) // {inherit collect;};
+    lib = (import ./lib.nix {inherit lib;}) // collectLib;
 
     packages = forAllSystems (system: let
       pkgs = pkgsFor system;

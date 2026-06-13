@@ -297,11 +297,90 @@ impl FlakeRef {
             "let flake = builtins.getFlake {flake_ref}; in flake.inputs.secret-manager.lib.collect {{ inherit (flake) nixosConfigurations; }}"
         )
     }
+
+    fn secret_sync_targets_attr(&self) -> String {
+        match self {
+            FlakeRef::Path(path) => format!("{}#secretSyncTargets", path.display()),
+            FlakeRef::Explicit(flake) if flake.contains('#') => {
+                format!("{flake}.secretSyncTargets")
+            }
+            FlakeRef::Explicit(flake) => format!("{flake}#secretSyncTargets"),
+        }
+    }
 }
 
 fn collect_flake_sync_targets(flake: &FlakeRef, verbose: bool) -> Result<String> {
     ui::step(format!("evaluating sync targets from {}", flake.label()));
-    let args = nix_eval_args(flake);
+    match collect_fast_flake_sync_targets(flake, verbose)? {
+        FastCollect::Found(json) => return Ok(json),
+        FastCollect::Missing => {
+            if verbose {
+                ui::info(format!(
+                    "{} has no #secretSyncTargets; falling back to legacy NixOS collection",
+                    flake.label()
+                ));
+            }
+        }
+    }
+
+    collect_legacy_flake_sync_targets(flake, verbose)
+}
+
+enum FastCollect {
+    Found(String),
+    Missing,
+}
+
+fn collect_fast_flake_sync_targets(flake: &FlakeRef, verbose: bool) -> Result<FastCollect> {
+    let args = fast_nix_eval_args(flake);
+    if verbose {
+        ui::info(format!(
+            "nix argv: {:?}",
+            std::iter::once("nix")
+                .chain(args.iter().map(String::as_str))
+                .collect::<Vec<_>>()
+        ));
+    }
+    let pb = ui::spinner(format!("nix eval {}", flake.secret_sync_targets_attr()));
+    let output = match Command::new("nix").args(&args).output() {
+        Ok(output) => output,
+        Err(err) => {
+            ui::fail_spinner(pb, "failed to spawn nix");
+            return Err(anyhow!("failed to spawn nix: {err}"));
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if is_missing_secret_sync_targets(&stderr) {
+            ui::finish_spinner(
+                pb,
+                format!("no #secretSyncTargets fast path on {}", flake.label()),
+            );
+            return Ok(FastCollect::Missing);
+        }
+        ui::fail_spinner(pb, "nix eval failed");
+        bail!(
+            "nix eval failed while reading #secretSyncTargets from {}\n{}",
+            flake.label(),
+            stderr.trim()
+        );
+    }
+
+    ui::finish_spinner(
+        pb,
+        format!(
+            "collected sync targets from {}#secretSyncTargets",
+            flake.label()
+        ),
+    );
+    Ok(FastCollect::Found(
+        String::from_utf8(output.stdout).context("nix eval returned non-UTF-8 JSON")?,
+    ))
+}
+
+fn collect_legacy_flake_sync_targets(flake: &FlakeRef, verbose: bool) -> Result<String> {
+    let args = legacy_nix_eval_args(flake);
     if verbose {
         ui::info(format!(
             "nix argv: {:?}",
@@ -327,8 +406,8 @@ fn collect_flake_sync_targets(flake: &FlakeRef, verbose: bool) -> Result<String>
             || stderr.contains("attribute 'lib' missing")
         {
             bail!(
-                "flake {} does not expose inputs.secret-manager.lib.collect; \
-                 add the secret-manager input or pass --config <path>\n{}",
+                "flake {} does not expose #secretSyncTargets or inputs.secret-manager.lib.collect; \
+                 add secretSyncTargets, add the secret-manager input, or pass --config <path>\n{}",
                 flake.label(),
                 stderr.trim()
             );
@@ -344,7 +423,17 @@ fn collect_flake_sync_targets(flake: &FlakeRef, verbose: bool) -> Result<String>
     String::from_utf8(output.stdout).context("nix eval returned non-UTF-8 JSON")
 }
 
-fn nix_eval_args(flake: &FlakeRef) -> Vec<String> {
+fn fast_nix_eval_args(flake: &FlakeRef) -> Vec<String> {
+    vec![
+        "eval".to_string(),
+        "--json".to_string(),
+        flake.secret_sync_targets_attr(),
+        "--accept-flake-config".to_string(),
+        "--no-update-lock-file".to_string(),
+    ]
+}
+
+fn legacy_nix_eval_args(flake: &FlakeRef) -> Vec<String> {
     vec![
         "eval".to_string(),
         "--json".to_string(),
@@ -354,6 +443,14 @@ fn nix_eval_args(flake: &FlakeRef) -> Vec<String> {
         "--accept-flake-config".to_string(),
         "--no-update-lock-file".to_string(),
     ]
+}
+
+fn is_missing_secret_sync_targets(stderr: &str) -> bool {
+    stderr.contains("secretSyncTargets")
+        && (stderr.contains("does not provide attribute")
+            || stderr.contains("attribute 'secretSyncTargets' missing")
+            || stderr.contains("attribute `secretSyncTargets` missing")
+            || stderr.contains("undefined variable 'secretSyncTargets'"))
 }
 
 fn nix_string(value: &str) -> String {
@@ -756,16 +853,40 @@ mod tests {
     }
 
     #[test]
+    fn fast_flake_path_targets_secret_sync_targets_output() {
+        let flake = FlakeRef::Path(PathBuf::from("/tmp/example-flake"));
+        assert_eq!(
+            flake.secret_sync_targets_attr(),
+            "/tmp/example-flake#secretSyncTargets"
+        );
+        let args = fast_nix_eval_args(&flake);
+        assert_eq!(args[0], "eval");
+        assert!(args.iter().any(|arg| arg == "--json"));
+        assert!(args.iter().any(|arg| arg == "--no-update-lock-file"));
+        assert!(args.iter().any(|arg| arg == "--accept-flake-config"));
+        assert!(!args.iter().any(|arg| arg == "--expr"));
+        assert!(!args.iter().any(|arg| arg == "--impure"));
+        assert!(
+            args.iter()
+                .any(|arg| arg == "/tmp/example-flake#secretSyncTargets")
+        );
+    }
+
+    #[test]
     fn explicit_flake_reference_is_quoted() {
         let flake = FlakeRef::Explicit("github:caniko/example".to_string());
         let expr = flake.nix_expr();
         assert!(expr.contains(r#"builtins.getFlake "github:caniko/example""#));
+        assert_eq!(
+            flake.secret_sync_targets_attr(),
+            "github:caniko/example#secretSyncTargets"
+        );
     }
 
     #[test]
-    fn nix_eval_args_use_secret_manager_collect() {
+    fn legacy_nix_eval_args_use_secret_manager_collect() {
         let flake = FlakeRef::Explicit("github:caniko/example".to_string());
-        let args = nix_eval_args(&flake);
+        let args = legacy_nix_eval_args(&flake);
         assert_eq!(args[0], "eval");
         assert!(args.iter().any(|arg| arg == "--json"));
         assert!(args.iter().any(|arg| arg == "--no-update-lock-file"));
@@ -776,6 +897,24 @@ mod tests {
             .expect("--expr should be followed by an expression");
         assert!(expr.contains("flake.inputs.secret-manager.lib.collect"));
         assert!(expr.contains("inherit (flake) nixosConfigurations"));
+    }
+
+    #[test]
+    fn missing_secret_sync_targets_errors_are_fallback_eligible() {
+        let stderr = "error: flake 'path:/repo' does not provide attribute \
+            'packages.x86_64-linux.secretSyncTargets', \
+            'legacyPackages.x86_64-linux.secretSyncTargets' or 'secretSyncTargets'";
+        assert!(is_missing_secret_sync_targets(stderr));
+    }
+
+    #[test]
+    fn non_missing_secret_sync_targets_errors_are_not_fallback_eligible() {
+        assert!(!is_missing_secret_sync_targets(
+            "error: evaluation aborted with assertion failure in secretSyncTargets"
+        ));
+        assert!(!is_missing_secret_sync_targets(
+            "error: flake inputs.secret-manager.lib.collect is missing"
+        ));
     }
 
     #[test]
