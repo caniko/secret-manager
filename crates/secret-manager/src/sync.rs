@@ -1,18 +1,18 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
+use std::collections::HashMap;
 use std::fs;
 use std::io::{IsTerminal, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::push::decrypt_store_secret;
 use crate::store::{Store, resolve_against};
 use crate::sync_state::{
     ManagedKind, ManagedRecord, Scope, SyncState, desired_records, retained_without_prune,
     stale_records,
 };
 use crate::sync_targets::{SyncDocument, SyncValue};
-use nix_manager_core::{forge, ui};
+use nix_manager_core::{age, forge, ui};
 
 /// Read collected sync targets and push each declared value to its
 /// declared forge Actions destinations. When no explicit JSON input is passed,
@@ -116,6 +116,14 @@ impl SyncArgs {
             return Ok(());
         }
 
+        let decrypt_session = if document_needs_decrypt_session(&doc) {
+            let identities = store.resolve_identities(&self.identities)?;
+            Some(age::DecryptSession::from_identities(&identities)?)
+        } else {
+            None
+        };
+        let mut value_cache = SyncValueCache::default();
+
         for (_, name, target) in doc.iter_targets() {
             ui::step(format!(
                 "sync: `{}` {} from {}",
@@ -127,7 +135,7 @@ impl SyncArgs {
                 ui::info(format!("destinations: {}", destination_count(target)));
             }
 
-            let value = sync_value(&store, &target.value, &self.identities)?;
+            let value = value_cache.get(&store, &target.value, decrypt_session.as_ref())?;
 
             for repo in &target.codeberg {
                 ui::step(format!(
@@ -553,19 +561,115 @@ fn report_stale_records(stale: &[ManagedRecord]) {
     }
 }
 
-fn sync_value(store: &Store, value: &SyncValue, identities: &[PathBuf]) -> Result<String> {
-    match value {
-        SyncValue::Secret(secret) => decrypt_store_secret(store, secret, identities),
-        SyncValue::Source(source) => read_plaintext_source(store, source),
+fn document_needs_decrypt_session(doc: &SyncDocument) -> bool {
+    doc.iter_targets()
+        .any(|(_, _, target)| matches!(target.value, SyncValue::Secret(_)))
+}
+
+#[derive(Default)]
+struct SyncValueCache {
+    values: HashMap<SyncValueCacheKey, String>,
+}
+
+impl SyncValueCache {
+    fn get(
+        &mut self,
+        store: &Store,
+        value: &SyncValue,
+        decrypt_session: Option<&age::DecryptSession>,
+    ) -> Result<String> {
+        match value {
+            SyncValue::Secret(secret) => {
+                let path = validated_secret_path(store, secret)?;
+                let key = SyncValueCacheKey::new(SyncValueCacheKind::Secret, path.clone());
+                self.get_or_load(key, || {
+                    let session = decrypt_session.ok_or_else(|| {
+                        anyhow!(
+                            "encrypted sync target {} requires an age decrypt session",
+                            path.display()
+                        )
+                    })?;
+                    decrypt_sync_secret(&path, session)
+                })
+            }
+            SyncValue::Source(source) => {
+                let path = validated_source_path(store, source)?;
+                let key = SyncValueCacheKey::new(SyncValueCacheKind::Source, path.clone());
+                self.get_or_load(key, || read_plaintext_source_path(&path))
+            }
+        }
+    }
+
+    fn get_or_load(
+        &mut self,
+        key: SyncValueCacheKey,
+        load: impl FnOnce() -> Result<String>,
+    ) -> Result<String> {
+        if let Some(value) = self.values.get(&key) {
+            return Ok(value.clone());
+        }
+
+        let value = load()?;
+        self.values.insert(key, value.clone());
+        Ok(value)
     }
 }
 
-fn read_plaintext_source(store: &Store, source: &str) -> Result<String> {
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SyncValueCacheKey {
+    kind: SyncValueCacheKind,
+    path: PathBuf,
+}
+
+impl SyncValueCacheKey {
+    fn new(kind: SyncValueCacheKind, path: PathBuf) -> Self {
+        Self { kind, path }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum SyncValueCacheKind {
+    Secret,
+    Source,
+}
+
+fn validated_secret_path(store: &Store, secret: &str) -> Result<PathBuf> {
+    let secret_path = resolve_against(&store.root, &PathBuf::from(secret));
+    if !secret_path.is_file() {
+        bail!("{} does not exist", secret_path.display());
+    }
+    if secret_path.extension().and_then(|s| s.to_str()) != Some("age") {
+        bail!(
+            "{} does not end in `.age` — refusing",
+            secret_path.display()
+        );
+    }
+    canonical_source_path(&secret_path)
+}
+
+fn validated_source_path(store: &Store, source: &str) -> Result<PathBuf> {
     let source_path = resolve_against(&store.root, &PathBuf::from(source));
     if !source_path.is_file() {
         bail!("{} does not exist", source_path.display());
     }
-    let value = fs::read_to_string(&source_path)
+    canonical_source_path(&source_path)
+}
+
+fn canonical_source_path(path: &Path) -> Result<PathBuf> {
+    path.canonicalize()
+        .with_context(|| format!("canonicalizing {}", path.display()))
+}
+
+fn decrypt_sync_secret(path: &Path, session: &age::DecryptSession) -> Result<String> {
+    let value = age::decrypt_with_session(path, session)?;
+    if value.is_empty() {
+        bail!("decrypted payload is empty");
+    }
+    Ok(value)
+}
+
+fn read_plaintext_source_path(source_path: &Path) -> Result<String> {
+    let value = fs::read_to_string(source_path)
         .map_err(|e| anyhow::anyhow!("reading plaintext source {}: {e}", source_path.display()))?;
     if value.is_empty() {
         bail!("plaintext source {} is empty", source_path.display());
@@ -961,6 +1065,65 @@ mod tests {
     }
 
     #[test]
+    fn document_needs_decrypt_session_when_any_target_is_encrypted() {
+        let doc: SyncDocument = serde_json::from_str(FIXTURE).unwrap();
+        assert!(document_needs_decrypt_session(&doc));
+
+        let plaintext_only = r#"{"hosts":[{"targets":{"public-key":{"source":"public.asc","name":"PUBLIC","codeberg":[],"codebergOrgs":[],"codebergUser":false,"host":"codeberg.org"}}}]}"#;
+        let doc: SyncDocument = serde_json::from_str(plaintext_only).unwrap();
+        assert!(!document_needs_decrypt_session(&doc));
+    }
+
+    #[test]
+    fn sync_value_cache_loads_duplicate_secret_path_once() {
+        let mut cache = SyncValueCache::default();
+        let key = SyncValueCacheKey::new(
+            SyncValueCacheKind::Secret,
+            PathBuf::from("/tmp/example-secret.age"),
+        );
+        let mut loads = 0;
+
+        let first = cache
+            .get_or_load(key.clone(), || {
+                loads += 1;
+                Ok("secret-value".to_string())
+            })
+            .unwrap();
+        let second = cache
+            .get_or_load(key, || {
+                loads += 1;
+                Ok("different-value".to_string())
+            })
+            .unwrap();
+
+        assert_eq!(first, "secret-value");
+        assert_eq!(second, "secret-value");
+        assert_eq!(loads, 1);
+    }
+
+    #[test]
+    fn sync_value_cache_keeps_secret_and_source_keys_separate() {
+        let mut cache = SyncValueCache::default();
+        let path = PathBuf::from("/tmp/shared-path");
+
+        let secret = cache
+            .get_or_load(
+                SyncValueCacheKey::new(SyncValueCacheKind::Secret, path.clone()),
+                || Ok("secret".to_string()),
+            )
+            .unwrap();
+        let source = cache
+            .get_or_load(
+                SyncValueCacheKey::new(SyncValueCacheKind::Source, path),
+                || Ok("source".to_string()),
+            )
+            .unwrap();
+
+        assert_eq!(secret, "secret");
+        assert_eq!(source, "source");
+    }
+
+    #[test]
     fn user_scope_push_label_names_account_and_secret() {
         assert_eq!(
             user_scope_push_label("codeberg.org", "caniko", "CHOCOLATEY_API_KEY"),
@@ -995,7 +1158,25 @@ mod tests {
             root: dir.path.clone(),
         };
 
-        let got = read_plaintext_source(&store, "public.asc").unwrap();
+        let got = read_plaintext_source_path(&validated_source_path(&store, "public.asc").unwrap())
+            .unwrap();
+        assert_eq!(got, content);
+    }
+
+    #[test]
+    fn sync_value_cache_reads_plaintext_source_without_decrypt_session() {
+        let dir = crate::io::TempDir::new().unwrap();
+        let content = "line one\nline two\n";
+        std::fs::write(dir.path.join("public.asc"), content).unwrap();
+        let store = Store {
+            root: dir.path.clone(),
+        };
+        let mut cache = SyncValueCache::default();
+
+        let got = cache
+            .get(&store, &SyncValue::Source("public.asc".to_string()), None)
+            .unwrap();
+
         assert_eq!(got, content);
     }
 
@@ -1007,7 +1188,8 @@ mod tests {
             root: dir.path.clone(),
         };
 
-        let err = read_plaintext_source(&store, "empty").unwrap_err();
+        let err = read_plaintext_source_path(&validated_source_path(&store, "empty").unwrap())
+            .unwrap_err();
         assert!(err.to_string().contains("is empty"));
     }
 

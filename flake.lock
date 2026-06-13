@@ -150,11 +150,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1781345309,
-        "narHash": "sha256-bfscefaV7p41u1ngW8gttVRZ/QwasrI4fE6Tv80O+io=",
+        "lastModified": 1781346123,
+        "narHash": "sha256-Z0N43ks0jqLUDN3pI3dczkXPUDKgtMjUOsmEkKuLIaY=",
         "ref": "refs/heads/main",
-        "rev": "339020858a655a1fdc904ef9ba832706caff039d",
-        "revCount": 18,
+        "rev": "57bdcd814366228d2bfe0f421cf44658aa81a1c0",
+        "revCount": 19,
         "type": "git",
         "url": "https://codeberg.org/caniko/nix-manager-core"
       },
