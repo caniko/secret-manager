@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Args;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{IsTerminal, Read};
@@ -47,6 +48,14 @@ pub struct SyncArgs {
     #[arg(long)]
     pub dry_run: bool,
 
+    /// Check the sync plan without decrypting or contacting any forge.
+    #[arg(long)]
+    pub check: bool,
+
+    /// Restrict sync to one declarative target id. Repeatable.
+    #[arg(long = "target", value_name = "TARGET")]
+    pub targets: Vec<String>,
+
     /// Delete previously managed remote entries that are no longer declared.
     #[arg(long)]
     pub prune: bool,
@@ -64,6 +73,7 @@ pub struct SyncArgs {
 impl SyncArgs {
     pub fn run(self) -> Result<()> {
         let doc = self.load_document()?;
+        let doc = filter_document_targets(doc, &self.targets)?;
         let total = doc.total_targets();
         ui::step("discovering secret store");
         let store = Store::discover()?;
@@ -92,8 +102,12 @@ impl SyncArgs {
             ));
         }
 
-        if self.dry_run {
-            println!("Planned pushes (--dry-run):");
+        if self.dry_run || self.check {
+            if self.check {
+                println!("Planned pushes (--check):");
+            } else {
+                println!("Planned pushes (--dry-run):");
+            }
             for (_, name, target) in doc.iter_targets() {
                 println!();
                 println!("  target: {name}");
@@ -482,6 +496,28 @@ fn summarize_document(doc: SyncDocument) -> Result<SyncDocument> {
         summary.targets,
         plural_s(summary.targets)
     ));
+    Ok(doc)
+}
+
+fn filter_document_targets(mut doc: SyncDocument, targets: &[String]) -> Result<SyncDocument> {
+    if targets.is_empty() {
+        return Ok(doc);
+    }
+    let requested = targets.iter().cloned().collect::<BTreeSet<_>>();
+    let mut found = BTreeSet::new();
+    for host in &mut doc.hosts {
+        host.targets.retain(|name, _| {
+            let keep = requested.contains(name);
+            if keep {
+                found.insert(name.clone());
+            }
+            keep
+        });
+    }
+    let missing = requested.difference(&found).cloned().collect::<Vec<_>>();
+    if !missing.is_empty() {
+        bail!("unknown sync target(s): {}", missing.join(", "));
+    }
     Ok(doc)
 }
 
@@ -938,6 +974,8 @@ mod tests {
             no_flake: false,
             identities: vec![],
             dry_run: true,
+            check: false,
+            targets: Vec::new(),
             prune: false,
             verbose: false,
             state: None,
@@ -945,6 +983,24 @@ mod tests {
         // Just verify load_document succeeds — dry-run doesn't need a store
         let doc = args.load_document().unwrap();
         assert_eq!(doc.total_targets(), 2);
+    }
+
+    #[test]
+    fn target_filter_keeps_only_requested_targets() {
+        let doc = SyncDocument::from_json(FIXTURE).unwrap();
+        let filtered = filter_document_targets(doc, &["my-app-token".to_owned()]).unwrap();
+        assert_eq!(filtered.total_targets(), 1);
+        assert_eq!(
+            filtered.iter_targets().next().map(|(_, name, _)| name),
+            Some("my-app-token")
+        );
+    }
+
+    #[test]
+    fn target_filter_rejects_unknown_targets() {
+        let doc = SyncDocument::from_json(FIXTURE).unwrap();
+        let err = filter_document_targets(doc, &["missing".to_owned()]).unwrap_err();
+        assert!(err.to_string().contains("unknown sync target(s): missing"));
     }
 
     #[test]
@@ -1139,6 +1195,8 @@ mod tests {
             no_flake: true,
             identities: vec![],
             dry_run: true,
+            check: false,
+            targets: Vec::new(),
             prune: false,
             verbose: false,
             state: None,

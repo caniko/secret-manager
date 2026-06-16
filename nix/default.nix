@@ -147,6 +147,21 @@ nix-manager-core.lib.mkManagerOutputs {
       };
     });
 
+    devShells = forAllSystems (system: let
+      pkgs = pkgsFor system;
+      toolchain = rs-harbor.lib.mkToolchain {inherit pkgs;};
+      cross = rs-harbor.lib.mkCross {inherit pkgs system;};
+    in {
+      docs = rs-harbor.lib.mkDocsShell {
+        inherit pkgs cross;
+        inherit (toolchain) craneLib;
+        packages = [pkgs.mdbook];
+        extraShellHook = ''
+          echo "Documentation: mdbook serve docs"
+        '';
+      };
+    });
+
     checks = forAllSystems (system: {
       catalog-renderers = rendererCheckFor (pkgsFor system);
     });
