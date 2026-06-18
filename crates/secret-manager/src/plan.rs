@@ -77,8 +77,8 @@ pub fn run_plan(args: &CommonSourceArgs, plan: AddPlan) -> Result<()> {
     );
 
     validate_module_destinations(&repo_root, &modules)?;
-    prepare_secret_sources(&repo_root, args, &plan, &modules)?;
     write_modules(&repo_root, &modules)?;
+    prepare_secret_sources(&repo_root, args, &plan, &modules)?;
 
     match &plan.source {
         SourceKind::Generate(generator) => {
