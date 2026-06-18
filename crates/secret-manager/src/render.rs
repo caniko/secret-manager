@@ -124,16 +124,23 @@ impl TargetSpec {
 
     pub fn module_path(&self) -> PathBuf {
         match self {
-            TargetSpec::Home(t) => {
-                PathBuf::from(format!("home/user/{}/repositories/{}.nix", t.user, t.slug))
-            }
-            TargetSpec::SharedHome(t) => PathBuf::from(format!("home/user/shared/{}.nix", t.slug)),
-            TargetSpec::System(t) => {
-                PathBuf::from(format!("root/hosts/{}/server/{}.nix", t.host, t.slug))
-            }
+            TargetSpec::Home(t) => PathBuf::from(format!(
+                "home/user/{}/repositories/{}.nix",
+                t.user,
+                t.slug.replace('-', "_")
+            )),
+            TargetSpec::SharedHome(t) => PathBuf::from(format!(
+                "home/user/shared/{}.nix",
+                t.slug.replace('-', "_")
+            )),
+            TargetSpec::System(t) => PathBuf::from(format!(
+                "root/hosts/{}/server/{}.nix",
+                t.host,
+                t.slug.replace('-', "_")
+            )),
             TargetSpec::Forgejo(t) => PathBuf::from(format!(
                 "root/modules/server/forgejo-runner-secrets/{}.nix",
-                t.slug
+                t.slug.replace('-', "_")
             )),
         }
     }
@@ -504,7 +511,7 @@ mod tests {
         );
         assert_eq!(
             home.module_path(),
-            PathBuf::from("home/user/can/repositories/kaggle-api-token.nix")
+            PathBuf::from("home/user/can/repositories/kaggle_api_token.nix")
         );
 
         let shared = TargetSpec::SharedHome(SharedHomeTarget {
@@ -535,8 +542,12 @@ mod tests {
             forgejo.secret_path(),
             PathBuf::from("age/secrets/modules/foregejo-runner/copr_token.age")
         );
+        assert_eq!(
+            forgejo.module_path(),
+            PathBuf::from("root/modules/server/forgejo-runner-secrets/copr_token.nix")
+        );
 
-        // Regression: slug dashes must become underscores in age file paths
+        // Regression: slug dashes must become underscores in age file and module paths
         let dashy_home = TargetSpec::SharedHome(SharedHomeTarget {
             slug: "gmi-cloud".to_string(),
             age_name: "shared-gmi-cloud".to_string(),
@@ -545,6 +556,10 @@ mod tests {
         assert_eq!(
             dashy_home.secret_path(),
             PathBuf::from("age/secrets/users/shared/gmi_cloud.age")
+        );
+        assert_eq!(
+            dashy_home.module_path(),
+            PathBuf::from("home/user/shared/gmi_cloud.nix")
         );
     }
 }
