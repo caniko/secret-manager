@@ -78,13 +78,13 @@ pub fn run_plan(args: &CommonSourceArgs, plan: AddPlan) -> Result<()> {
 
     validate_module_destinations(&repo_root, &modules)?;
     write_modules(&repo_root, &modules)?;
+    if !modules.is_empty() {
+        stage_modules_for_generate(&repo_root, &modules, args.no_stage)?;
+    }
     prepare_secret_sources(&repo_root, args, &plan, &modules)?;
 
     match &plan.source {
         SourceKind::Generate(generator) => {
-            if !modules.is_empty() {
-                stage_modules_for_generate(&repo_root, &modules, args.no_stage)?;
-            }
             generate_declared_secrets(&repo_root, &modules, &plan.source_only_paths, generator)?;
             finish_generate(
                 &repo_root,
