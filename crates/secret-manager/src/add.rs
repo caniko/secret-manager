@@ -926,7 +926,10 @@ fn resolve_home_user(user: &Option<String>, env: &dyn StoreEnv) -> Result<String
 }
 
 fn shared_secret_path(slug: &str) -> PathBuf {
-    PathBuf::from(format!("age/secrets/users/shared/{slug}.age"))
+    PathBuf::from(format!(
+        "age/secrets/users/shared/{}.age",
+        slug.replace('-', "_")
+    ))
 }
 
 fn shared_home_target(slug: &str, env_vars: Vec<String>) -> Result<TargetSpec> {
@@ -1329,7 +1332,7 @@ mod tests {
         assert!(source_only_plan.targets.is_empty());
         assert_eq!(
             source_only_plan.source_only_paths,
-            vec![PathBuf::from("age/secrets/users/shared/app-token.age")]
+            vec![PathBuf::from("age/secrets/users/shared/app_token.age")]
         );
     }
 
@@ -1346,7 +1349,7 @@ mod tests {
         assert!(ssh_plan.targets.is_empty());
         assert_eq!(
             ssh_plan.source_only_paths,
-            vec![PathBuf::from("age/secrets/users/shared/deploy-key.age")]
+            vec![PathBuf::from("age/secrets/users/shared/deploy_key.age")]
         );
 
         let file = HmFileArgs {

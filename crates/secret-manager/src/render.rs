@@ -101,18 +101,23 @@ impl TargetSpec {
 
     pub fn secret_path(&self) -> PathBuf {
         match self {
-            TargetSpec::Home(t) => {
-                PathBuf::from(format!("age/secrets/users/{}/{}.age", t.user, t.slug))
-            }
-            TargetSpec::SharedHome(t) => {
-                PathBuf::from(format!("age/secrets/users/shared/{}.age", t.slug))
-            }
-            TargetSpec::System(t) => {
-                PathBuf::from(format!("age/secrets/hosts/{}/{}.age", t.host, t.slug))
-            }
+            TargetSpec::Home(t) => PathBuf::from(format!(
+                "age/secrets/users/{}/{}.age",
+                t.user,
+                t.slug.replace('-', "_")
+            )),
+            TargetSpec::SharedHome(t) => PathBuf::from(format!(
+                "age/secrets/users/shared/{}.age",
+                t.slug.replace('-', "_")
+            )),
+            TargetSpec::System(t) => PathBuf::from(format!(
+                "age/secrets/hosts/{}/{}.age",
+                t.host,
+                t.slug.replace('-', "_")
+            )),
             TargetSpec::Forgejo(t) => PathBuf::from(format!(
                 "age/secrets/modules/foregejo-runner/{}.age",
-                t.slug
+                t.slug.replace('-', "_")
             )),
         }
     }
@@ -495,7 +500,7 @@ mod tests {
         });
         assert_eq!(
             home.secret_path(),
-            PathBuf::from("age/secrets/users/can/kaggle-api-token.age")
+            PathBuf::from("age/secrets/users/can/kaggle_api_token.age")
         );
         assert_eq!(
             home.module_path(),
@@ -528,7 +533,18 @@ mod tests {
         });
         assert_eq!(
             forgejo.secret_path(),
-            PathBuf::from("age/secrets/modules/foregejo-runner/copr-token.age")
+            PathBuf::from("age/secrets/modules/foregejo-runner/copr_token.age")
+        );
+
+        // Regression: slug dashes must become underscores in age file paths
+        let dashy_home = TargetSpec::SharedHome(SharedHomeTarget {
+            slug: "gmi-cloud".to_string(),
+            age_name: "shared-gmi-cloud".to_string(),
+            env_vars: vec!["GMI_CLOUD_API_KEY".to_string()],
+        });
+        assert_eq!(
+            dashy_home.secret_path(),
+            PathBuf::from("age/secrets/users/shared/gmi_cloud.age")
         );
     }
 }
