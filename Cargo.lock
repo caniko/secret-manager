@@ -875,7 +875,7 @@ dependencies = [
 [[package]]
 name = "nix-manager-core"
 version = "0.3.0"
-source = "git+https://codeberg.org/caniko/nix-manager-core.git?rev=63c8b8832d1fc3ec47bf2e1f2f3b518f49ee6059#63c8b8832d1fc3ec47bf2e1f2f3b518f49ee6059"
+source = "git+https://codeberg.org/caniko/nix-manager-core.git?rev=44880c13999ff0f606a174f61120bc4284e37113#44880c13999ff0f606a174f61120bc4284e37113"
 dependencies = [
  "anyhow",
  "chrono",
