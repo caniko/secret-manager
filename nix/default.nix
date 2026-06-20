@@ -14,7 +14,6 @@ nix-manager-core.lib.mkManagerOutputs {
   rustEdition = "2024";
   srcDir = ../.;
   extraRuntimePackages = pkgs: [
-    pkgs.age-plugin-fido2-hmac
     pkgs.rage
   ];
   extraOutputs = {
