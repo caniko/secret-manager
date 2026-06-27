@@ -247,7 +247,7 @@ pub struct NixosTextArgs {
     #[command(flatten)]
     pub target: NixosBaseArgs,
 
-    /// Secret slug. Defaults from the first --env value.
+    /// Secret slug. Defaults from the first --env value. Required with --bare.
     #[arg(long)]
     pub name: Option<String>,
 
@@ -262,6 +262,11 @@ pub struct NixosTextArgs {
     /// Read plaintext from this file. If omitted, plaintext is read from stdin.
     #[arg(long = "from-file")]
     pub from_file: Option<PathBuf>,
+
+    /// Create a bare agenix secret without env/service wiring.
+    /// Requires --name. No --env or --service needed.
+    #[arg(long, default_value_t = false)]
+    pub bare: bool,
 
     #[command(flatten)]
     pub exec: ExecutionArgs,
@@ -696,6 +701,20 @@ impl NixosTextArgs {
     }
 
     fn build_plan(&self, env: &dyn StoreEnv) -> Result<AddPlan> {
+        if self.bare {
+            let slug = self
+                .name
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| anyhow!("nixos text --bare requires --name"))?;
+            validate_slug(&slug)?;
+            return Ok(AddPlan {
+                slug: slug.clone(),
+                source: SourceKind::Plaintext,
+                targets: Vec::new(),
+                source_only_paths: vec![host_secret_path(&self.target.host, &slug)],
+            });
+        }
         if self.env.is_empty() {
             bail!("nixos text requires at least one --env target");
         }
@@ -923,6 +942,14 @@ fn resolve_home_user(user: &Option<String>, env: &dyn StoreEnv) -> Result<String
         return Ok(user.clone());
     }
     env.resolve_home_user()
+}
+
+fn host_secret_path(host: &str, slug: &str) -> PathBuf {
+    PathBuf::from(format!(
+        "age/secrets/hosts/{}/{}.age",
+        host,
+        slug.replace('-', "_")
+    ))
 }
 
 fn shared_secret_path(slug: &str) -> PathBuf {
@@ -1412,6 +1439,7 @@ mod tests {
             env: vec!["API_TOKEN".to_string()],
             service: vec!["demo".to_string()],
             from_file: None,
+            bare: false,
             exec: ExecutionArgs::default(),
         };
         assert_eq!(text.build_plan(&TestEnv).unwrap().slug, "api");
@@ -1429,6 +1457,44 @@ mod tests {
                 .source,
             SourceKind::Plaintext
         );
+    }
+
+    #[test]
+    fn nixos_text_bare_plan_produces_source_only_path() {
+        let bare = NixosTextArgs {
+            target: nixos_base(),
+            name: Some("betterdesk-oidc-client-secret".to_string()),
+            env: Vec::new(),
+            service: Vec::new(),
+            from_file: None,
+            bare: true,
+            exec: ExecutionArgs::default(),
+        };
+        let plan = bare.build_plan(&TestEnv).unwrap();
+        assert_eq!(plan.slug, "betterdesk-oidc-client-secret");
+        assert_eq!(plan.targets, Vec::new());
+        assert_eq!(
+            plan.source_only_paths,
+            vec![PathBuf::from(
+                "age/secrets/hosts/thething/betterdesk_oidc_client_secret.age"
+            )]
+        );
+    }
+
+    #[test]
+    fn nixos_text_bare_plan_requires_name() {
+        let err = NixosTextArgs {
+            target: nixos_base(),
+            name: None,
+            env: Vec::new(),
+            service: Vec::new(),
+            from_file: None,
+            bare: true,
+            exec: ExecutionArgs::default(),
+        }
+        .build_plan(&TestEnv)
+        .unwrap_err();
+        assert!(err.to_string().contains("--name"));
     }
 
     #[test]
