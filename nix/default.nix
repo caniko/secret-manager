@@ -146,7 +146,11 @@ nix-manager-core.lib.mkManagerOutputs {
       };
     in {
       inherit docs;
-      site = docs;
+      site = pkgs.runCommand "secret-manager-site" {} ''
+        mkdir -p $out
+        cp -rL --no-preserve=mode ${docs}/. $out/
+        printf '%s\n' "secret-manager.tartanoglu.com" > $out/.domains
+      '';
     });
 
     apps = forAllSystems (system: {
