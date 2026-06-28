@@ -6,6 +6,7 @@
   treefmt-nix,
   git-hooks,
   nix-manager-core,
+  plinth,
   ...
 }:
 nix-manager-core.lib.mkManagerOutputs {
@@ -128,7 +129,6 @@ nix-manager-core.lib.mkManagerOutputs {
 
     packages = forAllSystems (system: let
       pkgs = pkgsFor system;
-    in {
       docs = pkgs.stdenv.mkDerivation {
         pname = "secret-manager-docs";
         version = "0.1.0";
@@ -143,6 +143,15 @@ nix-manager-core.lib.mkManagerOutputs {
         installPhase = ''
           cp -r docs/book "$out"
         '';
+      };
+    in {
+      inherit docs;
+      site = docs;
+    });
+
+    apps = forAllSystems (system: {
+      deploy-pages = plinth.lib.${system}.mkDeployPagesApp {
+        domain = "secret-manager.tartanoglu.com";
       };
     });
 
