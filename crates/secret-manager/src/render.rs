@@ -94,7 +94,7 @@ impl TargetSpec {
                 slug: t.slug.clone(),
             },
             TargetSpec::Forgejo(t) => SourceExpr::Module {
-                subpath: format!("foregejo-runner/{}", t.slug),
+                subpath: format!("forgejo-runner/{}", t.slug),
             },
         }
     }
@@ -116,7 +116,7 @@ impl TargetSpec {
                 t.slug.replace('-', "_")
             )),
             TargetSpec::Forgejo(t) => PathBuf::from(format!(
-                "age/secrets/modules/foregejo-runner/{}.age",
+                "age/secrets/modules/forgejo-runner/{}.age",
                 t.slug.replace('-', "_")
             )),
         }
@@ -129,17 +129,16 @@ impl TargetSpec {
                 t.user,
                 t.slug.replace('-', "_")
             )),
-            TargetSpec::SharedHome(t) => PathBuf::from(format!(
-                "home/user/shared/{}.nix",
-                t.slug.replace('-', "_")
-            )),
+            TargetSpec::SharedHome(t) => {
+                PathBuf::from(format!("home/user/shared/{}.nix", t.slug.replace('-', "_")))
+            }
             TargetSpec::System(t) => PathBuf::from(format!(
                 "root/hosts/{}/server/{}.nix",
                 t.host,
                 t.slug.replace('-', "_")
             )),
             TargetSpec::Forgejo(t) => PathBuf::from(format!(
-                "root/modules/server/forgejo-runner-secrets/{}.nix",
+                "root/modules/server/forgejo_runner_secrets/{}.nix",
                 t.slug.replace('-', "_")
             )),
         }
@@ -155,7 +154,7 @@ impl TargetSpec {
                 PathBuf::from(format!("root/hosts/{}/server/default.nix", t.host))
             }
             TargetSpec::Forgejo(_) => {
-                PathBuf::from("root/modules/server/forgejo-runner-secrets/default.nix")
+                PathBuf::from("root/modules/server/forgejo_runner_secrets/default.nix")
             }
         }
     }
@@ -451,7 +450,7 @@ mod tests {
         );
         assert!(got.contains("name = \"forgejoRunnerCodebergCoprToken\";"));
         assert!(got.contains("stack = \"forgejo\";"));
-        assert!(got.contains("source = secrets.module \"foregejo-runner/copr-token\";"));
+        assert!(got.contains("source = secrets.module \"forgejo-runner/copr-token\";"));
         assert!(got.contains("name = \"copr-token\";"));
         assert!(got.contains("instances = [\"codeberg\"];"));
     }
@@ -471,7 +470,7 @@ mod tests {
         );
         assert!(got.contains("name = \"forgejoActionsAurSshKey\";"));
         assert!(got.contains("stack = \"forgejo\";"));
-        assert!(got.contains("source = secrets.module \"foregejo-runner/aur-ssh-key\";"));
+        assert!(got.contains("source = secrets.module \"forgejo-runner/aur-ssh-key\";"));
         assert!(got.contains("generator = \"ssh-key\";"));
         assert!(got.contains("algorithm = \"ed25519\";"));
         assert!(!got.contains("targets.forgejo.credential"));
@@ -540,11 +539,11 @@ mod tests {
         });
         assert_eq!(
             forgejo.secret_path(),
-            PathBuf::from("age/secrets/modules/foregejo-runner/copr_token.age")
+            PathBuf::from("age/secrets/modules/forgejo-runner/copr_token.age")
         );
         assert_eq!(
             forgejo.module_path(),
-            PathBuf::from("root/modules/server/forgejo-runner-secrets/copr_token.nix")
+            PathBuf::from("root/modules/server/forgejo_runner_secrets/copr_token.nix")
         );
 
         // Regression: slug dashes must become underscores in age file and module paths

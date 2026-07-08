@@ -352,7 +352,7 @@ pub fn run_forgejo_ssh_key_plan(
 
 fn validate_existing_forgejo_ssh_key_module(body: &str, plan: &ForgejoSshKeyPlan) -> Result<()> {
     let source_line = format!(
-        "source = secrets.module \"foregejo-runner/{}\";",
+        "source = secrets.module \"forgejo-runner/{}\";",
         nix_string(&plan.slug)
     );
     let mk_secret_call = format!("{LIB_BINDING}.mkSecret");
