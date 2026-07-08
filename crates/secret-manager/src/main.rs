@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 
 use secret_manager::env::LocalEnv;
-use secret_manager::{add, legacy, push, sync};
+use secret_manager::{add, legacy, push, registry, sync};
 
 #[derive(Parser)]
 #[command(
@@ -26,6 +26,10 @@ enum Command {
     /// Add an agenix secret for Forgejo Actions or runner credentials.
     #[command(subcommand, arg_required_else_help = true)]
     Forgejo(add::ForgejoCmd),
+
+    /// Validate or export Pkl secret registries.
+    #[command(subcommand, arg_required_else_help = true)]
+    Registry(registry::RegistryCmd),
 
     /// List every *.age file tracked in the repo.
     List,
@@ -69,6 +73,7 @@ fn main() -> anyhow::Result<()> {
         Command::Hm(cmd) => cmd.run(&env),
         Command::Nixos(cmd) => cmd.run(&env),
         Command::Forgejo(cmd) => cmd.run(),
+        Command::Registry(cmd) => cmd.run(),
         Command::List => legacy::list(),
         Command::Sync(args) => args.run(),
         Command::Push(args) => args.run(),

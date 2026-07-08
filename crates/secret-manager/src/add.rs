@@ -10,6 +10,7 @@ use crate::plan::{
     build_forgejo_gpg_key_pair_plan, build_forgejo_ssh_plan, run_forgejo_gpg_key_pair_plan,
     run_forgejo_ssh_key_plan, run_plan,
 };
+use crate::registry;
 use crate::render::{
     ForgejoTarget, GeneratorSpec, HomeTarget, SharedHomeTarget, SystemTarget, TargetSpec,
     default_forgejo_age_name,
@@ -52,6 +53,9 @@ pub enum ForgejoCmd {
     Text(ForgejoTextArgs),
     /// Encrypt a file payload and expose it as a runner credential.
     File(ForgejoFileArgs),
+    /// Manage runner file-env declarations in a Pkl registry.
+    #[command(name = "runner-env", subcommand, arg_required_else_help = true)]
+    RunnerEnv(registry::RunnerEnvCmd),
 }
 
 #[derive(Args, Debug, Clone, Default)]
@@ -453,6 +457,7 @@ impl ForgejoCmd {
             ForgejoCmd::Password(args) => args.run(),
             ForgejoCmd::Text(args) => args.run(),
             ForgejoCmd::File(args) => args.run(),
+            ForgejoCmd::RunnerEnv(args) => args.run(),
         }
     }
 }
