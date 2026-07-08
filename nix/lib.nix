@@ -298,6 +298,83 @@
   in
     lib.mapAttrs' (renderTarget "secret") syncEntries
     // lib.mapAttrs' (renderTarget "source") plainSyncEntries;
+
+  mkForgejoRunnerFileEnv = {
+    catalog,
+    secretSource ? (_name: entry:
+      entry.source.relative
+      or (throw "secret-manager.lib.mkForgejoRunnerFileEnv: encrypted entry is missing source.relative")),
+    runtimeDir ? "/run/secret-manager/forgejo-runner",
+    secretNamePrefix ? "forgejo-runner-file-env",
+    owner ? "root",
+    group ? "root",
+    mode ? "0444",
+  }: let
+    entries =
+      lib.flatten
+      (lib.mapAttrsToList (
+          id: entry:
+            lib.concatMap (
+              target:
+                map (instance: {
+                  inherit id entry target instance;
+                  source = secretSource id entry;
+                  file = "${runtimeDir}/${instance}/${id}";
+                  dir = "${runtimeDir}/${instance}";
+                  secretName = "${secretNamePrefix}-${instance}-${id}";
+                })
+                (target.instances or [])
+            )
+            (entry.runnerFileEnv or [])
+        )
+        catalog);
+
+    byInstance =
+      lib.groupBy (entry: entry.instance) entries;
+
+    instanceRuntime = instance: instanceEntries: {
+      containerOptions =
+        ["-v ${runtimeDir}/${instance}:${runtimeDir}/${instance}:ro"]
+        ++ map (entry: "-e ${entry.target.env}=${entry.file}") instanceEntries;
+      validVolumes = ["${runtimeDir}/${instance}"];
+    };
+  in {
+    config = {
+      age.secrets =
+        builtins.listToAttrs
+        (map (entry:
+          lib.nameValuePair entry.secretName {
+            rekeyFile = entry.source;
+            inherit mode;
+          })
+        entries);
+
+      systemd.tmpfiles.settings."10-secret-manager-forgejo-runner-file-env" =
+        builtins.listToAttrs
+        (
+          map (instance:
+            lib.nameValuePair "${runtimeDir}/${instance}" {
+              d = {
+                mode = "0755";
+                user = owner;
+                inherit group;
+              };
+            })
+          (lib.attrNames byInstance)
+          ++ map (entry:
+            lib.nameValuePair entry.file {
+              "C+" = {
+                argument = "/run/agenix/${entry.secretName}";
+                inherit mode group;
+                user = owner;
+              };
+            })
+          entries
+        );
+    };
+
+    instances = lib.mapAttrs instanceRuntime byInstance;
+  };
 in {
-  inherit mkHomeEnvSecretModules mkSecret mkSecretSyncTargets mkSharedSecret pubOf;
+  inherit mkForgejoRunnerFileEnv mkHomeEnvSecretModules mkSecret mkSecretSyncTargets mkSharedSecret pubOf;
 }

@@ -6,6 +6,7 @@
   treefmt-nix,
   git-hooks,
   nix-manager-core,
+  nix-pklx,
   plinth,
   ...
 }:
@@ -100,6 +101,9 @@ nix-manager-core.lib.mkManagerOutputs {
       renderedSync = secretLib.mkSecretSyncTargets {
         inherit catalog plain;
       };
+      runnerFileEnv = secretLib.mkForgejoRunnerFileEnv {
+        inherit catalog;
+      };
 
       homeSecrets = renderedHome.config.renderedSecrets;
     in
@@ -118,7 +122,33 @@ nix-manager-core.lib.mkManagerOutputs {
       assert renderedSync.public-value-target.source == "age/secrets/public-value.txt";
       assert !(renderedSync ? env-only);
       assert !(renderedSync ? unsynced-public);
+      assert runnerFileEnv.instances == {};
         pkgs.runCommand "secret-manager-catalog-renderers" {} "touch $out";
+
+    runnerFileEnvCheckFor = pkgs: let
+      rendered = secretLib.mkForgejoRunnerFileEnv {
+        catalog = {
+          copr-token = {
+            source.relative = "age/secrets/modules/repos/coppr/token.age";
+            runnerFileEnv = [
+              {
+                env = "COPR_TOKEN_FILE";
+                instances = ["nixTrusted"];
+              }
+            ];
+          };
+        };
+      };
+      instance = rendered.instances.nixTrusted;
+    in
+      assert rendered.config.age.secrets.forgejo-runner-file-env-nixTrusted-copr-token.rekeyFile
+      == "age/secrets/modules/repos/coppr/token.age";
+      assert rendered.config.systemd.tmpfiles.settings."10-secret-manager-forgejo-runner-file-env"."/run/secret-manager/forgejo-runner/nixTrusted/copr-token"."C+".argument
+      == "/run/agenix/forgejo-runner-file-env-nixTrusted-copr-token";
+      assert builtins.elem "-v /run/secret-manager/forgejo-runner/nixTrusted:/run/secret-manager/forgejo-runner/nixTrusted:ro" instance.containerOptions;
+      assert builtins.elem "-e COPR_TOKEN_FILE=/run/secret-manager/forgejo-runner/nixTrusted/copr-token" instance.containerOptions;
+      assert instance.validVolumes == ["/run/secret-manager/forgejo-runner/nixTrusted"];
+        pkgs.runCommand "secret-manager-runner-file-env-renderer" {} "touch $out";
   in {
     nixosModules = {
       secretSync = module;
@@ -129,6 +159,7 @@ nix-manager-core.lib.mkManagerOutputs {
 
     packages = forAllSystems (system: let
       pkgs = pkgsFor system;
+      pklx = nix-pklx.packages.${system}.pklx;
       docs = pkgs.stdenv.mkDerivation {
         pname = "secret-manager-docs";
         version = "0.1.0";
@@ -146,6 +177,7 @@ nix-manager-core.lib.mkManagerOutputs {
       };
     in {
       inherit docs;
+      inherit pklx;
       site = pkgs.runCommand "secret-manager-site" {} ''
         mkdir -p $out
         cp -rL --no-preserve=mode ${docs}/. $out/
@@ -176,6 +208,7 @@ nix-manager-core.lib.mkManagerOutputs {
 
     checks = forAllSystems (system: {
       catalog-renderers = rendererCheckFor (pkgsFor system);
+      runner-file-env-renderer = runnerFileEnvCheckFor (pkgsFor system);
     });
   };
 }

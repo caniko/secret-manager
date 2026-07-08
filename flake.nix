@@ -25,6 +25,15 @@
       inputs.treefmt-nix.follows = "treefmt-nix";
       inputs.git-hooks.follows = "git-hooks";
     };
+    nix-pklx = {
+      url = "git+https://codeberg.org/caniko/nix-pklx.git";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.rs-harbor.follows = "rs-harbor";
+      inputs.rust-overlay.follows = "rust-overlay";
+      inputs.crane.follows = "crane";
+      inputs.flake-utils.follows = "flake-utils";
+      inputs.plinth.follows = "plinth";
+    };
     plinth = {
       url = "git+https://codeberg.org/caniko/plinth.git";
       inputs.nixpkgs.follows = "nixpkgs";
