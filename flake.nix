@@ -7,7 +7,7 @@
     nixpkgs.follows = "rs-harbor/nixpkgs";
     rust-overlay.follows = "rs-harbor/rust-overlay";
     crane.follows = "rs-harbor/crane";
-    flake-utils.follows = "rs-harbor/flake-utils";
+    flake-utils.url = "github:numtide/flake-utils";
 
     treefmt-nix.url = "github:numtide/treefmt-nix";
     treefmt-nix.inputs.nixpkgs.follows = "nixpkgs";
@@ -21,7 +21,6 @@
       inputs.rs-harbor.follows = "rs-harbor";
       inputs.rust-overlay.follows = "rust-overlay";
       inputs.crane.follows = "crane";
-      inputs.flake-utils.follows = "flake-utils";
       inputs.treefmt-nix.follows = "treefmt-nix";
       inputs.git-hooks.follows = "git-hooks";
     };
@@ -31,7 +30,6 @@
       inputs.rs-harbor.follows = "rs-harbor";
       inputs.rust-overlay.follows = "rust-overlay";
       inputs.crane.follows = "crane";
-      inputs.flake-utils.follows = "flake-utils";
       inputs.plinth.follows = "plinth";
     };
     plinth = {
