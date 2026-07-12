@@ -12,5 +12,7 @@
 
 ### Fixed
 
+- Nix library wiring now exposes the shared Forgejo runner file-environment
+  helper from the expected module surface.
 - Corrected "foregejo" typos to "forgejo" in Nix module paths and source
   references.

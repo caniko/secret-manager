@@ -1,4 +1,6 @@
 {lib}: let
+  secretFileName = name: builtins.replaceStrings ["-"] ["_"] name;
+
   mkSecret = {
     name,
     stack,
@@ -98,6 +100,7 @@
       ];
 
       age.secrets.${name} = lib.filterAttrs (_: v: v != null) ({
+          name = lib.mkDefault (secretFileName name);
           rekeyFile = source;
           inherit owner group mode;
         }
@@ -376,5 +379,5 @@
     instances = lib.mapAttrs instanceRuntime byInstance;
   };
 in {
-  inherit mkForgejoRunnerFileEnv mkHomeEnvSecretModules mkSecret mkSecretSyncTargets mkSharedSecret pubOf;
+  inherit mkForgejoRunnerFileEnv mkHomeEnvSecretModules mkSecret mkSecretSyncTargets mkSharedSecret pubOf secretFileName;
 }
