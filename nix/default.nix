@@ -23,6 +23,7 @@ nix-manager-core.lib.mkManagerOutputs {
     lib,
     forAllSystems,
     pkgsFor,
+    cargoFor,
     ...
   }: let
     module = import ./module.nix;
@@ -184,6 +185,40 @@ nix-manager-core.lib.mkManagerOutputs {
         printf '%s\n' "secret-manager.tartanoglu.com" > $out/.domains
       '';
     });
+
+    # Crossbow consumers need the runtime decryptor on the target host. Keep
+    # the native package surface above unchanged and publish an explicit
+    # build-platform -> aarch64-linux package for target closures.
+    crossPackages = forAllSystems (system:
+      if system != "x86_64-linux"
+      then {}
+      else let
+        pkgs = pkgsFor system;
+        toolchain = rs-harbor.lib.mkToolchain {inherit pkgs;};
+        cross = rs-harbor.lib.mkCross {inherit pkgs system;};
+        cargo = cargoFor system;
+        targetPkgs = cross.linuxAarch64.pkgsCross;
+        packages = rs-harbor.lib.mkCrossPackages {
+          inherit pkgs cross;
+          inherit (toolchain) craneLib;
+          pname = "secret-manager";
+          commonArgs = cargo.commonArgs;
+          targets = ["aarch64-linux"];
+          targetArgs."aarch64-linux" = {
+            doCheck = false;
+            nativeBuildInputs = [pkgs.makeWrapper];
+            postInstall = ''
+              wrapProgram "$out/bin/secret-manager" \
+                --prefix PATH : ${pkgs.lib.makeBinPath [targetPkgs.rage]}
+            '';
+          };
+        };
+      in {
+        aarch64-linux = {
+          # canix's crossPackageFor helper selects this stable runtime name.
+          "secret-manager" = packages."secret-manager-aarch64-linux";
+        };
+      });
 
     apps = forAllSystems (system: {
       deploy-pages = plinth.lib.${system}.mkDeployPagesApp {
