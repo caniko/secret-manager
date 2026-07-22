@@ -208,8 +208,10 @@ nix-manager-core.lib.mkManagerOutputs {
             doCheck = false;
             nativeBuildInputs = [pkgs.makeWrapper];
             postInstall = ''
-              wrapProgram "$out/bin/secret-manager" \
-                --prefix PATH : ${pkgs.lib.makeBinPath [targetPkgs.rage]}
+              if test -x "$out/bin/secret-manager"; then
+                wrapProgram "$out/bin/secret-manager" \
+                  --prefix PATH : ${pkgs.lib.makeBinPath [targetPkgs.rage]}
+              fi
             '';
           };
         };
