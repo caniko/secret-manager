@@ -26,8 +26,8 @@
         default = null;
         description = ''
           Path to a plaintext non-secret file, relative to the store root.
-          Plaintext source values are pushed to Forgejo Actions variables,
-          not Actions secrets.
+          Plaintext source values are pushed to Actions variables, not Actions
+          secrets.
         '';
         example = "age/secrets/my-public-key.asc";
       };
@@ -49,6 +49,28 @@
           value to. Repeats for multiple repos.
           Auth comes from `fj` at
           `''${XDG_DATA_HOME:-$HOME/.local/share}/forgejo-cli/keys.json`.
+        '';
+        example = ["caniko/my-repo"];
+      };
+
+      codefloe = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [];
+        description = ''
+          Codefloe repositories (in `owner/repo` format) to push this value
+          to. Auth comes from `fj` at
+          `''${XDG_DATA_HOME:-$HOME/.local/share}/forgejo-cli/keys.json` for
+          the `codefloe.com` host.
+        '';
+        example = ["caniko/my-repo"];
+      };
+
+      github = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [];
+        description = ''
+          GitHub repositories (in `owner/repo` format) to push this value to.
+          Auth comes from the `gh` CLI.
         '';
         example = ["caniko/my-repo"];
       };
@@ -98,7 +120,8 @@ in {
 
       When enabled, the targets declared here are collected into a JSON
       document that `secret-manager sync` reads to push secrets to
-      Codeberg/Forgejo repositories without ad-hoc CLI flags.
+        Codeberg/Forgejo, Codefloe, and GitHub repositories without ad-hoc CLI
+        flags.
     '';
 
     targets = lib.mkOption {

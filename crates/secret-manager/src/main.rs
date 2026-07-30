@@ -39,7 +39,7 @@ enum Command {
     Sync(sync::SyncArgs),
 
     /// Decrypt an agenix secret and push it to repo Actions secret stores
-    /// (Codeberg/Forgejo, GitHub) so workflows can read it as
+    /// (Codeberg/Forgejo, Codefloe, GitHub) so workflows can read it as
     /// `${{ secrets.<NAME> }}`. The plaintext is never written to disk.
     #[command(arg_required_else_help = true)]
     Push(push::PushArgs),

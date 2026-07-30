@@ -11,7 +11,7 @@ The `secret_manager` library provides the building blocks used by the CLI.
 | `io`     | File I/O, temp dirs, editor integration, validation                                                           |
 | `legacy` | Legacy workflows (WireGuard, Rauthy, Gerrit cookies)                                                          |
 | `plan`   | Plan execution engine — source prep, module writing, rekey                                                    |
-| `push`   | Decrypt and push secrets to Codeberg/GitHub Actions                                                           |
+| `push`   | Decrypt and push secrets to Codeberg/Codefloe/GitHub Actions                                                  |
 | `render` | Nix module rendering — `TargetSpec`, `render_body`, `camel`                                                   |
 | `store`  | `Store` discovery, master identity resolution                                                                 |
 | `age`    | Re-export of `nix_manager_core::age` — rage decryption and the shared flags → env → stubs identity resolution |

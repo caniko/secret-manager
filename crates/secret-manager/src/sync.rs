@@ -3,16 +3,16 @@ use clap::Args;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::fs;
-use std::io::{IsTerminal, Read};
+use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::store::{Store, resolve_against};
 use crate::sync_state::{
     ManagedKind, ManagedRecord, Scope, SyncState, desired_records, retained_without_prune,
     stale_records,
 };
-use crate::sync_targets::{SyncDocument, SyncValue};
+use crate::sync_targets::{Provider, SyncDocument, SyncValue};
 use nix_manager_core::{age, forge, ui};
 
 /// Read collected sync targets and push each declared value to its
@@ -20,8 +20,8 @@ use nix_manager_core::{age, forge, ui};
 /// the nearest flake is evaluated via `secret-manager.lib.collect`.
 ///
 /// Encrypted agenix values are pushed as Actions secrets. Plaintext source
-/// files are pushed as Actions variables. Reuses the same auth resolution as `push`:
-/// the `fj` auth store.
+/// files are pushed as Actions variables. Forgejo destinations use the `fj` auth
+/// store; GitHub destinations use the `gh` CLI.
 #[derive(Args)]
 pub struct SyncArgs {
     /// Path to the collected sync-targets JSON document.
@@ -72,6 +72,7 @@ pub struct SyncArgs {
 
 impl SyncArgs {
     pub fn run(self) -> Result<()> {
+        validate_target_prune_args(&self.targets, self.prune)?;
         let doc = self.load_document()?;
         let doc = filter_document_targets(doc, &self.targets)?;
         let total = doc.total_targets();
@@ -108,21 +109,13 @@ impl SyncArgs {
             } else {
                 println!("Planned pushes (--dry-run):");
             }
-            for (_, name, target) in doc.iter_targets() {
+            for record in &desired_state {
                 println!();
-                println!("  target: {name}");
-                println!("  kind:   {}", target.value.kind());
-                println!("  source: {}", target.value.path());
-                println!("  name:   {}", target.name);
-                for repo in &target.codeberg {
-                    println!("  → codeberg/{} repo  {}", target.host, repo);
-                }
-                for org in &target.codeberg_orgs {
-                    println!("  → codeberg/{} org   {}", target.host, org);
-                }
-                if target.codeberg_user {
-                    println!("  → codeberg/{} user  authenticated", target.host);
-                }
+                println!("  target: {}", record.target);
+                println!("  kind:   {}", kind_label(record.kind));
+                println!("  source: {}", record.source);
+                println!("  name:   {}", record.name);
+                println!("  → {}", record.destination_label());
             }
             print_stale_records(&stale, self.prune);
             println!();
@@ -138,75 +131,19 @@ impl SyncArgs {
         };
         let mut value_cache = SyncValueCache::default();
 
-        for (_, name, target) in doc.iter_targets() {
+        for record in &desired_state {
             ui::step(format!(
                 "sync: `{}` {} from {}",
-                name,
-                target.value.kind(),
-                target.value.path()
+                record.target,
+                kind_label(record.kind),
+                record.source
             ));
             if self.verbose {
-                ui::info(format!("destinations: {}", destination_count(target)));
+                ui::info(format!("destination: {}", record.destination_label()));
             }
 
-            let value = value_cache.get(&store, &target.value, decrypt_session.as_ref())?;
-
-            for repo in &target.codeberg {
-                ui::step(format!(
-                    "  codeberg/{} repo → {} as {}",
-                    target.host, repo, target.name
-                ));
-                match &target.value {
-                    SyncValue::Secret(_) => {
-                        forge::push_codeberg_secret(&target.host, repo, &target.name, &value)?;
-                    }
-                    SyncValue::Source(_) => {
-                        forge::push_codeberg_variable(&target.host, repo, &target.name, &value)?;
-                    }
-                }
-            }
-
-            for org in &target.codeberg_orgs {
-                ui::step(format!(
-                    "  codeberg/{} org → {} as {}",
-                    target.host, org, target.name
-                ));
-                match &target.value {
-                    SyncValue::Secret(_) => {
-                        forge::push_codeberg_organization_secret(
-                            &target.host,
-                            org,
-                            &target.name,
-                            &value,
-                        )?;
-                    }
-                    SyncValue::Source(_) => {
-                        forge::push_codeberg_organization_variable(
-                            &target.host,
-                            org,
-                            &target.name,
-                            &value,
-                        )?;
-                    }
-                }
-            }
-
-            if target.codeberg_user {
-                let auth = forge::codeberg_auth(&target.host)?;
-                ui::step(user_scope_push_label(
-                    &target.host,
-                    auth.username(),
-                    &target.name,
-                ));
-                match &target.value {
-                    SyncValue::Secret(_) => {
-                        forge::push_codeberg_user_secret(&target.host, &target.name, &value)?;
-                    }
-                    SyncValue::Source(_) => {
-                        forge::push_codeberg_user_variable(&target.host, &target.name, &value)?;
-                    }
-                }
-            }
+            let value = value_cache.get(&store, &record_value(record), decrypt_session.as_ref())?;
+            push_managed_record(record, &value)?;
         }
 
         if self.prune {
@@ -291,6 +228,13 @@ impl SyncArgs {
             .map(|store| FlakeRef::Path(store.root))
             .map_err(|e| anyhow!("{NO_INPUT}: {e}"))
     }
+}
+
+fn validate_target_prune_args(targets: &[String], prune: bool) -> Result<()> {
+    if prune && !targets.is_empty() {
+        bail!("--prune cannot be combined with --target; prune requires the complete config");
+    }
+    Ok(())
 }
 
 const NO_INPUT: &str =
@@ -534,10 +478,6 @@ fn document_summary(doc: &SyncDocument) -> SyncDocumentSummary {
     }
 }
 
-fn destination_count(target: &crate::sync_targets::SyncTarget) -> usize {
-    target.codeberg.len() + target.codeberg_orgs.len() + usize::from(target.codeberg_user)
-}
-
 fn plural_s(count: usize) -> &'static str {
     if count == 1 { "" } else { "s" }
 }
@@ -600,6 +540,84 @@ fn report_stale_records(stale: &[ManagedRecord]) {
 fn document_needs_decrypt_session(doc: &SyncDocument) -> bool {
     doc.iter_targets()
         .any(|(_, _, target)| matches!(target.value, SyncValue::Secret(_)))
+}
+
+fn record_value(record: &ManagedRecord) -> SyncValue {
+    match record.kind {
+        ManagedKind::Secret => SyncValue::Secret(record.source.clone()),
+        ManagedKind::Variable => SyncValue::Source(record.source.clone()),
+    }
+}
+
+fn push_managed_record(record: &ManagedRecord, value: &str) -> Result<()> {
+    ui::step(format!(
+        "  {} as {}",
+        record.destination_label(),
+        record.name
+    ));
+    match record.provider {
+        Provider::Forgejo => push_forgejo_record(record, value),
+        Provider::Github => push_github_record(record, value),
+    }
+}
+
+fn push_forgejo_record(record: &ManagedRecord, value: &str) -> Result<()> {
+    match record.scope {
+        Scope::Repo => {
+            let repo = record_repo(record)?;
+            match record.kind {
+                ManagedKind::Secret => {
+                    forge::push_codeberg_secret(&record.host, &repo, &record.name, value)
+                }
+                ManagedKind::Variable => {
+                    forge::push_codeberg_variable(&record.host, &repo, &record.name, value)
+                }
+            }
+        }
+        Scope::Org => {
+            let org = required_field(record.org.as_deref(), record, "org")?;
+            match record.kind {
+                ManagedKind::Secret => {
+                    forge::push_codeberg_organization_secret(&record.host, org, &record.name, value)
+                }
+                ManagedKind::Variable => forge::push_codeberg_organization_variable(
+                    &record.host,
+                    org,
+                    &record.name,
+                    value,
+                ),
+            }
+        }
+        Scope::User if record.kind == ManagedKind::Secret => {
+            let auth = forge::codeberg_auth(&record.host)?;
+            ui::step(user_scope_push_label(
+                &record.host,
+                auth.username(),
+                &record.name,
+            ));
+            forge::push_codeberg_user_secret(&record.host, &record.name, value)
+        }
+        Scope::User => {
+            let auth = forge::codeberg_auth(&record.host)?;
+            ui::step(user_scope_push_label(
+                &record.host,
+                auth.username(),
+                &record.name,
+            ));
+            forge::push_codeberg_user_variable(&record.host, &record.name, value)
+        }
+    }
+}
+
+fn push_github_record(record: &ManagedRecord, value: &str) -> Result<()> {
+    if record.scope != Scope::Repo {
+        bail!("GitHub supports repository sync targets only");
+    }
+    let repo = record_repo(record)?;
+    match record.kind {
+        ManagedKind::Secret => forge::push_github_secret(&repo, &record.name, value),
+        ManagedKind::Variable => push_github_variable(&repo, &record.name, value),
+    }
 }
 
 #[derive(Default)]
@@ -714,7 +732,55 @@ fn read_plaintext_source_path(source_path: &Path) -> Result<String> {
 }
 
 fn user_scope_push_label(host: &str, username: &str, name: &str) -> String {
-    format!("  codeberg/{host} user → {username} as {name}")
+    format!(
+        "  {}/{} user → {username} as {name}",
+        forge_label(host),
+        host
+    )
+}
+
+fn forge_label(host: &str) -> &'static str {
+    match host {
+        "codeberg.org" => "codeberg",
+        "codefloe.com" => "codefloe",
+        _ => "forgejo",
+    }
+}
+
+fn record_repo(record: &ManagedRecord) -> Result<String> {
+    Ok(format!(
+        "{}/{}",
+        required_field(record.owner.as_deref(), record, "owner")?,
+        required_field(record.repo.as_deref(), record, "repo")?
+    ))
+}
+
+fn push_github_variable(repo: &str, name: &str, value: &str) -> Result<()> {
+    run_gh_with_input(&["variable", "set", name, "--repo", repo], value)
+}
+
+fn run_gh_with_input(args: &[&str], value: &str) -> Result<()> {
+    let mut child = Command::new("gh")
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|e| anyhow!("failed to spawn gh: {e}"))?;
+    {
+        let stdin = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| anyhow!("gh stdin was not captured"))?;
+        stdin.write_all(value.as_bytes())?;
+    }
+    drop(child.stdin.take());
+    let status = child.wait().map_err(|e| anyhow!("wait on gh: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("gh {} exited with status {}", args.join(" "), status)
+    }
 }
 
 fn codeberg_client(host: &str, auth: &forge::CodebergAuth) -> Result<forgejo_api::sync::Forgejo> {
@@ -726,13 +792,20 @@ fn codeberg_client(host: &str, auth: &forge::CodebergAuth) -> Result<forgejo_api
 }
 
 fn delete_managed_record(record: &ManagedRecord) -> Result<()> {
-    let action = delete_action_for(record)?;
     ui::step(format!(
-        "  pruning codeberg/{} {} `{}`",
-        record.host,
-        action.description(),
+        "  pruning {} {} `{}`",
+        record.destination_label(),
+        kind_label(record.kind),
         record.name
     ));
+    match record.provider {
+        Provider::Forgejo => delete_forgejo_record(record),
+        Provider::Github => delete_github_record(record),
+    }
+}
+
+fn delete_forgejo_record(record: &ManagedRecord) -> Result<()> {
+    let action = delete_action_for(record)?;
     let auth = forge::codeberg_auth(&record.host)?;
     let api = codeberg_client(&record.host, &auth)?;
 
@@ -761,6 +834,33 @@ fn delete_managed_record(record: &ManagedRecord) -> Result<()> {
     }
 }
 
+fn delete_github_record(record: &ManagedRecord) -> Result<()> {
+    if record.scope != Scope::Repo {
+        bail!("GitHub supports repository sync targets only");
+    }
+    let repo = record_repo(record)?;
+    let kind = match record.kind {
+        ManagedKind::Secret => "secret",
+        ManagedKind::Variable => "variable",
+    };
+    let output = Command::new("gh")
+        .args([kind, "delete", &record.name, "--repo", &repo])
+        .output()
+        .map_err(|e| anyhow!("failed to spawn gh: {e}"))?;
+    if output.status.success() || github_not_found(&output.stderr) {
+        return Ok(());
+    }
+    bail!(
+        "gh {kind} delete --repo {repo} exited with status {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    )
+}
+
+fn github_not_found(stderr: &[u8]) -> bool {
+    String::from_utf8_lossy(stderr).contains("HTTP 404")
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum DeleteAction<'a> {
     RepoSecret { owner: &'a str, repo: &'a str },
@@ -769,19 +869,6 @@ enum DeleteAction<'a> {
     OrgVariable { org: &'a str },
     UserSecret,
     UserVariable,
-}
-
-impl DeleteAction<'_> {
-    fn description(&self) -> &'static str {
-        match self {
-            Self::RepoSecret { .. } => "repo secret",
-            Self::RepoVariable { .. } => "repo variable",
-            Self::OrgSecret { .. } => "org secret",
-            Self::OrgVariable { .. } => "org variable",
-            Self::UserSecret => "user secret",
-            Self::UserVariable => "user variable",
-        }
-    }
 }
 
 fn delete_action_for(record: &ManagedRecord) -> Result<DeleteAction<'_>> {
@@ -846,6 +933,8 @@ mod tests {
           "secret": "age/secrets/my-app-token.age",
           "name": "MY_APP_TOKEN",
           "codeberg": ["caniko/my-repo"],
+          "codefloe": ["caniko/codefloe-repo"],
+          "github": ["caniko/github-repo"],
           "codebergOrgs": ["caniko"],
           "codebergUser": true,
           "host": "codeberg.org"
@@ -877,9 +966,8 @@ mod tests {
                 let kind: &str = target.value.kind();
                 let secret_name: &str = &target.name;
                 let repos = target
-                    .codeberg
-                    .iter()
-                    .map(move |repo| (kind, host, source, secret_name, "repo", repo.as_str()));
+                    .repo_destinations()
+                    .map(move |(_, host, repo)| (kind, host, source, secret_name, "repo", repo));
                 let orgs = target
                     .codeberg_orgs
                     .iter()
@@ -934,6 +1022,22 @@ mod tests {
                 ),
                 (
                     "secret",
+                    "codefloe.com",
+                    "age/secrets/my-app-token.age",
+                    "MY_APP_TOKEN",
+                    "repo",
+                    "caniko/codefloe-repo"
+                ),
+                (
+                    "secret",
+                    "github.com",
+                    "age/secrets/my-app-token.age",
+                    "MY_APP_TOKEN",
+                    "repo",
+                    "caniko/github-repo"
+                ),
+                (
+                    "secret",
                     "codeberg.org",
                     "age/secrets/my-app-token.age",
                     "MY_APP_TOKEN",
@@ -949,8 +1053,7 @@ mod tests {
                     "authenticated"
                 ),
             ],
-            "dry-run planning should expand all codeberg repos per target, \
-             honoring each target's host"
+            "dry-run planning should expand every forge repository target"
         );
     }
 
@@ -1001,6 +1104,17 @@ mod tests {
         let doc = SyncDocument::from_json(FIXTURE).unwrap();
         let err = filter_document_targets(doc, &["missing".to_owned()]).unwrap_err();
         assert!(err.to_string().contains("unknown sync target(s): missing"));
+    }
+
+    #[test]
+    fn prune_requires_the_complete_target_configuration() {
+        assert!(validate_target_prune_args(&[], true).is_ok());
+        assert!(validate_target_prune_args(&["ci-token".to_string()], false).is_ok());
+        let err = validate_target_prune_args(&["ci-token".to_string()], true).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("--prune cannot be combined with --target")
+        );
     }
 
     #[test]
@@ -1110,17 +1224,6 @@ mod tests {
     }
 
     #[test]
-    fn destination_count_counts_repos_orgs_and_user_scope() {
-        let doc: SyncDocument = serde_json::from_str(FIXTURE).unwrap();
-        let mut counts: Vec<(&str, usize)> = doc
-            .iter_targets()
-            .map(|(_, name, target)| (name, destination_count(target)))
-            .collect();
-        counts.sort_by_key(|(name, _)| *name);
-        assert_eq!(counts, vec![("deploy-key", 3), ("my-app-token", 3)]);
-    }
-
-    #[test]
     fn document_needs_decrypt_session_when_any_target_is_encrypted() {
         let doc: SyncDocument = serde_json::from_str(FIXTURE).unwrap();
         assert!(document_needs_decrypt_session(&doc));
@@ -1185,6 +1288,16 @@ mod tests {
             user_scope_push_label("codeberg.org", "caniko", "CHOCOLATEY_API_KEY"),
             "  codeberg/codeberg.org user → caniko as CHOCOLATEY_API_KEY"
         );
+        assert_eq!(
+            user_scope_push_label("codefloe.com", "caniko", "CHOCOLATEY_API_KEY"),
+            "  codefloe/codefloe.com user → caniko as CHOCOLATEY_API_KEY"
+        );
+    }
+
+    #[test]
+    fn github_not_found_only_ignores_missing_remote_entries() {
+        assert!(github_not_found(b"gh: HTTP 404: Not Found"));
+        assert!(!github_not_found(b"gh: HTTP 403: Forbidden"));
     }
 
     #[test]
@@ -1301,6 +1414,7 @@ mod tests {
 
     fn repo_record(kind: ManagedKind) -> ManagedRecord {
         ManagedRecord {
+            provider: Provider::Forgejo,
             host: "codeberg.org".to_string(),
             scope: Scope::Repo,
             owner: Some("caniko".to_string()),
@@ -1315,6 +1429,7 @@ mod tests {
 
     fn org_record(kind: ManagedKind) -> ManagedRecord {
         ManagedRecord {
+            provider: Provider::Forgejo,
             host: "codeberg.org".to_string(),
             scope: Scope::Org,
             owner: None,
@@ -1329,6 +1444,7 @@ mod tests {
 
     fn user_record(kind: ManagedKind) -> ManagedRecord {
         ManagedRecord {
+            provider: Provider::Forgejo,
             host: "codeberg.org".to_string(),
             scope: Scope::User,
             owner: None,

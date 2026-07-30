@@ -122,6 +122,18 @@ pub struct SyncTarget {
         deserialize_with = "null_to_empty_vec",
         skip_serializing_if = "Vec::is_empty"
     )]
+    pub codefloe: Vec<String>,
+    #[serde(
+        default,
+        deserialize_with = "null_to_empty_vec",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub github: Vec<String>,
+    #[serde(
+        default,
+        deserialize_with = "null_to_empty_vec",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub codeberg_orgs: Vec<String>,
     #[serde(default = "default_host", skip_serializing_if = "is_default_host")]
     pub host: String,
@@ -499,6 +511,12 @@ fn render_sync(out: &mut String, sync: &SyncTarget, level: usize) {
     if !sync.codeberg.is_empty() {
         render_string_list_field(out, "codeberg", &sync.codeberg, level + 1);
     }
+    if !sync.codefloe.is_empty() {
+        render_string_list_field(out, "codefloe", &sync.codefloe, level + 1);
+    }
+    if !sync.github.is_empty() {
+        render_string_list_field(out, "github", &sync.github, level + 1);
+    }
     if !sync.codeberg_orgs.is_empty() {
         render_string_list_field(out, "codebergOrgs", &sync.codeberg_orgs, level + 1);
     }
@@ -651,5 +669,23 @@ mod tests {
         assert!(rendered.contains("runnerFileEnv"));
         assert!(rendered.contains("COPR_TOKEN_FILE"));
         assert!(rendered.contains("nixTrusted"));
+    }
+
+    #[test]
+    fn render_sync_includes_codefloe_and_github() {
+        let sync = SyncTarget {
+            target: "ci-token".to_string(),
+            name: "CI_TOKEN".to_string(),
+            codeberg_user: false,
+            codeberg: Vec::new(),
+            codefloe: vec!["caniko/codefloe-repo".to_string()],
+            github: vec!["caniko/github-repo".to_string()],
+            codeberg_orgs: Vec::new(),
+            host: default_host(),
+        };
+        let mut rendered = String::new();
+        render_sync(&mut rendered, &sync, 0);
+        assert!(rendered.contains("codefloe = [\"caniko/codefloe-repo\"]"));
+        assert!(rendered.contains("github = [\"caniko/github-repo\"]"));
     }
 }

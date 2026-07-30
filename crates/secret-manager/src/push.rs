@@ -7,7 +7,7 @@ use crate::store::{Store, resolve_against};
 use nix_manager_core::{forge, ui};
 
 /// Decrypt an agenix-encrypted secret and push it to repository Actions
-/// secret stores (Codeberg/Forgejo and/or GitHub). The plaintext only ever
+/// secret stores (Codeberg/Forgejo, Codefloe, and/or GitHub). The plaintext only ever
 /// lives in process memory — it is never written to disk or echoed.
 #[derive(Args)]
 pub struct PushArgs {
@@ -23,6 +23,11 @@ pub struct PushArgs {
     /// `${XDG_DATA_HOME:-$HOME/.local/share}/forgejo-cli/keys.json`.
     #[arg(long = "codeberg", value_name = "OWNER/REPO")]
     pub codeberg: Vec<String>,
+
+    /// Codefloe repo (owner/repo) to push to. Repeat for multiple repos.
+    /// Auth: `fj -H codefloe.com` auth store entry.
+    #[arg(long = "codefloe", value_name = "OWNER/REPO")]
+    pub codefloe: Vec<String>,
 
     /// GitHub repo (owner/repo) to push to via `gh secret set`. Repeatable.
     #[arg(long = "github", value_name = "OWNER/REPO")]
@@ -52,8 +57,8 @@ pub struct DecryptArgs {
 
 impl PushArgs {
     pub fn run(self) -> Result<()> {
-        if self.codeberg.is_empty() && self.github.is_empty() {
-            bail!("no targets — pass --codeberg owner/repo and/or --github owner/repo");
+        if self.codeberg.is_empty() && self.codefloe.is_empty() && self.github.is_empty() {
+            bail!("no targets — pass --codeberg, --codefloe, and/or --github owner/repo");
         }
 
         let store = Store::discover()?;
@@ -62,6 +67,9 @@ impl PushArgs {
         for repo in &self.codeberg {
             forge::push_codeberg_org_secret(repo, &self.name, &value)?;
         }
+        for repo in &self.codefloe {
+            forge::push_codeberg_secret("codefloe.com", repo, &self.name, &value)?;
+        }
         for repo in &self.github {
             forge::push_github_secret(repo, &self.name, &value)?;
         }
@@ -69,7 +77,7 @@ impl PushArgs {
         ui::success(format!(
             "pushed `{}` to {} repo(s)",
             self.name,
-            self.codeberg.len() + self.github.len()
+            self.codeberg.len() + self.codefloe.len() + self.github.len()
         ));
         Ok(())
     }

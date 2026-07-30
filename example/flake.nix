@@ -63,6 +63,8 @@
             target = "sync-only-target";
             name = "SYNC_ONLY_TOKEN";
             codeberg = ["caniko/example"];
+            codefloe = ["caniko/codefloe-example"];
+            github = ["caniko/github-example"];
           };
         };
       };
@@ -139,6 +141,8 @@
         assert renderedSync.with-sync-target.secret == "age/secrets/with-sync.age";
         assert renderedSync.with-sync-target.name == "WITH_SYNC_TOKEN";
         assert renderedSync.sync-only-target.secret == "age/secrets/sync-only.age";
+        assert renderedSync.sync-only-target.codefloe == ["caniko/codefloe-example"];
+        assert renderedSync.sync-only-target.github == ["caniko/github-example"];
         assert renderedSync.public-value-target.source == "age/secrets/public-value.txt";
         assert !(renderedSync ? env-only);
         assert !(renderedSync ? unsynced-public);

@@ -113,6 +113,7 @@ Decrypt an agenix secret and push it to repository Actions secret stores.
 secret-manager push <SECRET.age> \
   --name <SECRET_NAME> \
   --codeberg <OWNER/REPO> \
+  --codefloe <OWNER/REPO> \
   --github <OWNER/REPO> \
   --identity <IDENTITY.pub>
 ```
@@ -120,9 +121,11 @@ secret-manager push <SECRET.age> \
 ### `sync` — Push declared sync targets
 
 Read a collected `services.secretSync` JSON document and push each declared
-target to Codeberg/Forgejo repository, organization, or authenticated-user
-Actions scopes. Encrypted `secret` targets are pushed as Actions secrets;
-plaintext `source` targets are pushed as Actions variables.
+target to Codeberg/Forgejo, Codefloe, or GitHub Actions scopes. Codeberg/Forgejo
+targets support repository, organization, and authenticated-user scopes;
+Codefloe and GitHub targets are repository-scoped. Encrypted `secret` targets
+are pushed as Actions secrets; plaintext `source` targets are pushed as Actions
+variables.
 
 ```sh
 secret-manager sync --dry-run
@@ -147,7 +150,7 @@ require one of those explicit input paths.
 `<secret-store>/.secret-manager/sync-state.toml` by default. Pass
 `--state <PATH>` to use a different state file. Entries that were previously
 managed but no longer appear in the collected config are reported as stale.
-They are only deleted from Forgejo when `--prune` is passed.
+They are only deleted from their configured forge when `--prune` is passed.
 
 ### `decrypt` — Decrypt to stdout
 

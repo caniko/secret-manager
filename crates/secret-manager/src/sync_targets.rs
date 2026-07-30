@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Top-level document produced by `nix/collect.nix` → `builtins.toJSON`.
 ///
@@ -33,6 +33,12 @@ pub struct SyncTarget {
     /// Codeberg/Forgejo repositories (owner/repo) to push to.
     pub codeberg: Vec<String>,
 
+    /// Codefloe repositories (owner/repo) to push to.
+    pub codefloe: Vec<String>,
+
+    /// GitHub repositories (owner/repo) to push to.
+    pub github: Vec<String>,
+
     /// Codeberg/Forgejo organizations to push to at account scope.
     pub codeberg_orgs: Vec<String>,
 
@@ -41,6 +47,15 @@ pub struct SyncTarget {
 
     /// Forge host for Codeberg/Forgejo token resolution.
     pub host: String,
+}
+
+/// A forge API used by a managed destination.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Provider {
+    #[default]
+    Forgejo,
+    Github,
 }
 
 /// Where a sync target's value comes from.
@@ -67,6 +82,25 @@ impl SyncValue {
     }
 }
 
+impl SyncTarget {
+    /// Repository destinations, normalized to the API and host that serve them.
+    pub fn repo_destinations(&self) -> impl Iterator<Item = (Provider, &str, &str)> {
+        self.codeberg
+            .iter()
+            .map(|repo| (Provider::Forgejo, self.host.as_str(), repo.as_str()))
+            .chain(
+                self.codefloe
+                    .iter()
+                    .map(|repo| (Provider::Forgejo, "codefloe.com", repo.as_str())),
+            )
+            .chain(
+                self.github
+                    .iter()
+                    .map(|repo| (Provider::Github, "github.com", repo.as_str())),
+            )
+    }
+}
+
 fn default_host() -> String {
     "codeberg.org".to_string()
 }
@@ -83,6 +117,10 @@ impl<'de> Deserialize<'de> for SyncTarget {
             name: String,
             #[serde(default)]
             codeberg: Vec<String>,
+            #[serde(default)]
+            codefloe: Vec<String>,
+            #[serde(default)]
+            github: Vec<String>,
             #[serde(default, rename = "codebergOrgs")]
             codeberg_orgs: Vec<String>,
             #[serde(default, rename = "codebergUser")]
@@ -111,6 +149,8 @@ impl<'de> Deserialize<'de> for SyncTarget {
             value,
             name: raw.name,
             codeberg: raw.codeberg,
+            codefloe: raw.codefloe,
+            github: raw.github,
             codeberg_orgs: raw.codeberg_orgs,
             codeberg_user: raw.codeberg_user,
             host: raw.host,
@@ -202,6 +242,8 @@ mod tests {
           "secret": "age/secrets/my-app-token.age",
           "name": "MY_APP_TOKEN",
           "codeberg": ["caniko/my-repo"],
+          "codefloe": ["caniko/codefloe-repo"],
+          "github": ["caniko/github-repo"],
           "codebergOrgs": ["caniko"],
           "codebergUser": true,
           "host": "codeberg.org"
@@ -210,6 +252,8 @@ mod tests {
           "source": "age/secrets/public-key.asc",
           "name": "PUBLIC_KEY",
           "codeberg": ["caniko/my-repo", "caniko/other-repo"],
+          "codefloe": [],
+          "github": ["caniko/github-public-repo"],
           "codebergOrgs": ["caniko"],
           "codebergUser": false,
           "host": "codeberg.org"
@@ -233,6 +277,8 @@ mod tests {
         );
         assert_eq!(t1.name, "MY_APP_TOKEN");
         assert_eq!(t1.codeberg, vec!["caniko/my-repo"]);
+        assert_eq!(t1.codefloe, vec!["caniko/codefloe-repo"]);
+        assert_eq!(t1.github, vec!["caniko/github-repo"]);
         assert_eq!(t1.codeberg_orgs, vec!["caniko"]);
         assert!(t1.codeberg_user);
         assert_eq!(t1.host, "codeberg.org");
@@ -245,6 +291,8 @@ mod tests {
         );
         assert_eq!(t2.name, "PUBLIC_KEY");
         assert_eq!(t2.codeberg, vec!["caniko/my-repo", "caniko/other-repo"]);
+        assert!(t2.codefloe.is_empty());
+        assert_eq!(t2.github, vec!["caniko/github-public-repo"]);
         assert_eq!(t2.codeberg_orgs, vec!["caniko"]);
         assert!(!t2.codeberg_user);
         assert_eq!(t2.host, "codeberg.org");
@@ -283,6 +331,8 @@ mod tests {
         let doc: SyncDocument = serde_json::from_str(json).unwrap();
         let t = doc.hosts[0].targets.get("minimal").unwrap();
         assert!(t.codeberg.is_empty());
+        assert!(t.codefloe.is_empty());
+        assert!(t.github.is_empty());
         assert!(t.codeberg_orgs.is_empty());
         assert!(!t.codeberg_user);
         assert_eq!(t.host, "codeberg.org");
@@ -307,6 +357,8 @@ mod tests {
             SyncValue::Source("age/secrets/public.asc".to_string())
         );
         assert!(t.codeberg.is_empty());
+        assert!(t.codefloe.is_empty());
+        assert!(t.github.is_empty());
         assert!(t.codeberg_orgs.is_empty());
         assert!(!t.codeberg_user);
         assert_eq!(t.host, "codeberg.org");
@@ -329,8 +381,25 @@ mod tests {
         let doc: SyncDocument = serde_json::from_str(json).unwrap();
         let t = doc.hosts[0].targets.get("account").unwrap();
         assert!(t.codeberg.is_empty());
+        assert!(t.codefloe.is_empty());
+        assert!(t.github.is_empty());
         assert_eq!(t.codeberg_orgs, vec!["caniko", "infra"]);
         assert!(t.codeberg_user);
+    }
+
+    #[test]
+    fn repository_destinations_select_the_correct_provider_and_host() {
+        let doc: SyncDocument = serde_json::from_str(CONTRACT_JSON).unwrap();
+        let target = doc.hosts[0].targets.get("my-app-token").unwrap();
+        let destinations: Vec<_> = target.repo_destinations().collect();
+        assert_eq!(
+            destinations,
+            vec![
+                (Provider::Forgejo, "codeberg.org", "caniko/my-repo"),
+                (Provider::Forgejo, "codefloe.com", "caniko/codefloe-repo"),
+                (Provider::Github, "github.com", "caniko/github-repo"),
+            ]
+        );
     }
 
     #[test]

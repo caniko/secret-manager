@@ -26,4 +26,4 @@ cargo build --release
 
 - `agenix` with `agenix edit`, `agenix generate`, and `agenix rekey`
 - age identity files at `age/master-*.pub` in the store repository
-- (for `push`) `fj` or `gh` authentication for Codeberg/GitHub secret API access
+- (for `push` or `sync`) `fj` or `gh` authentication for Codeberg, Codefloe, or GitHub API access

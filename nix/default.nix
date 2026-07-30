@@ -54,6 +54,8 @@ nix-manager-core.lib.mkManagerOutputs {
             target = "sync-only-target";
             name = "SYNC_ONLY_TOKEN";
             codeberg = ["caniko/example"];
+            codefloe = ["caniko/codefloe-example"];
+            github = ["caniko/github-example"];
           };
         };
       };
@@ -120,6 +122,8 @@ nix-manager-core.lib.mkManagerOutputs {
       assert renderedSync.with-sync-target.secret == "age/secrets/with-sync.age";
       assert renderedSync.with-sync-target.name == "WITH_SYNC_TOKEN";
       assert renderedSync.sync-only-target.secret == "age/secrets/sync-only.age";
+      assert renderedSync.sync-only-target.codefloe == ["caniko/codefloe-example"];
+      assert renderedSync.sync-only-target.github == ["caniko/github-example"];
       assert renderedSync.public-value-target.source == "age/secrets/public-value.txt";
       assert !(renderedSync ? env-only);
       assert !(renderedSync ? unsynced-public);
@@ -194,7 +198,7 @@ nix-manager-core.lib.mkManagerOutputs {
       then {}
       else let
         pkgs = pkgsFor system;
-        toolchain = rs-harbor.lib.mkToolchain {inherit pkgs;};
+        toolchain = rs-harbor.lib.mkToolchain {inherit pkgs; toolchainProfile = "nightly";};
         cross = rs-harbor.lib.mkCross {inherit pkgs system;};
         cargo = cargoFor system;
         targetPkgs = cross.linuxAarch64.pkgsCross;
@@ -230,7 +234,7 @@ nix-manager-core.lib.mkManagerOutputs {
 
     devShells = forAllSystems (system: let
       pkgs = pkgsFor system;
-      toolchain = rs-harbor.lib.mkToolchain {inherit pkgs;};
+      toolchain = rs-harbor.lib.mkToolchain {inherit pkgs; toolchainProfile = "nightly";};
       cross = rs-harbor.lib.mkCross {inherit pkgs system;};
     in {
       docs = rs-harbor.lib.mkDocsShell {

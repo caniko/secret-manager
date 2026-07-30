@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::sync_targets::{SyncDocument, SyncValue};
+use crate::sync_targets::{Provider, SyncDocument, SyncValue};
 
 pub const STATE_VERSION: u32 = 1;
 
@@ -18,6 +18,8 @@ pub struct SyncState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManagedRecord {
+    #[serde(default)]
+    pub provider: Provider,
     pub host: String,
     pub scope: Scope,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -49,6 +51,7 @@ pub enum ManagedKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RecordIdentity {
+    provider: Provider,
     host: String,
     scope: Scope,
     owner: Option<String>,
@@ -61,6 +64,7 @@ pub struct RecordIdentity {
 impl ManagedRecord {
     pub fn identity(&self) -> RecordIdentity {
         RecordIdentity {
+            provider: self.provider,
             host: self.host.clone(),
             scope: self.scope,
             owner: self.owner.clone(),
@@ -72,19 +76,25 @@ impl ManagedRecord {
     }
 
     pub fn destination_label(&self) -> String {
+        let provider = match self.provider {
+            Provider::Forgejo if self.host == "codeberg.org" => "codeberg",
+            Provider::Forgejo if self.host == "codefloe.com" => "codefloe",
+            Provider::Forgejo => "forgejo",
+            Provider::Github => "github",
+        };
         match self.scope {
             Scope::Repo => format!(
-                "codeberg/{} repo  {}/{}",
+                "{provider}/{} repo  {}/{}",
                 self.host,
                 self.owner.as_deref().unwrap_or("<missing-owner>"),
                 self.repo.as_deref().unwrap_or("<missing-repo>")
             ),
             Scope::Org => format!(
-                "codeberg/{} org   {}",
+                "{provider}/{} org   {}",
                 self.host,
                 self.org.as_deref().unwrap_or("<missing-org>")
             ),
-            Scope::User => format!("codeberg/{} user  authenticated", self.host),
+            Scope::User => format!("{provider}/{} user  authenticated", self.host),
         }
     }
 
@@ -171,10 +181,11 @@ pub fn desired_records(doc: &SyncDocument) -> Result<Vec<ManagedRecord>> {
         };
         let source = target.value.path().to_string();
 
-        for repo in &target.codeberg {
+        for (provider, host, repo) in target.repo_destinations() {
             let (owner, repo_name) = parse_repo(repo)?;
             records.push(ManagedRecord {
-                host: target.host.clone(),
+                provider,
+                host: host.to_string(),
                 scope: Scope::Repo,
                 owner: Some(owner.to_string()),
                 repo: Some(repo_name.to_string()),
@@ -191,6 +202,7 @@ pub fn desired_records(doc: &SyncDocument) -> Result<Vec<ManagedRecord>> {
                 bail!("sync target `{target_key}` has an empty Codeberg organization target");
             }
             records.push(ManagedRecord {
+                provider: Provider::Forgejo,
                 host: target.host.clone(),
                 scope: Scope::Org,
                 owner: None,
@@ -205,6 +217,7 @@ pub fn desired_records(doc: &SyncDocument) -> Result<Vec<ManagedRecord>> {
 
         if target.codeberg_user {
             records.push(ManagedRecord {
+                provider: Provider::Forgejo,
                 host: target.host.clone(),
                 scope: Scope::User,
                 owner: None,
@@ -267,10 +280,10 @@ fn normalize_records(records: Vec<ManagedRecord>) -> Vec<ManagedRecord> {
 
 fn parse_repo(repo: &str) -> Result<(&str, &str)> {
     let Some((owner, name)) = repo.split_once('/') else {
-        bail!("Codeberg repository target `{repo}` must be in owner/repo form");
+        bail!("repository target `{repo}` must be in owner/repo form");
     };
     if owner.is_empty() || name.is_empty() || name.contains('/') {
-        bail!("Codeberg repository target `{repo}` must be in owner/repo form");
+        bail!("repository target `{repo}` must be in owner/repo form");
     }
     Ok((owner, name))
 }
@@ -286,6 +299,8 @@ mod tests {
             "secret": "age/secrets/repo.age",
             "name": "REPO_SECRET",
             "codeberg": ["caniko/repo"],
+            "codefloe": ["caniko/codefloe-repo"],
+            "github": ["caniko/github-repo"],
             "host": "codeberg.org"
           },
           "org-variable": {
@@ -307,13 +322,23 @@ mod tests {
     fn desired_records_expand_all_destination_scopes() {
         let doc = SyncDocument::from_json(FIXTURE).unwrap();
         let records = desired_records(&doc).unwrap();
-        assert_eq!(records.len(), 3);
+        assert_eq!(records.len(), 5);
         assert!(records.iter().any(|record| {
             record.scope == Scope::Repo
                 && record.owner.as_deref() == Some("caniko")
                 && record.repo.as_deref() == Some("repo")
                 && record.kind == ManagedKind::Secret
                 && record.name == "REPO_SECRET"
+        }));
+        assert!(records.iter().any(|record| {
+            record.provider == Provider::Forgejo
+                && record.host == "codefloe.com"
+                && record.repo.as_deref() == Some("codefloe-repo")
+        }));
+        assert!(records.iter().any(|record| {
+            record.provider == Provider::Github
+                && record.host == "github.com"
+                && record.repo.as_deref() == Some("github-repo")
         }));
         assert!(records.iter().any(|record| {
             record.scope == Scope::Org
@@ -336,6 +361,7 @@ mod tests {
         let reparsed: SyncState = toml::from_str(&rendered).unwrap();
         assert_eq!(reparsed, state);
         assert!(rendered.contains("version = 1"));
+        assert!(rendered.contains("provider = \"forgejo\""));
         assert!(rendered.contains("scope = \"repo\""));
         assert!(rendered.contains("scope = \"org\""));
         assert!(rendered.contains("scope = \"user\""));
@@ -379,8 +405,29 @@ mod tests {
         assert_eq!(retained, desired);
     }
 
+    #[test]
+    fn legacy_state_without_provider_defaults_to_forgejo() {
+        let state: SyncState = toml::from_str(
+            r#"version = 1
+
+[[managed]]
+host = "codeberg.org"
+scope = "repo"
+owner = "caniko"
+repo = "repo"
+kind = "secret"
+name = "TOKEN"
+target = "token"
+source = "age/secrets/token.age"
+"#,
+        )
+        .unwrap();
+        assert_eq!(state.managed[0].provider, Provider::Forgejo);
+    }
+
     fn repo_record(target: &str, name: &str) -> ManagedRecord {
         ManagedRecord {
+            provider: Provider::Forgejo,
             host: "codeberg.org".to_string(),
             scope: Scope::Repo,
             owner: Some("caniko".to_string()),
@@ -395,6 +442,7 @@ mod tests {
 
     fn record(target: &str, scope: Scope, kind: ManagedKind, name: &str) -> ManagedRecord {
         ManagedRecord {
+            provider: Provider::Forgejo,
             host: "codeberg.org".to_string(),
             scope,
             owner: None,

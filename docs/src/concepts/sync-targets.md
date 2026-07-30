@@ -1,7 +1,8 @@
 # Sync Targets
 
-`secret-manager` can push encrypted values to Codeberg/Forgejo Actions secret
-stores and plaintext non-secret values to Codeberg/Forgejo Actions variables.
+`secret-manager` can push encrypted values to Codeberg/Forgejo, Codefloe, and
+GitHub Actions secret stores and plaintext non-secret values to their Actions
+variables.
 
 Sync targets are **declared declaratively** via Nix module options — the
 `services.secretSync` namespace — rather than passed as ad-hoc CLI flags.
@@ -28,6 +29,8 @@ only when `sync --prune` is used.
         secret   = "age/secrets/ci-token.age";
         name     = "CI_TOKEN";
         codeberg = ["caniko/my-repo"];
+        codefloe = ["caniko/my-repo"];
+        github   = ["caniko/my-repo"];
       };
 
       "org-token" = {
@@ -55,12 +58,16 @@ only when `sync --prune` is used.
 | `secret`       | `null or str` | `null`           | `.age` path pushed as an Actions secret      |
 | `source`       | `null or str` | `null`           | plaintext path pushed as an Actions variable |
 | `name`         | `str`         | required         | Actions secret/variable name                 |
-| `codeberg`     | `list of str` | `[]`             | `owner/repo` repository targets              |
-| `codebergOrgs` | `list of str` | `[]`             | organization/account-scope targets           |
-| `codebergUser` | `bool`        | `false`          | authenticated-user account-scope target      |
-| `host`         | `str`         | `"codeberg.org"` | Forge host for Codeberg/Forgejo token lookup |
+| `codeberg`     | `list of str` | `[]`             | `owner/repo` Forgejo repository targets      |
+| `codefloe`     | `list of str` | `[]`             | `owner/repo` Codefloe repository targets     |
+| `github`       | `list of str` | `[]`             | `owner/repo` GitHub repository targets       |
+| `codebergOrgs` | `list of str` | `[]`             | Forgejo organization/account-scope targets   |
+| `codebergUser` | `bool`        | `false`          | Forgejo authenticated-user account target    |
+| `host`         | `str`         | `"codeberg.org"` | Forge host for `codeberg*` token lookup      |
 
 Each target must set exactly one of `secret` or `source`.
+Codefloe and GitHub targets are repository-scoped; authenticate Codefloe with
+`fj -H codefloe.com` and GitHub with `gh auth login`.
 
 ## Relation to mkSecret
 
@@ -91,6 +98,8 @@ document of the shape:
           "secret": "age/secrets/ci-token.age",
           "name": "CI_TOKEN",
           "codeberg": ["caniko/my-repo"],
+          "codefloe": ["caniko/my-repo"],
+          "github": ["caniko/my-repo"],
           "codebergOrgs": ["caniko"],
           "codebergUser": true,
           "host": "codeberg.org"
@@ -99,6 +108,8 @@ document of the shape:
           "source": "age/secrets/public-key.asc",
           "name": "PUBLIC_KEY",
           "codeberg": ["caniko/my-repo"],
+          "codefloe": [],
+          "github": [],
           "codebergOrgs": ["caniko"],
           "codebergUser": false,
           "host": "codeberg.org"

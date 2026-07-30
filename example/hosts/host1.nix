@@ -6,6 +6,8 @@
         secret = "age/secrets/ci-token.age";
         name = "CI_TOKEN";
         codeberg = ["caniko/my-repo"];
+        codefloe = ["caniko/my-repo"];
+        github = ["caniko/my-repo"];
       };
       "deploy-key" = {
         secret = "age/secrets/deploy-key.age";

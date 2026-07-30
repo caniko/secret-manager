@@ -1,13 +1,14 @@
 # Pushing Secrets to CI
 
 The `push` command decrypts an agenix-encrypted `.age` file and pushes the
-plaintext to Codeberg/Forgejo and GitHub Actions secret stores. The
+plaintext to Codeberg/Forgejo, Codefloe, and GitHub Actions secret stores. The
 plaintext never touches disk — it lives only in process memory.
 
 ```sh
 secret-manager push age/secrets/users/can/app-token.age \
   --name APP_TOKEN \
   --codeberg caniko/my-repo \
+  --codefloe caniko/my-repo \
   --github my-org/other-repo
 ```
 
@@ -26,6 +27,8 @@ Diagnostics and hardware-key prompts stay on stderr.
 - **Codeberg**: the `fj` auth store at
   `${XDG_DATA_HOME:-$HOME/.local/share}/forgejo-cli/keys.json` (set up with
   `fj auth login --host codeberg.org` or `fj auth add-key <user>`).
+- **Codefloe**: the same `fj` auth store (set up with
+  `fj -H codefloe.com auth login` or `fj -H codefloe.com auth add-key <user>`).
 - **GitHub**: requires `gh` authenticated.
 
 ## Identity resolution

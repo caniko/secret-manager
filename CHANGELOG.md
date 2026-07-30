@@ -4,9 +4,11 @@
 
 ### Added
 
+- Declarative Codefloe and GitHub Actions repository sync targets, including
+  GitHub variable and prune support.
 - Pkl secret registry schema (`pkl/SecretRegistry.pkl`) with Rust types, CLI
   subcommands (`secret-manager registry check|export`, `secret-manager forgejo
-  runner-env add`), and Pkl evaluation via nix-pklx.
+runner-env add`), and Pkl evaluation via nix-pklx.
 - Nix `mkForgejoRunnerFileEnv` library function for declarative runner file-env
   secret delivery through agenix + systemd-tmpfiles + container volume mounts.
 
