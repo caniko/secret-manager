@@ -226,9 +226,22 @@ nix-manager-core.lib.mkManagerOutputs {
         };
       });
 
-    apps = forAllSystems (system: {
+    apps = forAllSystems (system: let
+      pkgs = pkgsFor system;
+      atticAdapter = rs-harbor.lib.mkAdapter {
+        attic = {
+          endpoint = "https://attic.candee.baby";
+          cache = "canix";
+        };
+      };
+    in {
       deploy-pages = plinth.lib.${system}.mkDeployPagesApp {
         domain = "secret-manager.tartanoglu.com";
+      };
+      push-flake-inputs = rs-harbor.lib.mkAtticPush {
+        inherit pkgs;
+        adapter = atticAdapter;
+        flake = ".";
       };
     });
 
