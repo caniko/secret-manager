@@ -10,7 +10,7 @@ repository = "https://codeberg.org/caniko/secret-manager"
 authors = ["caniko"]
 
 [workspace.dependencies]
-nix-manager-core = { git = "https://codeberg.org/caniko/nix-manager-core.git", rev = "44880c13999ff0f606a174f61120bc4284e37113" }
+nix-manager-core = { git = "https://codeberg.org/caniko/nix-manager-core.git", rev = "2af147b127eed032135687effd8bce1f68f26406" }
 anyhow = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }

@@ -1068,7 +1068,7 @@ dependencies = [
 [[package]]
 name = "nix-manager-core"
 version = "0.3.0"
-source = "git+https://codeberg.org/caniko/nix-manager-core.git?rev=44880c13999ff0f606a174f61120bc4284e37113#44880c13999ff0f606a174f61120bc4284e37113"
+source = "git+https://codeberg.org/caniko/nix-manager-core.git?rev=2af147b127eed032135687effd8bce1f68f26406#2af147b127eed032135687effd8bce1f68f26406"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1532,7 +1532,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
