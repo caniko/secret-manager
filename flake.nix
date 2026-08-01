@@ -33,8 +33,9 @@
       inputs.plinth.follows = "plinth";
     };
     plinth = {
-      url = "git+https://codeberg.org/caniko/plinth.git";
+      url = "github:caniko/plinth/f4ec72550b3be3081f36e0ec46e52851d2a1befc";
       inputs.nixpkgs.follows = "nixpkgs";
+      inputs.rs-harbor.follows = "rs-harbor";
     };
   };
 
