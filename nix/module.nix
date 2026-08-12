@@ -57,10 +57,9 @@
         type = lib.types.listOf lib.types.str;
         default = [];
         description = ''
-          Codefloe repositories (in `owner/repo` format) to push this value
-          to. Auth comes from `fj` at
-          `''${XDG_DATA_HOME:-$HOME/.local/share}/forgejo-cli/keys.json` for
-          the `codefloe.com` host.
+          Codefloe repositories (in `owner/repo` format) whose Crow CI secret
+          store receives this value. Auth comes from `CROW_TOKEN`; the server
+          defaults to `https://ci.codefloe.com`.
         '';
         example = ["caniko/my-repo"];
       };
@@ -116,7 +115,7 @@
 in {
   options.services.secretSync = {
     enable = lib.mkEnableOption ''
-      declarative secret synchronization to forge Actions secret stores.
+      declarative secret synchronization to forge and Crow CI secret stores.
 
       When enabled, the targets declared here are collected into a JSON
       document that `secret-manager sync` reads to push secrets to
@@ -130,7 +129,7 @@ in {
       description = ''
         Attribute set of sync targets keyed by an arbitrary name meaningful
         to the store operator. Targets with `secret` declare one agenix secret
-        that should be pushed as an Actions secret; targets with `source`
+        that should be pushed as a CI secret; targets with `source`
         declare one plaintext non-secret file that should be pushed as an
         Actions variable. Destinations may be repositories, organizations, the
         authenticated user's account scope, or any combination of those.

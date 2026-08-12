@@ -56,6 +56,7 @@ pub enum Provider {
     #[default]
     Forgejo,
     Github,
+    Crow,
 }
 
 /// Where a sync target's value comes from.
@@ -91,7 +92,7 @@ impl SyncTarget {
             .chain(
                 self.codefloe
                     .iter()
-                    .map(|repo| (Provider::Forgejo, "codefloe.com", repo.as_str())),
+                    .map(|repo| (Provider::Crow, "ci.codefloe.com", repo.as_str())),
             )
             .chain(
                 self.github
@@ -396,7 +397,7 @@ mod tests {
             destinations,
             vec![
                 (Provider::Forgejo, "codeberg.org", "caniko/my-repo"),
-                (Provider::Forgejo, "codefloe.com", "caniko/codefloe-repo"),
+                (Provider::Crow, "ci.codefloe.com", "caniko/codefloe-repo"),
                 (Provider::Github, "github.com", "caniko/github-repo"),
             ]
         );

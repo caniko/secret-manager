@@ -81,6 +81,7 @@ impl ManagedRecord {
             Provider::Forgejo if self.host == "codefloe.com" => "codefloe",
             Provider::Forgejo => "forgejo",
             Provider::Github => "github",
+            Provider::Crow => "crow",
         };
         match self.scope {
             Scope::Repo => format!(
@@ -331,8 +332,8 @@ mod tests {
                 && record.name == "REPO_SECRET"
         }));
         assert!(records.iter().any(|record| {
-            record.provider == Provider::Forgejo
-                && record.host == "codefloe.com"
+            record.provider == Provider::Crow
+                && record.host == "ci.codefloe.com"
                 && record.repo.as_deref() == Some("codefloe-repo")
         }));
         assert!(records.iter().any(|record| {

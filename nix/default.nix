@@ -51,8 +51,11 @@ nix-manager-core.lib.mkManagerOutputs {
         sync-only = {
           source.relative = "age/secrets/sync-only.age";
           sync = {
+            __pkl_class = "SyncTarget";
             target = "sync-only-target";
             name = "SYNC_ONLY_TOKEN";
+            codebergOrgs = null;
+            codebergUser = null;
             codeberg = ["caniko/example"];
             codefloe = ["caniko/codefloe-example"];
             github = ["caniko/github-example"];
@@ -124,6 +127,9 @@ nix-manager-core.lib.mkManagerOutputs {
       assert renderedSync.sync-only-target.secret == "age/secrets/sync-only.age";
       assert renderedSync.sync-only-target.codefloe == ["caniko/codefloe-example"];
       assert renderedSync.sync-only-target.github == ["caniko/github-example"];
+      assert !(renderedSync.sync-only-target ? __pkl_class);
+      assert !(renderedSync.sync-only-target ? codebergOrgs);
+      assert !(renderedSync.sync-only-target ? codebergUser);
       assert renderedSync.public-value-target.source == "age/secrets/public-value.txt";
       assert !(renderedSync ? env-only);
       assert !(renderedSync ? unsynced-public);
@@ -226,11 +232,14 @@ nix-manager-core.lib.mkManagerOutputs {
         };
       });
 
-    apps = forAllSystems (system: {
-      deploy-pages = plinth.lib.${system}.mkDeployPagesApp {
-        domain = "secret-manager.tartanoglu.com";
-      };
-    });
+    apps = forAllSystems (system:
+      if system == "x86_64-darwin"
+      then {}
+      else {
+        deploy-pages = plinth.lib.${system}.mkDeployPagesApp {
+          domain = "secret-manager.tartanoglu.com";
+        };
+      });
 
     devShells = forAllSystems (system: let
       pkgs = pkgsFor system;
