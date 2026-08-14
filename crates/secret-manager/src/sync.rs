@@ -19,9 +19,9 @@ use nix_manager_core::{age, forge, ui};
 /// declared forge Actions destinations. When no explicit JSON input is passed,
 /// the nearest flake is evaluated via `secret-manager.lib.collect`.
 ///
-/// Encrypted agenix values are pushed as Actions secrets. Plaintext source
-/// files are pushed as Actions variables. Forgejo destinations use the `fj` auth
-/// store; GitHub destinations use the `gh` CLI.
+/// Encrypted agenix values are pushed as CI secrets. Plaintext source files are
+/// pushed as Actions variables. Forgejo destinations use the `fj` auth store,
+/// Codefloe uses Crow, and GitHub destinations use the `gh` CLI.
 #[derive(Args)]
 pub struct SyncArgs {
     /// Path to the collected sync-targets JSON document.
@@ -558,6 +558,7 @@ fn push_managed_record(record: &ManagedRecord, value: &str) -> Result<()> {
     match record.provider {
         Provider::Forgejo => push_forgejo_record(record, value),
         Provider::Github => push_github_record(record, value),
+        Provider::Crow => push_crow_record(record, value),
     }
 }
 
@@ -618,6 +619,85 @@ fn push_github_record(record: &ManagedRecord, value: &str) -> Result<()> {
         ManagedKind::Secret => forge::push_github_secret(&repo, &record.name, value),
         ManagedKind::Variable => push_github_variable(&repo, &record.name, value),
     }
+}
+
+fn push_crow_record(record: &ManagedRecord, value: &str) -> Result<()> {
+    if record.scope != Scope::Repo || record.kind != ManagedKind::Secret {
+        bail!("Crow supports repository secret sync targets only");
+    }
+    let repo = record_repo(record)?;
+    let add = run_crow_secret("add", &repo, &record.name, Some(value))?;
+    if add.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&add.stderr);
+    if !stderr.to_ascii_lowercase().contains("already exists") {
+        bail!("crow secret add failed: {}", stderr.trim());
+    }
+    let update = run_crow_secret("update", &repo, &record.name, Some(value))?;
+    if update.status.success() {
+        Ok(())
+    } else {
+        bail!(
+            "crow secret update failed: {}",
+            String::from_utf8_lossy(&update.stderr).trim()
+        )
+    }
+}
+
+fn run_crow_secret(
+    action: &str,
+    repo: &str,
+    name: &str,
+    value: Option<&str>,
+) -> Result<std::process::Output> {
+    let mut command = Command::new("crow");
+    command.args(crow_secret_args(action, repo, name, value.is_some()));
+    if let Some(value) = value {
+        command.stdin(Stdio::piped());
+        let mut child = command
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| anyhow!("failed to spawn crow: {e}"))?;
+        child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| anyhow!("crow stdin was not captured"))?
+            .write_all(value.as_bytes())?;
+        drop(child.stdin.take());
+        return child.wait_with_output().map_err(Into::into);
+    }
+    command
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| anyhow!("failed to spawn crow: {e}"))
+}
+
+fn crow_secret_args(action: &str, repo: &str, name: &str, with_value: bool) -> Vec<String> {
+    let mut args = vec![
+        "--server".to_string(),
+        "https://ci.codefloe.com".to_string(),
+        "repo".to_string(),
+        "secret".to_string(),
+        action.to_string(),
+        "--repo".to_string(),
+        repo.to_string(),
+        "--name".to_string(),
+        name.to_string(),
+    ];
+    if with_value {
+        args.extend([
+            "--value".to_string(),
+            "@/dev/stdin".to_string(),
+            // ponytail: Codefloe sync currently serves tag-triggered release secrets;
+            // add per-target Crow events when another workflow needs them.
+            "--event".to_string(),
+            "tag".to_string(),
+        ]);
+    }
+    args
 }
 
 #[derive(Default)]
@@ -801,6 +881,24 @@ fn delete_managed_record(record: &ManagedRecord) -> Result<()> {
     match record.provider {
         Provider::Forgejo => delete_forgejo_record(record),
         Provider::Github => delete_github_record(record),
+        Provider::Crow => delete_crow_record(record),
+    }
+}
+
+fn delete_crow_record(record: &ManagedRecord) -> Result<()> {
+    if record.scope != Scope::Repo || record.kind != ManagedKind::Secret {
+        bail!("Crow supports repository secret sync targets only");
+    }
+    let output = run_crow_secret("rm", &record_repo(record)?, &record.name, None)?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.to_ascii_lowercase().contains("not found") {
+            Ok(())
+        } else {
+            bail!("crow secret rm failed: {}", stderr.trim())
+        }
     }
 }
 
@@ -1022,7 +1120,7 @@ mod tests {
                 ),
                 (
                     "secret",
-                    "codefloe.com",
+                    "ci.codefloe.com",
                     "age/secrets/my-app-token.age",
                     "MY_APP_TOKEN",
                     "repo",
@@ -1410,6 +1508,30 @@ mod tests {
         let prune = stale_record_lines(&stale, true).join("\n");
         assert!(prune.contains("Planned prunes (--prune):"));
         assert!(!prune.contains("pass --prune"));
+    }
+
+    #[test]
+    fn crow_secret_value_is_sent_over_stdin_and_restricted_to_tags() {
+        let args = crow_secret_args("add", "caniko/regicide", "ATTIC_TOKEN", true);
+        assert_eq!(
+            args,
+            [
+                "--server",
+                "https://ci.codefloe.com",
+                "repo",
+                "secret",
+                "add",
+                "--repo",
+                "caniko/regicide",
+                "--name",
+                "ATTIC_TOKEN",
+                "--value",
+                "@/dev/stdin",
+                "--event",
+                "tag",
+            ]
+        );
+        assert!(!args.iter().any(|arg| arg.contains("secret-value")));
     }
 
     fn repo_record(kind: ManagedKind) -> ManagedRecord {

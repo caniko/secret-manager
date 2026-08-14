@@ -290,7 +290,7 @@
     renderTarget = sourceAttr: name: entry: {
       name = entry.sync.target or (throw "secret-manager.lib.mkSecretSyncTargets: ${name} is missing sync.target");
       value =
-        builtins.removeAttrs entry.sync ["target"]
+        lib.filterAttrs (_: value: value != null) (builtins.removeAttrs entry.sync ["target" "__pkl_class"])
         // {
           ${sourceAttr} =
             if sourceAttr == "secret"
