@@ -7,10 +7,10 @@ secret-manager is the engine that generates agenix secret modules, manages
 `.age` files in a Nix data repository (a "store"), and pushes decrypted
 secrets to Codeberg/Forgejo, Codefloe, and GitHub Actions secret stores.
 
-It was extracted from the [canix](https://codeberg.org/caniko/canix) CLI;
+It was extracted from the [canix](https://github.com/caniko/canix) CLI;
 the canix `secret` command family is a thin shim over this library.
 
 ## Repository
 
-- **Source**: <https://codeberg.org/caniko/secret-manager>
+- **Source**: <https://github.com/caniko/secret-manager>
 - **License**: MIT
