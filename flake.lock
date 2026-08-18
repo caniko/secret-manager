@@ -539,17 +539,17 @@
         ]
       },
       "locked": {
-        "lastModified": 1784284864,
-        "narHash": "sha256-MOkMJuC3tcIq0CqIF8jS6NkJrYrec7HHlBgNOwY9kvM=",
+        "lastModified": 1787044145,
+        "narHash": "sha256-76ZZpGVJhVLc6n3NU54Rd6/D+8SkM8slspCceFytiKo=",
         "ref": "refs/heads/trunk",
-        "rev": "458f167f21484d60ca033e65f001fcaa7aabfe7c",
-        "revCount": 24,
+        "rev": "a570776a5395face791255a67eae2df647684e07",
+        "revCount": 32,
         "type": "git",
-        "url": "https://codeberg.org/caniko/nix-pklx.git"
+        "url": "https://github.com/caniko/nix-pklx.git"
       },
       "original": {
         "type": "git",
-        "url": "https://codeberg.org/caniko/nix-pklx.git"
+        "url": "https://github.com/caniko/nix-pklx.git"
       }
     },
     "nix-pklx_2": {

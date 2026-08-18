@@ -25,7 +25,7 @@
       inputs.git-hooks.follows = "git-hooks";
     };
     nix-pklx = {
-      url = "git+https://codeberg.org/caniko/nix-pklx.git";
+      url = "git+https://github.com/caniko/nix-pklx.git";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.rs-harbor.follows = "rs-harbor";
       inputs.rust-overlay.follows = "rust-overlay";
