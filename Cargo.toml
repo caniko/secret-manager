@@ -18,7 +18,7 @@ forgejo-api = { version = "0.10", default-features = false, features = [
   "sync",
   "rustls-tls",
 ] }
-pklx = { git = "https://codeberg.org/caniko/nix-pklx.git" }
+pklx = { git = "https://github.com/caniko/nix-pklx.git" }
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
