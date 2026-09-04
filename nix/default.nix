@@ -1,7 +1,7 @@
 {
   self,
   nixpkgs,
-  rs-harbor,
+  harbor-rs,
   rust-overlay,
   treefmt-nix,
   git-hooks,
@@ -11,7 +11,7 @@
   ...
 }:
 nix-manager-core.lib.mkManagerOutputs {
-  inherit self nixpkgs rs-harbor rust-overlay treefmt-nix git-hooks;
+  inherit self nixpkgs harbor-rs rust-overlay treefmt-nix git-hooks;
   crateName = "secret-manager";
   rustEdition = "2024";
   srcDir = ../.;
@@ -204,11 +204,11 @@ nix-manager-core.lib.mkManagerOutputs {
       then {}
       else let
         pkgs = pkgsFor system;
-        toolchain = rs-harbor.lib.mkToolchain {inherit pkgs; toolchainProfile = "nightly";};
-        cross = rs-harbor.lib.mkCross {inherit pkgs system;};
+        toolchain = harbor-rs.lib.mkToolchain {inherit pkgs; toolchainProfile = "nightly";};
+        cross = harbor-rs.lib.mkCross {inherit pkgs system;};
         cargo = cargoFor system;
         targetPkgs = cross.linuxAarch64.pkgsCross;
-        packages = rs-harbor.lib.mkCrossPackages {
+        packages = harbor-rs.lib.mkCrossPackages {
           inherit pkgs cross;
           inherit (toolchain) craneLib;
           pname = "secret-manager";
@@ -243,10 +243,10 @@ nix-manager-core.lib.mkManagerOutputs {
 
     devShells = forAllSystems (system: let
       pkgs = pkgsFor system;
-      toolchain = rs-harbor.lib.mkToolchain {inherit pkgs; toolchainProfile = "nightly";};
-      cross = rs-harbor.lib.mkCross {inherit pkgs system;};
+      toolchain = harbor-rs.lib.mkToolchain {inherit pkgs; toolchainProfile = "nightly";};
+      cross = harbor-rs.lib.mkCross {inherit pkgs system;};
     in {
-      docs = rs-harbor.lib.mkDocsShell {
+      docs = harbor-rs.lib.mkDocsShell {
         inherit pkgs cross;
         inherit (toolchain) craneLib;
         packages = [pkgs.mdbook];
