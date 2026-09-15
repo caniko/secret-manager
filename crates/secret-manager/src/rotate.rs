@@ -13,11 +13,14 @@
 //!
 //! 1. Source replacement. The existing source is *copied* aside (never
 //!    moved), then regenerated with `agenix generate --force-generate`.
-//!    Generation and staging flags are passed explicitly — never `-a` — and
-//!    inherited auto-staging (`AGENIX_REKEY_ADD_TO_GIT`) is stripped when
-//!    `--no-stage` is given, so a failed run leaves both worktree and index
-//!    exactly as found, and the backup restores the previous bytes. Fresh
-//!    output must carry the age file magic, not merely be non-empty.
+//!    Generation flags are passed explicitly — never `-a` — and inherited
+//!    auto-staging (`AGENIX_REKEY_ADD_TO_GIT`) is always stripped from
+//!    rotation children, so staging happens only through the explicit
+//!    `git add` calls below. A failed run leaves both worktree and index
+//!    exactly as found, and the backup restores the previous bytes atomically
+//!    (temp file plus rename). Fresh
+//!    output must parse as an age file (binary or armored header), not
+//!    merely be non-empty.
 //! 2. Distribution. `agenix rekey` fans the new source out to rekeyed
 //!    copies. If this fails, the new source is *kept*: the failure reports
 //!    "distribution incomplete" with a rekey-only retry command, instead of
@@ -49,18 +52,21 @@ const REKEYED_DIR: &str = "age/rekeyed";
 /// anywhere else so a stray invocation cannot scatter backups.
 const REPO_MARKER: &str = "flake.nix";
 
-/// Name of the repo-local mutual-exclusion guard. Lives inside `.git` so it
-/// never shows up in status output; on a bare checkout without a `.git`
-/// directory it falls back to a dotfile at the repo root.
+/// Name of the repo-local mutual-exclusion anchor. Lives inside `.git` so
+/// it never shows up in status output; on a bare checkout without a `.git`
+/// directory it falls back to a dotfile at the repo root. The anchor file
+/// itself persists; only the kernel lock on it serializes runs.
 const LOCK_NAME: &str = "secret-manager-rotate.lock";
 
 /// Inherited setting that makes agenix stage on its own. Stripped from
 /// child environments whenever `--no-stage` is passed.
 const ADD_TO_GIT_ENV: &str = "AGENIX_REKEY_ADD_TO_GIT";
 
-/// Every age v1 file starts with this header line. A "successful" generate
-/// that does not produce it is a partial write, not a key.
+/// Every age v1 file starts with this header line. Armor uses the
+/// standard PEM-style prelude instead. A "successful" generate that
+/// produces neither is a partial write, not a key.
 const AGE_MAGIC: &[u8] = b"age-encryption.org v1\n";
+const AGE_ARMOR_BEGIN: &[u8] = b"-----BEGIN AGE ENCRYPTED FILE-----";
 
 #[derive(Args, Debug)]
 pub struct RotateArgs {
@@ -79,7 +85,8 @@ pub struct RotateArgs {
     pub no_rekey: bool,
 
     /// Skip `git add` staging of the rotated source and rekeyed copies.
-    /// Also suppresses inherited agenix auto-staging for these invocations.
+    /// Inherited agenix auto-staging is always suppressed for rotation
+    /// children; only the explicit staging calls in this command stage.
     #[arg(long, default_value_t = false)]
     pub no_stage: bool,
 }
@@ -89,6 +96,17 @@ impl RotateArgs {
         let repo_root = discover_root()?;
         let rel = contained_rel(&repo_root, &self.secret_path)?;
         let secret_path = ensure_parent(&repo_root, &rel)?;
+
+        // Serialize whole runs (create and replace alike, across sources)
+        // with a kernel-held lock BEFORE reading source state: rekey is
+        // repository-wide, so per-source backups alone cannot exclude
+        // interleaving, and an existence check outside the lock is stale
+        // the moment another rotation starts. The lock file itself is a
+        // persistent anchor and is never unlinked; the kernel releases the
+        // lock when the holder exits, including on crash or kill.
+        let _guard = acquire_lock(&repo_root)?;
+        // Re-read under the lock: a concurrent run may have created,
+        // replaced, or removed the source since any earlier observation.
         let existed = try_is_regular_file(&secret_path)?;
         if !existed && secret_path.symlink_metadata().is_ok() {
             bail!(
@@ -102,22 +120,13 @@ impl RotateArgs {
                 "preserved {} (already exists; pass --force to rotate)",
                 display_rel(&repo_root, &secret_path)
             );
+            eprintln!(
+                "distribution untouched; run `agenix rekey -a` if recipients may be out of date."
+            );
             return Ok(());
         }
 
-        // Serialize whole runs (create and replace alike, across sources):
-        // rekey is repository-wide, so per-source backups alone cannot
-        // exclude interleaving. The guard is removed on every handled exit;
-        // only a crash or kill leaves it behind, and then the next run
-        // refuses with removal instructions.
-        let guard = acquire_lock(&repo_root)?;
         let result = self.run_locked(&repo_root, &rel, &secret_path, existed);
-        if let Err(e) = fs::remove_file(&guard) {
-            eprintln!(
-                "warning: rotation finished but the lock {} could not be removed ({e}); remove it manually or the next run will refuse to start",
-                display_rel(&repo_root, &guard)
-            );
-        }
         result
     }
 
@@ -135,7 +144,7 @@ impl RotateArgs {
             create_backup(secret_path, &backup_path, repo_root)?;
         }
 
-        let outcome = regenerate(repo_root, rel, existed, self.no_stage)
+        let outcome = regenerate(repo_root, rel, existed)
             .and_then(|()| validate_fresh(repo_root, secret_path))
             .and_then(|()| stage_source(repo_root, rel, self.no_stage));
         if let Err(e) = outcome {
@@ -259,11 +268,15 @@ fn ensure_parent(repo_root: &Path, rel: &Path) -> Result<PathBuf> {
     Ok(abs)
 }
 
-/// Repo-local mutual exclusion for whole runs. The anchor is created
-/// exclusively and removed on every handled exit; only a crash or kill
-/// leaves it behind, in which case the next run refuses and says how to
-/// recover. Never unlinked speculatively: removal happens exactly once,
-/// by the run that created it, after its outcome is settled.
+/// Repo-local mutual exclusion for whole runs, held via a kernel `flock`
+/// on a persistent anchor file. The anchor is created on first use and
+/// never unlinked: only the kernel lock serializes holders, so a crash or
+/// kill releases the lock automatically with nothing to clean up and no
+/// stale-guard failure mode. Dropping the guard closes the fd, releasing.
+struct RotationLock {
+    _file: fs::File,
+}
+
 fn lock_path(repo_root: &Path) -> PathBuf {
     let dotgit = repo_root.join(".git");
     if dotgit.is_dir() {
@@ -273,27 +286,38 @@ fn lock_path(repo_root: &Path) -> PathBuf {
     }
 }
 
-fn acquire_lock(repo_root: &Path) -> Result<PathBuf> {
+fn acquire_lock(repo_root: &Path) -> Result<RotationLock> {
+    use std::os::unix::io::AsRawFd;
+
     let path = lock_path(repo_root);
-    fs::OpenOptions::new()
+    let file = fs::OpenOptions::new()
+        .read(true)
         .write(true)
-        .create_new(true)
+        .create(true)
         .mode(0o600)
         .open(&path)
         .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::AlreadyExists {
-                anyhow!(
-                    "another rotation is running or a previous one was interrupted (lock {} exists); inspect any *.rotbak backups, then remove the lock and retry",
-                    display_rel(repo_root, &path)
-                )
-            } else {
-                anyhow!(
-                    "cannot create rotation lock {}: {e}",
-                    display_rel(repo_root, &path)
-                )
-            }
+            anyhow!(
+                "cannot open rotation lock {}: {e}",
+                display_rel(repo_root, &path)
+            )
         })?;
-    Ok(path)
+    // Non-blocking: a second rotation fails fast instead of queueing
+    // behind a rekey that may wait on a hardware touch.
+    // ponytail: raw libc instead of an flock crate; the call is three
+    // lines and the crate would exist only for this.
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc != 0 {
+        let e = std::io::Error::last_os_error();
+        if e.kind() == std::io::ErrorKind::WouldBlock {
+            bail!(
+                "another rotation is running (lock {} is held); wait for it to finish and retry",
+                display_rel(repo_root, &path)
+            );
+        }
+        bail!("cannot lock {}: {e}", display_rel(repo_root, &path));
+    }
+    Ok(RotationLock { _file: file })
 }
 
 fn backup_path_for(secret_path: &Path) -> PathBuf {
@@ -342,15 +366,14 @@ fn create_backup(secret_path: &Path, backup_path: &Path, repo_root: &Path) -> Re
 
 /// Spawn a child with inherited stdio, mirroring exec::run_in's reporting.
 /// exec's runners cannot drop inherited environment entries, and agenix
-/// honors auto-staging from the environment, so rotation needs its own
-/// spawn point to make `--no-stage` airtight.
-fn run_child(repo_root: &Path, program: &str, args: &[&str], strip_auto_stage: bool) -> Result<()> {
+/// honors auto-staging (`AGENIX_REKEY_ADD_TO_GIT`) from the environment, so
+/// rotation always strips it: staging happens only through the explicit
+/// `git add` calls below, on both the default and the `--no-stage` path.
+fn run_child(repo_root: &Path, program: &str, args: &[&str]) -> Result<()> {
     eprintln!("$ ({}) {} {}", repo_root.display(), program, args.join(" "));
     let mut cmd = std::process::Command::new(program);
     cmd.args(args).current_dir(repo_root);
-    if strip_auto_stage {
-        cmd.env_remove(ADD_TO_GIT_ENV);
-    }
+    cmd.env_remove(ADD_TO_GIT_ENV);
     let status = cmd
         .status()
         .map_err(|e| anyhow!("failed to spawn {program} in {}: {e}", repo_root.display()))?;
@@ -370,7 +393,7 @@ fn run_child(repo_root: &Path, program: &str, args: &[&str], strip_auto_stage: b
 /// Same shape `run_plan` uses for fresh generated secrets, minus `-a`:
 /// staging is done explicitly afterwards so `--no-stage` is honored and a
 /// failed run stages nothing.
-fn regenerate(repo_root: &Path, rel: &Path, existed: bool, no_stage: bool) -> Result<()> {
+fn regenerate(repo_root: &Path, rel: &Path, existed: bool) -> Result<()> {
     let rel = rel
         .to_str()
         .ok_or_else(|| anyhow!("non-utf8 secret path"))?;
@@ -379,7 +402,7 @@ fn regenerate(repo_root: &Path, rel: &Path, existed: bool, no_stage: bool) -> Re
         args.push("--force-generate");
     }
     args.push(rel);
-    run_child(repo_root, "agenix", &args, no_stage).map_err(|e| {
+    run_child(repo_root, "agenix", &args).map_err(|e| {
         anyhow!(
             "{e}\n  hint: rotation needs a `generator` on the secret's Nix declaration (e.g. `generator.script = \"strong-passphrase-64\"`); the previous source is untouched"
         )
@@ -399,9 +422,9 @@ fn validate_fresh(repo_root: &Path, secret_path: &Path) -> Result<()> {
             display_rel(repo_root, secret_path)
         );
     }
-    if !bytes.starts_with(AGE_MAGIC) {
+    if !bytes.starts_with(AGE_MAGIC) && !bytes.starts_with(AGE_ARMOR_BEGIN) {
         bail!(
-            "`agenix generate` wrote {} without the age file header; treating it as a partial write, the previous source is untouched",
+            "`agenix generate` wrote {} without an age file header (binary or armored); treating it as a partial write, the previous source is untouched",
             display_rel(repo_root, secret_path)
         );
     }
@@ -448,9 +471,9 @@ fn distribute(repo_root: &Path, rel: &Path, no_stage: bool) -> Result<()> {
             display_rel(repo_root, &repo_root.join(rel))
         )
     })?);
-    // No `-a`, and the inherited auto-staging knob follows `--no-stage`:
-    // rekeyed copies are staged explicitly below.
-    if let Err(e) = run_child(repo_root, "agenix", &["rekey"], no_stage) {
+    // No `-a`, and inherited auto-staging is always stripped in
+    // run_child: rekeyed copies are staged explicitly below.
+    if let Err(e) = run_child(repo_root, "agenix", &["rekey"]) {
         return Err(anyhow!(
             "source {} updated, but distribution is incomplete: {e}\n  retry with `agenix rekey -a` (no new key will be generated)",
             display_rel(repo_root, &repo_root.join(rel))
@@ -489,7 +512,14 @@ fn status_names(repo_root: &Path) -> Result<BTreeSet<PathBuf>> {
     let out = exec::cap_in(
         repo_root,
         "git",
-        ["status", "--porcelain=v1", "-z", "--", REKEYED_DIR],
+        [
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--",
+            REKEYED_DIR,
+        ],
     );
     if out.exit_code != 0 {
         bail!(
@@ -530,14 +560,40 @@ fn parse_status_z(output: &str) -> BTreeSet<PathBuf> {
     paths
 }
 
+/// Restore the backup over a failed replacement atomically: bytes go to a
+/// sibling temp file first, then rename over the destination, so a crash
+/// mid-restore cannot leave a truncated source. The backup is kept unless
+/// the rename completes; only then is it removed.
 fn restore(secret_path: &Path, backup_path: &Path, repo_root: &Path) -> Result<()> {
-    fs::copy(backup_path, secret_path).map_err(|e| {
-        anyhow!(
+    let mut tmp_name = secret_path
+        .file_name()
+        .map(|s| s.to_os_string())
+        .unwrap_or_default();
+    tmp_name.push(".restore-tmp");
+    let tmp_path = secret_path.with_file_name(tmp_name);
+    // Best effort: a stale temp file from a killed run must not block us.
+    let _ = fs::remove_file(&tmp_path);
+    let restore_err = (|| -> Result<()> {
+        let bytes = fs::read(backup_path)?;
+        let mut tmp = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp_path)?;
+        tmp.write_all(&bytes)?;
+        tmp.sync_all()?;
+        drop(tmp);
+        fs::rename(&tmp_path, secret_path)?;
+        Ok(())
+    })();
+    if let Err(e) = restore_err {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(anyhow!(
             "ROTATION FAILED AND RESTORE FAILED: working source is at {}; copy it back to {} manually ({e})",
             display_rel(repo_root, backup_path),
             display_rel(repo_root, secret_path)
-        )
-    })?;
+        ));
+    }
     remove_backup(backup_path, repo_root)?;
     eprintln!(
         "rotation failed; restored {}",
@@ -628,6 +684,24 @@ mod tests {
         std::os::unix::fs::symlink("/", repo.path.join("linkdir")).expect("symlink");
         let err = contained_rel(&repo.path, "linkdir/token.age").unwrap_err();
         assert!(err.to_string().contains("inside the repo"), "{err:?}");
+    }
+
+    #[test]
+    fn validate_fresh_accepts_binary_and_armored_age() {
+        let repo = rooted();
+        let binary = repo.path.join("binary.age");
+        fs::write(&binary, b"age-encryption.org v1\n-> stub\nbody\n").expect("write");
+        assert!(validate_fresh(&repo.path, &binary).is_ok());
+        let armored = repo.path.join("armored.age");
+        fs::write(
+            &armored,
+            b"-----BEGIN AGE ENCRYPTED FILE-----\nYWdlLWVuY3J5cHRpb24ub3JnL3YxCg==\n-----END AGE ENCRYPTED FILE-----\n",
+        )
+        .expect("write");
+        assert!(validate_fresh(&repo.path, &armored).is_ok());
+        let garbage = repo.path.join("garbage.age");
+        fs::write(&garbage, b"truncated-garbage").expect("write");
+        assert!(validate_fresh(&repo.path, &garbage).is_err());
     }
 
     #[test]

@@ -14,12 +14,15 @@ runner-env add`), and Pkl evaluation via nix-pklx.
 - `rotate` operation for generated agenix secret sources: idempotent
   ensure-or-preserve by default, explicit `--force` rotation on demand.
   Replacement copies (never moves) the source aside, regenerates without
-  `-a`, validates the age file header, and stages explicitly so `--no-stage`
-  (including inherited `AGENIX_REKEY_ADD_TO_GIT`) is honored. Rekey runs as
-  a separate distribution step with content-hash staging; failures keep the
-  new source and report distribution-incomplete with a rekey-only retry. A
-  repo-local lock serializes whole runs. Zero-knowledge — key material is
-  never printed or observed.
+  `-a`, validates the binary or armored age file header, and stages
+  explicitly; inherited `AGENIX_REKEY_ADD_TO_GIT` is always suppressed for
+  rotation children. Rekey runs as a separate distribution step with
+  content-hash staging over NUL-delimited status; failures keep the new
+  source and report distribution-incomplete with a rekey-only retry. A
+  kernel-held repo-local lock serializes whole runs and releases on crash
+  with nothing to clean up; restore publishes atomically via temp file
+  plus rename. Zero-knowledge — key material is never printed or
+  observed.
 - `StoreEnv::host_secret_dir` hook so store repos whose Nix side resolves
   host secrets outside `age/secrets/hosts` create sources where their
   declarations point.
