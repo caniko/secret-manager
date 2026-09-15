@@ -15,6 +15,7 @@ pub mod plan;
 pub mod push;
 pub mod registry;
 pub mod render;
+pub mod rotate;
 pub mod store;
 pub mod sync;
 pub mod sync_state;

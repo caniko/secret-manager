@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 
 use secret_manager::env::LocalEnv;
-use secret_manager::{add, legacy, push, registry, sync};
+use secret_manager::{add, legacy, push, registry, rotate, sync};
 
 #[derive(Parser)]
 #[command(
@@ -64,6 +64,12 @@ enum Command {
     /// Encrypt a Gerrit `.gitcookies` payload into an agenix secret.
     #[command(name = "gerrit-cookies")]
     GerritCookies(legacy::GerritCookiesArgs),
+
+    /// Rotate a generated agenix secret source in place. The secret's Nix
+    /// declaration must carry a `generator`; the previous source is restored
+    /// if regeneration fails.
+    #[command(name = "rotate", arg_required_else_help = true)]
+    Rotate(rotate::RotateArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -81,5 +87,6 @@ fn main() -> anyhow::Result<()> {
         Command::WgKeygen { secret_path } => legacy::wg_keygen(&secret_path),
         Command::RauthyEnv(args) => legacy::rauthy_env(&args),
         Command::GerritCookies(args) => legacy::gerrit_cookies(&args),
+        Command::Rotate(args) => args.run(),
     }
 }
