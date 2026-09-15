@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Nix binding the generated modules call `mkSecret` through. This is the
 /// data repo's convention (the store passes its bound secret lib under this
@@ -99,7 +99,7 @@ impl TargetSpec {
         }
     }
 
-    pub fn secret_path(&self) -> PathBuf {
+    pub fn secret_path(&self, host_dir: &Path) -> PathBuf {
         match self {
             TargetSpec::Home(t) => PathBuf::from(format!(
                 "age/secrets/users/{}/{}.age",
@@ -110,11 +110,9 @@ impl TargetSpec {
                 "age/secrets/users/shared/{}.age",
                 t.slug.replace('-', "_")
             )),
-            TargetSpec::System(t) => PathBuf::from(format!(
-                "age/secrets/hosts/{}/{}.age",
-                t.host,
-                t.slug.replace('-', "_")
-            )),
+            TargetSpec::System(t) => {
+                host_dir.join(format!("{}/{}.age", t.host, t.slug.replace('-', "_")))
+            }
             TargetSpec::Forgejo(t) => PathBuf::from(format!(
                 "age/secrets/modules/forgejo-runner/{}.age",
                 t.slug.replace('-', "_")
@@ -170,6 +168,7 @@ impl TargetSpec {
 }
 
 pub fn render_modules(
+    host_dir: &Path,
     targets: &[TargetSpec],
     generator: Option<&GeneratorSpec>,
 ) -> Vec<RenderedModule> {
@@ -179,7 +178,7 @@ pub fn render_modules(
             path: target.module_path(),
             body: render_body(target, generator),
             default_nix: target.default_nix(),
-            secret_path: target.secret_path(),
+            secret_path: target.secret_path(host_dir),
             stack: target.stack(),
         })
         .collect()
@@ -358,6 +357,11 @@ pub fn camel(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::env::DEFAULT_HOST_SECRET_DIR;
+
+    fn host_dir() -> &'static Path {
+        Path::new(DEFAULT_HOST_SECRET_DIR)
+    }
 
     #[test]
     fn default_name_matches_formula() {
@@ -505,7 +509,7 @@ mod tests {
             file_path: None,
         });
         assert_eq!(
-            home.secret_path(),
+            home.secret_path(host_dir()),
             PathBuf::from("age/secrets/users/can/kaggle_api_token.age")
         );
         assert_eq!(
@@ -519,7 +523,7 @@ mod tests {
             env_vars: vec!["DEEPSEEK_API_KEY".to_string()],
         });
         assert_eq!(
-            shared.secret_path(),
+            shared.secret_path(host_dir()),
             PathBuf::from("age/secrets/users/shared/deepseek.age")
         );
         assert_eq!(
@@ -538,7 +542,7 @@ mod tests {
             instances: vec!["codeberg".to_string()],
         });
         assert_eq!(
-            forgejo.secret_path(),
+            forgejo.secret_path(host_dir()),
             PathBuf::from("age/secrets/modules/forgejo-runner/copr_token.age")
         );
         assert_eq!(
@@ -553,12 +557,32 @@ mod tests {
             env_vars: vec!["GMI_CLOUD_API_KEY".to_string()],
         });
         assert_eq!(
-            dashy_home.secret_path(),
+            dashy_home.secret_path(host_dir()),
             PathBuf::from("age/secrets/users/shared/gmi_cloud.age")
         );
         assert_eq!(
             dashy_home.module_path(),
             PathBuf::from("home/user/shared/gmi_cloud.nix")
+        );
+    }
+
+    #[test]
+    fn system_secret_path_follows_host_dir_override() {
+        let system = TargetSpec::System(SystemTarget {
+            host: "atlas".to_string(),
+            slug: "colibri-atlas-api-key".to_string(),
+            age_name: "atlas-colibri-atlas-api-key".to_string(),
+            env_vars: Vec::new(),
+            services: Vec::new(),
+            file_path: None,
+        });
+        assert_eq!(
+            system.secret_path(host_dir()),
+            PathBuf::from("age/secrets/hosts/atlas/colibri_atlas_api_key.age")
+        );
+        assert_eq!(
+            system.secret_path(Path::new("age/secrets/root/hosts")),
+            PathBuf::from("age/secrets/root/hosts/atlas/colibri_atlas_api_key.age")
         );
     }
 }

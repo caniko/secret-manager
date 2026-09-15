@@ -3,7 +3,7 @@ use clap::{Args, Subcommand};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use crate::env::StoreEnv;
+use crate::env::{LocalEnv, StoreEnv};
 use crate::io::{default_slug, validate_ident, validate_slug, validate_unit_name};
 use crate::plan::{
     AddPlan, CommonSourceArgs, ForgejoGpgKeyPairPlan, ForgejoSshKeyPlan, SourceKind,
@@ -465,7 +465,11 @@ impl ForgejoCmd {
 impl HmSshArgs {
     pub fn run(self, env: &dyn StoreEnv) -> Result<()> {
         let plan = self.build_plan(env)?;
-        run_plan(&common_generate_ssh(&self.algorithm, &self.exec)?, plan)
+        run_plan(
+            &common_generate_ssh(&self.algorithm, &self.exec)?,
+            plan,
+            env,
+        )
     }
 
     fn build_plan(&self, env: &dyn StoreEnv) -> Result<AddPlan> {
@@ -504,7 +508,11 @@ impl HmSshArgs {
 impl HmPasswordArgs {
     pub fn run(self, env: &dyn StoreEnv) -> Result<()> {
         let plan = self.build_plan(env)?;
-        run_plan(&common_generate_password(self.length, &self.exec)?, plan)
+        run_plan(
+            &common_generate_password(self.length, &self.exec)?,
+            plan,
+            env,
+        )
     }
 
     fn build_plan(&self, env: &dyn StoreEnv) -> Result<AddPlan> {
@@ -560,6 +568,7 @@ impl HmTextArgs {
         run_plan(
             &common_plaintext_with_editor(self.from_file.clone(), &self.exec),
             plan,
+            env,
         )
     }
 
@@ -610,6 +619,7 @@ impl HmFileArgs {
                 &self.exec,
             ),
             plan,
+            env,
         )
     }
 
@@ -645,7 +655,11 @@ impl HmFileArgs {
 impl NixosSshArgs {
     pub fn run(self, env: &dyn StoreEnv) -> Result<()> {
         let plan = self.build_plan(env)?;
-        run_plan(&common_generate_ssh(&self.algorithm, &self.exec)?, plan)
+        run_plan(
+            &common_generate_ssh(&self.algorithm, &self.exec)?,
+            plan,
+            env,
+        )
     }
 
     fn build_plan(&self, env: &dyn StoreEnv) -> Result<AddPlan> {
@@ -673,7 +687,11 @@ impl NixosSshArgs {
 impl NixosPasswordArgs {
     pub fn run(self, env: &dyn StoreEnv) -> Result<()> {
         let plan = self.build_plan(env)?;
-        run_plan(&common_generate_password(self.length, &self.exec)?, plan)
+        run_plan(
+            &common_generate_password(self.length, &self.exec)?,
+            plan,
+            env,
+        )
     }
 
     fn build_plan(&self, env: &dyn StoreEnv) -> Result<AddPlan> {
@@ -702,7 +720,11 @@ impl NixosPasswordArgs {
 impl NixosTextArgs {
     pub fn run(self, env: &dyn StoreEnv) -> Result<()> {
         let plan = self.build_plan(env)?;
-        run_plan(&common_plaintext(self.from_file.clone(), &self.exec), plan)
+        run_plan(
+            &common_plaintext(self.from_file.clone(), &self.exec),
+            plan,
+            env,
+        )
     }
 
     fn build_plan(&self, env: &dyn StoreEnv) -> Result<AddPlan> {
@@ -717,7 +739,7 @@ impl NixosTextArgs {
                 slug: slug.clone(),
                 source: SourceKind::Plaintext,
                 targets: Vec::new(),
-                source_only_paths: vec![host_secret_path(&self.target.host, &slug)],
+                source_only_paths: vec![host_secret_path(env, &self.target.host, &slug)],
             });
         }
         if self.env.is_empty() {
@@ -757,6 +779,7 @@ impl NixosFileArgs {
                 &self.exec,
             ),
             plan,
+            env,
         )
     }
 
@@ -819,7 +842,13 @@ impl ForgejoGpgKeyPairArgs {
 impl ForgejoPasswordArgs {
     pub fn run(self) -> Result<()> {
         let plan = self.build_plan()?;
-        run_plan(&common_generate_password(self.length, &self.exec)?, plan)
+        // Forgejo targets never resolve host secret paths; the
+        // environment default applies.
+        run_plan(
+            &common_generate_password(self.length, &self.exec)?,
+            plan,
+            &LocalEnv,
+        )
     }
 
     fn build_plan(&self) -> Result<AddPlan> {
@@ -840,7 +869,13 @@ impl ForgejoPasswordArgs {
 impl ForgejoTextArgs {
     pub fn run(self) -> Result<()> {
         let plan = self.build_plan()?;
-        run_plan(&common_plaintext(self.from_file.clone(), &self.exec), plan)
+        // Forgejo targets never resolve host secret paths; the
+        // environment default applies.
+        run_plan(
+            &common_plaintext(self.from_file.clone(), &self.exec),
+            plan,
+            &LocalEnv,
+        )
     }
 
     fn build_plan(&self) -> Result<AddPlan> {
@@ -868,6 +903,9 @@ impl ForgejoFileArgs {
                 &self.exec,
             ),
             plan,
+            // Forgejo targets never resolve host secret paths; the
+            // environment default applies.
+            &LocalEnv,
         )
     }
 
@@ -949,12 +987,9 @@ fn resolve_home_user(user: &Option<String>, env: &dyn StoreEnv) -> Result<String
     env.resolve_home_user()
 }
 
-fn host_secret_path(host: &str, slug: &str) -> PathBuf {
-    PathBuf::from(format!(
-        "age/secrets/hosts/{}/{}.age",
-        host,
-        slug.replace('-', "_")
-    ))
+fn host_secret_path(env: &dyn StoreEnv, host: &str, slug: &str) -> PathBuf {
+    env.host_secret_dir()
+        .join(format!("{}/{}.age", host, slug.replace('-', "_")))
 }
 
 fn shared_secret_path(slug: &str) -> PathBuf {

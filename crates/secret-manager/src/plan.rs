@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use nix_manager_core::exec;
 
+use crate::env::{DEFAULT_HOST_SECRET_DIR, StoreEnv};
 use crate::io::{
     TempDir, adopt_age_file, display_rel, encrypt_plaintext_to_age, read_plaintext,
     read_plaintext_editor_when_tty, splice_import, stage_and_rekey, validate_ident, validate_slug,
@@ -66,9 +67,11 @@ pub struct ForgejoGpgKeyPairPlan {
     pub secret_path: PathBuf,
 }
 
-pub fn run_plan(args: &CommonSourceArgs, plan: AddPlan) -> Result<()> {
+pub fn run_plan(args: &CommonSourceArgs, plan: AddPlan, env: &dyn StoreEnv) -> Result<()> {
     let repo_root = std::env::current_dir()?;
+    let host_dir = env.host_secret_dir();
     let modules = render_modules(
+        &host_dir,
         &plan.targets,
         match &plan.source {
             SourceKind::Generate(generator) => Some(generator),
@@ -282,10 +285,14 @@ pub fn run_forgejo_ssh_key_plan(
     let generator = GeneratorSpec::SshKey {
         algorithm: "ed25519".to_string(),
     };
-    let module = render_modules(std::slice::from_ref(&plan.target), Some(&generator))
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow!("internal error: forgejo ssh-key plan rendered no module"))?;
+    let module = render_modules(
+        Path::new(DEFAULT_HOST_SECRET_DIR),
+        std::slice::from_ref(&plan.target),
+        Some(&generator),
+    )
+    .into_iter()
+    .next()
+    .ok_or_else(|| anyhow!("internal error: forgejo ssh-key plan rendered no module"))?;
 
     let module_path = repo_root.join(&module.path);
     let default_nix = repo_root.join(&module.default_nix);
