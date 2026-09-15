@@ -1,4 +1,5 @@
-//! On-demand rotation for generated agenix secret sources.
+//! Idempotent provisioning and on-demand rotation for generated agenix
+//! secret sources.
 //!
 //! Shape-agnostic: works for any `.age` source whose Nix declaration carries
 //! a `generator`, whether the declaration was rendered by
@@ -6,13 +7,17 @@
 //! key material — generation runs inside `agenix generate`, so the operator
 //! (and this process) stays zero-knowledge.
 //!
-//! Failure safety comes in two separate stages:
+//! Lifecycle: without `--force` this is ensure-or-preserve (a missing source
+//! is created, an existing one is left byte-identical); `--force` replaces
+//! an existing source. Failure safety comes in two separate stages:
 //!
 //! 1. Source replacement. The existing source is *copied* aside (never
 //!    moved), then regenerated with `agenix generate --force-generate`.
-//!    Generation and staging flags are passed explicitly — never `-a` — so
-//!    a failed run leaves both worktree and index exactly as found, and the
-//!    backup restores the previous bytes.
+//!    Generation and staging flags are passed explicitly — never `-a` — and
+//!    inherited auto-staging (`AGENIX_REKEY_ADD_TO_GIT`) is stripped when
+//!    `--no-stage` is given, so a failed run leaves both worktree and index
+//!    exactly as found, and the backup restores the previous bytes. Fresh
+//!    output must carry the age file magic, not merely be non-empty.
 //! 2. Distribution. `agenix rekey` fans the new source out to rekeyed
 //!    copies. If this fails, the new source is *kept*: the failure reports
 //!    "distribution incomplete" with a rekey-only retry command, instead of
@@ -21,8 +26,9 @@
 
 use anyhow::{Result, anyhow, bail};
 use clap::Args;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
@@ -43,12 +49,29 @@ const REKEYED_DIR: &str = "age/rekeyed";
 /// anywhere else so a stray invocation cannot scatter backups.
 const REPO_MARKER: &str = "flake.nix";
 
+/// Name of the repo-local mutual-exclusion guard. Lives inside `.git` so it
+/// never shows up in status output; on a bare checkout without a `.git`
+/// directory it falls back to a dotfile at the repo root.
+const LOCK_NAME: &str = "secret-manager-rotate.lock";
+
+/// Inherited setting that makes agenix stage on its own. Stripped from
+/// child environments whenever `--no-stage` is passed.
+const ADD_TO_GIT_ENV: &str = "AGENIX_REKEY_ADD_TO_GIT";
+
+/// Every age v1 file starts with this header line. A "successful" generate
+/// that does not produce it is a partial write, not a key.
+const AGE_MAGIC: &[u8] = b"age-encryption.org v1\n";
+
 #[derive(Args, Debug)]
 pub struct RotateArgs {
-    /// Repo-relative path to the agenix-tracked .age source to rotate.
-    /// A missing source is created (the declaration must carry a
-    /// `generator` either way).
+    /// Repo-relative path to the agenix-tracked .age source. A missing
+    /// source is created; an existing one is preserved unless `--force`
+    /// is given (the declaration must carry a `generator` either way).
     pub secret_path: String,
+
+    /// Replace an existing source instead of preserving it.
+    #[arg(long, default_value_t = false)]
+    pub force: bool,
 
     /// Skip the trailing `agenix rekey`. Generation is touchless; rekey
     /// needs the FIDO2 master key, so split them when batching touches.
@@ -56,6 +79,7 @@ pub struct RotateArgs {
     pub no_rekey: bool,
 
     /// Skip `git add` staging of the rotated source and rekeyed copies.
+    /// Also suppresses inherited agenix auto-staging for these invocations.
     #[arg(long, default_value_t = false)]
     pub no_stage: bool,
 }
@@ -65,48 +89,84 @@ impl RotateArgs {
         let repo_root = discover_root()?;
         let rel = contained_rel(&repo_root, &self.secret_path)?;
         let secret_path = ensure_parent(&repo_root, &rel)?;
-        let backup_path = backup_path_for(&secret_path);
         let existed = try_is_regular_file(&secret_path)?;
-
-        // Copy (never move) the working source aside. Exclusive creation
-        // doubles as the in-progress guard: a second rotation fails here
-        // instead of racing the first.
-        if existed {
-            create_backup(&secret_path, &backup_path, &repo_root)?;
+        if !existed && secret_path.symlink_metadata().is_ok() {
+            bail!(
+                "refusing to rotate {}: not a regular file",
+                display_rel(&repo_root, &secret_path)
+            );
         }
 
-        let outcome = regenerate(&repo_root, &rel, existed)
-            .and_then(|()| validate_fresh(&repo_root, &secret_path))
-            .and_then(|()| stage_source(&repo_root, &rel, self.no_stage));
+        if existed && !self.force {
+            eprintln!(
+                "preserved {} (already exists; pass --force to rotate)",
+                display_rel(&repo_root, &secret_path)
+            );
+            return Ok(());
+        }
+
+        // Serialize whole runs (create and replace alike, across sources):
+        // rekey is repository-wide, so per-source backups alone cannot
+        // exclude interleaving. The guard is removed on every handled exit;
+        // only a crash or kill leaves it behind, and then the next run
+        // refuses with removal instructions.
+        let guard = acquire_lock(&repo_root)?;
+        let result = self.run_locked(&repo_root, &rel, &secret_path, existed);
+        if let Err(e) = fs::remove_file(&guard) {
+            eprintln!(
+                "warning: rotation finished but the lock {} could not be removed ({e}); remove it manually or the next run will refuse to start",
+                display_rel(&repo_root, &guard)
+            );
+        }
+        result
+    }
+
+    fn run_locked(
+        &self,
+        repo_root: &Path,
+        rel: &Path,
+        secret_path: &Path,
+        existed: bool,
+    ) -> Result<()> {
+        let backup_path = backup_path_for(secret_path);
+        // Copy (never move) the working source aside. Exclusive creation
+        // fails fast on a leftover backup instead of interleaving with it.
+        if existed {
+            create_backup(secret_path, &backup_path, repo_root)?;
+        }
+
+        let outcome = regenerate(repo_root, rel, existed, self.no_stage)
+            .and_then(|()| validate_fresh(repo_root, secret_path))
+            .and_then(|()| stage_source(repo_root, rel, self.no_stage));
         if let Err(e) = outcome {
             if existed {
-                restore(&secret_path, &backup_path, &repo_root)?;
+                restore(secret_path, &backup_path, repo_root)?;
             } else {
-                remove_partial(&secret_path);
+                remove_partial(secret_path);
             }
             return Err(e);
         }
         if existed {
-            remove_backup(&backup_path, &repo_root)?;
+            remove_backup(&backup_path, repo_root)?;
         }
 
         if !self.no_rekey {
-            distribute(&repo_root, &rel, self.no_stage)?;
+            distribute(repo_root, rel, self.no_stage)?;
         } else {
             eprintln!("skipped rekey — run `agenix rekey -a` before deploying.");
         }
         eprintln!(
             "{} {} (new key material generated by `agenix generate`)",
             if existed { "rotated" } else { "created" },
-            display_rel(&repo_root, &secret_path)
+            display_rel(repo_root, secret_path)
         );
         Ok(())
     }
 }
 
-/// Walk up from the working directory to the store repo root. Falls back
-/// to the working directory itself (the historical behavior) so standalone
-/// use outside a flake checkout keeps working.
+/// Walk up from the working directory to the store repo root. Refuses to
+/// guess: without the marker there is no evidence the mutations below
+/// would land in a store repo.
 fn discover_root() -> Result<PathBuf> {
     let mut dir = std::env::current_dir()?;
     loop {
@@ -115,7 +175,9 @@ fn discover_root() -> Result<PathBuf> {
         }
         match dir.parent() {
             Some(parent) => dir = parent.to_path_buf(),
-            None => return Ok(std::env::current_dir()?),
+            None => bail!(
+                "no {REPO_MARKER} found above the working directory; run rotate inside the store repo"
+            ),
         }
     }
 }
@@ -197,6 +259,43 @@ fn ensure_parent(repo_root: &Path, rel: &Path) -> Result<PathBuf> {
     Ok(abs)
 }
 
+/// Repo-local mutual exclusion for whole runs. The anchor is created
+/// exclusively and removed on every handled exit; only a crash or kill
+/// leaves it behind, in which case the next run refuses and says how to
+/// recover. Never unlinked speculatively: removal happens exactly once,
+/// by the run that created it, after its outcome is settled.
+fn lock_path(repo_root: &Path) -> PathBuf {
+    let dotgit = repo_root.join(".git");
+    if dotgit.is_dir() {
+        dotgit.join(LOCK_NAME)
+    } else {
+        repo_root.join(format!(".{LOCK_NAME}"))
+    }
+}
+
+fn acquire_lock(repo_root: &Path) -> Result<PathBuf> {
+    let path = lock_path(repo_root);
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                anyhow!(
+                    "another rotation is running or a previous one was interrupted (lock {} exists); inspect any *.rotbak backups, then remove the lock and retry",
+                    display_rel(repo_root, &path)
+                )
+            } else {
+                anyhow!(
+                    "cannot create rotation lock {}: {e}",
+                    display_rel(repo_root, &path)
+                )
+            }
+        })?;
+    Ok(path)
+}
+
 fn backup_path_for(secret_path: &Path) -> PathBuf {
     let mut name = secret_path
         .file_name()
@@ -215,7 +314,7 @@ fn try_is_regular_file(path: &Path) -> Result<bool> {
 }
 
 /// Copy the working source to the backup path, creating it exclusively so
-/// a concurrent or interrupted rotation fails fast instead of interleaving.
+/// a leftover backup fails fast instead of being silently overwritten.
 fn create_backup(secret_path: &Path, backup_path: &Path, repo_root: &Path) -> Result<()> {
     let mut backup = fs::OpenOptions::new()
         .write(true)
@@ -225,7 +324,7 @@ fn create_backup(secret_path: &Path, backup_path: &Path, repo_root: &Path) -> Re
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::AlreadyExists {
                 anyhow!(
-                    "stale rotation backup {} — another rotation is running or a previous one was interrupted; inspect it, restore or remove it manually, then retry",
+                    "stale rotation backup {} — a previous rotation was interrupted; inspect it, restore or remove it manually, then retry",
                     display_rel(repo_root, backup_path)
                 )
             } else {
@@ -241,10 +340,37 @@ fn create_backup(secret_path: &Path, backup_path: &Path, repo_root: &Path) -> Re
     Ok(())
 }
 
+/// Spawn a child with inherited stdio, mirroring exec::run_in's reporting.
+/// exec's runners cannot drop inherited environment entries, and agenix
+/// honors auto-staging from the environment, so rotation needs its own
+/// spawn point to make `--no-stage` airtight.
+fn run_child(repo_root: &Path, program: &str, args: &[&str], strip_auto_stage: bool) -> Result<()> {
+    eprintln!("$ ({}) {} {}", repo_root.display(), program, args.join(" "));
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args).current_dir(repo_root);
+    if strip_auto_stage {
+        cmd.env_remove(ADD_TO_GIT_ENV);
+    }
+    let status = cmd
+        .status()
+        .map_err(|e| anyhow!("failed to spawn {program} in {}: {e}", repo_root.display()))?;
+    if !status.success() {
+        return Err(anyhow!(
+            "{program} exited with status {} in {}",
+            status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "<signal>".into()),
+            repo_root.display()
+        ));
+    }
+    Ok(())
+}
+
 /// Same shape `run_plan` uses for fresh generated secrets, minus `-a`:
 /// staging is done explicitly afterwards so `--no-stage` is honored and a
 /// failed run stages nothing.
-fn regenerate(repo_root: &Path, rel: &Path, existed: bool) -> Result<()> {
+fn regenerate(repo_root: &Path, rel: &Path, existed: bool, no_stage: bool) -> Result<()> {
     let rel = rel
         .to_str()
         .ok_or_else(|| anyhow!("non-utf8 secret path"))?;
@@ -253,7 +379,7 @@ fn regenerate(repo_root: &Path, rel: &Path, existed: bool) -> Result<()> {
         args.push("--force-generate");
     }
     args.push(rel);
-    exec::run_in(repo_root, "agenix", args).map_err(|e| {
+    run_child(repo_root, "agenix", &args, no_stage).map_err(|e| {
         anyhow!(
             "{e}\n  hint: rotation needs a `generator` on the secret's Nix declaration (e.g. `generator.script = \"strong-passphrase-64\"`); the previous source is untouched"
         )
@@ -261,15 +387,21 @@ fn regenerate(repo_root: &Path, rel: &Path, existed: bool) -> Result<()> {
 }
 
 fn validate_fresh(repo_root: &Path, secret_path: &Path) -> Result<()> {
-    let meta = fs::metadata(secret_path).map_err(|e| {
+    let bytes = fs::read(secret_path).map_err(|e| {
         anyhow!(
             "`agenix generate` reported success but {} is missing ({e}); the previous source is untouched",
             display_rel(repo_root, secret_path)
         )
     })?;
-    if meta.len() == 0 {
+    if bytes.is_empty() {
         bail!(
             "`agenix generate` wrote an empty {}; the previous source is untouched",
+            display_rel(repo_root, secret_path)
+        );
+    }
+    if !bytes.starts_with(AGE_MAGIC) {
+        bail!(
+            "`agenix generate` wrote {} without the age file header; treating it as a partial write, the previous source is untouched",
             display_rel(repo_root, secret_path)
         );
     }
@@ -286,14 +418,39 @@ fn stage_source(repo_root: &Path, rel: &Path, no_stage: bool) -> Result<()> {
     exec::run_in(repo_root, "git", ["add", rel])
 }
 
+/// Content snapshot of status-listed files, keyed by repo-relative path.
+/// `None` marks a file that could not be read; it counts as changed so a
+/// distribution output is never silently dropped from staging.
+fn snapshot_content(repo_root: &Path, names: &BTreeSet<PathBuf>) -> BTreeMap<PathBuf, Option<u64>> {
+    names
+        .iter()
+        .map(|name| {
+            let hash = fs::read(repo_root.join(name)).ok().map(|bytes| {
+                let mut hasher = DefaultHasher::new();
+                bytes.hash(&mut hasher);
+                hasher.finish()
+            });
+            (name.clone(), hash)
+        })
+        .collect()
+}
+
 /// Fan the new source out to rekeyed copies. On failure the new source is
 /// deliberately kept: restoring one file cannot roll back a multi-file
 /// distribution, so report it as incomplete with a rekey-only retry.
+/// Staging compares file *contents* before and after, so pre-existing dirt
+/// and concurrent-but-identical writes are never swept in, and genuinely
+/// redistributed copies are never missed.
 fn distribute(repo_root: &Path, rel: &Path, no_stage: bool) -> Result<()> {
-    let before = dirty_under(repo_root, REKEYED_DIR);
-    // No `-a`: rekeyed copies are staged explicitly below so `--no-stage`
-    // leaves the index alone.
-    if let Err(e) = exec::run_in(repo_root, "agenix", ["rekey"]) {
+    let before = snapshot_content(repo_root, &status_names(repo_root).map_err(|e| {
+        anyhow!(
+            "source {} updated, but distribution state is unknown: {e}; verify with `git status` and distribute with `agenix rekey -a`",
+            display_rel(repo_root, &repo_root.join(rel))
+        )
+    })?);
+    // No `-a`, and the inherited auto-staging knob follows `--no-stage`:
+    // rekeyed copies are staged explicitly below.
+    if let Err(e) = run_child(repo_root, "agenix", &["rekey"], no_stage) {
         return Err(anyhow!(
             "source {} updated, but distribution is incomplete: {e}\n  retry with `agenix rekey -a` (no new key will be generated)",
             display_rel(repo_root, &repo_root.join(rel))
@@ -302,8 +459,21 @@ fn distribute(repo_root: &Path, rel: &Path, no_stage: bool) -> Result<()> {
     if no_stage {
         return Ok(());
     }
-    let after = dirty_under(repo_root, REKEYED_DIR);
-    let mut fresh: Vec<&Path> = after.difference(&before).map(PathBuf::as_path).collect();
+    let after_names = status_names(repo_root).map_err(|e| {
+        anyhow!(
+            "rekey completed, but changed files could not be determined: {e}; inspect `git status` under {REKEYED_DIR} and stage the redistributed copies"
+        )
+    })?;
+    let after = snapshot_content(repo_root, &after_names);
+    let mut fresh: Vec<&Path> = after
+        .iter()
+        .filter(|&(path, hash)| {
+            // Scope staging to the distribution tree; the source itself was
+            // staged (or deliberately not) in the replacement stage.
+            path.starts_with(REKEYED_DIR) && before.get(path) != Some(hash)
+        })
+        .map(|(path, _)| path.as_path())
+        .collect();
     fresh.sort();
     if !fresh.is_empty() {
         let refs: Vec<&str> = fresh.iter().filter_map(|p| p.to_str()).collect();
@@ -312,33 +482,50 @@ fn distribute(repo_root: &Path, rel: &Path, no_stage: bool) -> Result<()> {
     Ok(())
 }
 
-/// Paths under `scope` (repo-relative) with worktree or index changes,
-/// parsed from `git status --porcelain`. Best-effort: if git itself fails,
-/// distribution staging degrades to staging nothing rather than failing
-/// the rotation.
-fn dirty_under(repo_root: &Path, scope: &str) -> BTreeSet<PathBuf> {
-    let out = exec::cap_in(repo_root, "git", ["status", "--porcelain", "--", scope]);
+/// Repo-relative paths with worktree or index changes, parsed from
+/// NUL-delimited porcelain output. Git failures propagate: staging on a
+/// guessed file set would be worse than refusing.
+fn status_names(repo_root: &Path) -> Result<BTreeSet<PathBuf>> {
+    let out = exec::cap_in(
+        repo_root,
+        "git",
+        ["status", "--porcelain=v1", "-z", "--", REKEYED_DIR],
+    );
     if out.exit_code != 0 {
-        return BTreeSet::new();
+        bail!(
+            "git status failed in {}: {}",
+            repo_root.display(),
+            out.stderr.trim()
+        );
     }
-    parse_porcelain(&out.stdout)
-        .into_iter()
-        .filter(|p| !p.as_os_str().is_empty())
-        .collect()
+    Ok(parse_status_z(&out.stdout))
 }
 
-fn parse_porcelain(output: &str) -> BTreeSet<PathBuf> {
+fn parse_status_z(output: &str) -> BTreeSet<PathBuf> {
     let mut paths = BTreeSet::new();
-    for line in output.lines() {
-        // Porcelain v1: two status columns, a space, then the path. For
-        // renames (`R  old -> new`) the post-image is what changed on disk.
-        let path = line.get(3..).unwrap_or("").trim();
-        let path = path.rsplit(" -> ").next().unwrap_or(path).trim();
-        let path = path.trim_matches('"');
+    // NUL-delimited v1 records look like `XY path`; renames contribute a
+    // second bare path field. Both sides are staged-relevant (old deleted,
+    // new added), so order questions do not matter. Paths are literal
+    // here: never trim or unquote them.
+    let mut fields = output.split('\0').peekable();
+    while let Some(field) = fields.next() {
+        if field.is_empty() {
+            continue;
+        }
+        let (status, path) = field.split_at(field.len().min(2));
+        let path = path.strip_prefix(' ').unwrap_or(path);
         if path.is_empty() {
             continue;
         }
         paths.insert(PathBuf::from(path));
+        if status.starts_with(['R', 'C']) {
+            if let Some(other) = fields.next() {
+                if !other.is_empty() {
+                    paths.insert(PathBuf::from(other));
+                }
+            }
+        }
+        let _ = status;
     }
     paths
 }
@@ -435,6 +622,15 @@ mod tests {
     }
 
     #[test]
+    fn contained_rel_refuses_parent_symlinked_outside() {
+        let repo = rooted();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("/", repo.path.join("linkdir")).expect("symlink");
+        let err = contained_rel(&repo.path, "linkdir/token.age").unwrap_err();
+        assert!(err.to_string().contains("inside the repo"), "{err:?}");
+    }
+
+    #[test]
     fn backup_path_keeps_sibling_name_without_age_suffix() {
         let path = Path::new("age/secrets/root/hosts/atlas/colibri_atlas_api_key.age");
         assert_eq!(
@@ -444,21 +640,26 @@ mod tests {
     }
 
     #[test]
-    fn parse_porcelain_reads_added_modified_and_renamed() {
-        let out = "A  age/secrets/root/hosts/atlas/new.age\n M age/rekeyed/root/atlas/x-old.age\nR  age/rekeyed/root/atlas/a.age -> age/rekeyed/root/atlas/b.age\n?? age/rekeyed/root/atlas/untracked.age\n";
-        let paths = parse_porcelain(out);
-        assert!(paths.contains(&PathBuf::from("age/secrets/root/hosts/atlas/new.age")));
-        assert!(paths.contains(&PathBuf::from("age/rekeyed/root/atlas/x-old.age")));
-        // Renames contribute the post-image.
-        assert!(paths.contains(&PathBuf::from("age/rekeyed/root/atlas/b.age")));
-        assert!(!paths.contains(&PathBuf::from("age/rekeyed/root/atlas/a.age")));
-        assert!(paths.contains(&PathBuf::from("age/rekeyed/root/atlas/untracked.age")));
-        assert_eq!(paths.len(), 4);
+    fn parse_status_z_reads_plain_renamed_and_odd_names() {
+        // `R  new` first, `old` second: both sides land in the set, so the
+        // field order question cannot cause a miss either way.
+        let out = "A  age/new.age\0 M age/sp ace.age\0R  age/n2.age\0age/n1.age\0?? age/u.age\0";
+        let paths = parse_status_z(out);
+        for want in [
+            "age/new.age",
+            "age/sp ace.age",
+            "age/n2.age",
+            "age/n1.age",
+            "age/u.age",
+        ] {
+            assert!(paths.contains(&PathBuf::from(want)), "missing {want}");
+        }
+        assert_eq!(paths.len(), 5);
     }
 
     #[test]
-    fn parse_porcelain_ignores_blank_and_garbage_lines() {
-        let out = "\n   \nX\n";
-        assert!(parse_porcelain(out).is_empty());
+    fn parse_status_z_ignores_blank_fields() {
+        assert!(parse_status_z("").is_empty());
+        assert!(parse_status_z("\0\0").is_empty());
     }
 }

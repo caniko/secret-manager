@@ -17,6 +17,7 @@ const STUB_AGENIX: &str = r#"#!/usr/bin/env bash
 set -u
 log="$STUB_DIR/log"
 printf '%s\n' "agenix $*" >>"$log"
+printf 'env ADD_TO_GIT=%s\n' "${AGENIX_REKEY_ADD_TO_GIT-unset}" >>"$log"
 cmd="${1:-}"
 if [ "$cmd" = "generate" ]; then
   if [ -e "$STUB_DIR/fail-generate" ]; then
@@ -25,7 +26,13 @@ if [ "$cmd" = "generate" ]; then
   fi
   rel="${@: -1}"
   mkdir -p "$(dirname "$rel")"
-  printf 'stub-material\n' >"$rel"
+  if [ -e "$STUB_DIR/fail-generate-partial" ]; then
+    # Lies about success the way a torn write would: non-empty output
+    # without the age file header.
+    printf 'truncated-garbage' >"$rel"
+    exit 0
+  fi
+  printf 'age-encryption.org v1\nstub-material\n' >"$rel"
   exit 0
 fi
 if [ "$cmd" = "rekey" ]; then
@@ -151,6 +158,10 @@ impl Drop for TempRepo {
 
 const REL: &str = "age/secrets/hosts/atlas/token.age";
 
+/// What the stub writes on a successful generate: age magic header plus a
+/// body the assertions can recognize.
+const STUB_MATERIAL: &str = "age-encryption.org v1\nstub-material\n";
+
 fn read(repo: &TempRepo, rel: &str) -> String {
     fs::read_to_string(repo.repo().join(rel)).expect("read fixture")
 }
@@ -164,7 +175,7 @@ fn create_when_absent_stages_source_and_rekeys() {
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(read(&repo, REL), "stub-material\n");
+    assert_eq!(read(&repo, REL), STUB_MATERIAL);
     assert!(
         repo.porcelain().contains(&format!("A  {REL}")),
         "source must be staged, got: {:?}",
@@ -189,13 +200,13 @@ fn rotate_replaces_source_and_leaves_no_backup() {
     let repo = TempRepo::new();
     fs::create_dir_all(repo.repo().join("age/secrets/hosts/atlas")).unwrap();
     fs::write(repo.repo().join(REL), "old-material\n").unwrap();
-    let out = repo.run(&["rotate", REL], &[]);
+    let out = repo.run(&["rotate", "--force", REL], &[]);
     assert!(
         out.status.success(),
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(read(&repo, REL), "stub-material\n");
+    assert_eq!(read(&repo, REL), STUB_MATERIAL);
     assert!(
         !repo.repo().join(format!("{REL}.rotbak")).exists(),
         "backup must be dropped on success"
@@ -213,7 +224,7 @@ fn generate_failure_preserves_bytes_and_index() {
     fs::create_dir_all(repo.repo().join("age/secrets/hosts/atlas")).unwrap();
     fs::write(repo.repo().join(REL), "old-material\n").unwrap();
     repo.marker("fail-generate");
-    let out = repo.run(&["rotate", REL], &[]);
+    let out = repo.run(&["rotate", "--force", REL], &[]);
     assert!(!out.status.success(), "generate failure must fail");
     assert_eq!(
         read(&repo, REL),
@@ -239,10 +250,10 @@ fn rekey_failure_keeps_new_source_and_reports_incomplete() {
     fs::create_dir_all(repo.repo().join("age/secrets/hosts/atlas")).unwrap();
     fs::write(repo.repo().join(REL), "old-material\n").unwrap();
     repo.marker("fail-rekey");
-    let out = repo.run(&["rotate", REL], &[]);
+    let out = repo.run(&["rotate", "--force", REL], &[]);
     assert!(!out.status.success(), "rekey failure must fail");
     // The new source is kept: restoring one file cannot roll back distribution.
-    assert_eq!(read(&repo, REL), "stub-material\n");
+    assert_eq!(read(&repo, REL), STUB_MATERIAL);
     assert!(
         !repo.repo().join(format!("{REL}.rotbak")).exists(),
         "no stale guard may block the rekey retry"
@@ -267,13 +278,13 @@ fn no_stage_leaves_index_empty() {
     let repo = TempRepo::new();
     fs::create_dir_all(repo.repo().join("age/secrets/hosts/atlas")).unwrap();
     fs::write(repo.repo().join(REL), "old-material\n").unwrap();
-    let out = repo.run(&["rotate", REL, "--no-stage"], &[]);
+    let out = repo.run(&["rotate", "--force", REL, "--no-stage"], &[]);
     assert!(
         out.status.success(),
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(read(&repo, REL), "stub-material\n");
+    assert_eq!(read(&repo, REL), STUB_MATERIAL);
     assert!(
         repo.cached_names().is_empty(),
         "index must stay empty, got: {:?}",
@@ -338,12 +349,202 @@ fn existing_backup_blocks_concurrent_run() {
     fs::create_dir_all(repo.repo().join("age/secrets/hosts/atlas")).unwrap();
     fs::write(repo.repo().join(REL), "old-material\n").unwrap();
     fs::write(repo.repo().join(format!("{REL}.rotbak")), "in-flight\n").unwrap();
-    let out = repo.run(&["rotate", REL], &[]);
+    let out = repo.run(&["rotate", "--force", REL], &[]);
     assert!(!out.status.success(), "concurrent run must fail");
     assert_eq!(read(&repo, REL), "old-material\n", "source untouched");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("backup") || stderr.contains("rotation"),
         "got: {stderr}"
+    );
+}
+
+#[test]
+fn existing_source_is_preserved_without_force() {
+    let repo = TempRepo::new();
+    fs::create_dir_all(repo.repo().join("age/secrets/hosts/atlas")).unwrap();
+    fs::write(repo.repo().join(REL), "old-material\n").unwrap();
+    let out = repo.run(&["rotate", REL], &[]);
+    assert!(
+        out.status.success(),
+        "preserve must succeed, stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(read(&repo, REL), "old-material\n", "bytes unchanged");
+    assert!(
+        !repo.log().contains("agenix generate"),
+        "no generation on preserve: {}",
+        repo.log()
+    );
+    assert!(
+        repo.cached_names().is_empty(),
+        "index untouched, got: {:?}",
+        repo.cached_names()
+    );
+    assert!(
+        !repo.repo().join(format!("{REL}.rotbak")).exists(),
+        "no backup on preserve"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("preserved") && stderr.contains("--force"),
+        "must report preserved + force pointer, got: {stderr}"
+    );
+}
+
+#[test]
+fn no_rekey_and_no_stage_combined_leave_index_empty() {
+    let repo = TempRepo::new();
+    fs::create_dir_all(repo.repo().join("age/secrets/hosts/atlas")).unwrap();
+    fs::write(repo.repo().join(REL), "old-material\n").unwrap();
+    let out = repo.run(&["rotate", "--force", REL, "--no-rekey", "--no-stage"], &[]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(read(&repo, REL), STUB_MATERIAL);
+    assert!(!repo.log().contains("agenix rekey"), "rekey must not run");
+    assert!(
+        repo.cached_names().is_empty(),
+        "index must stay empty, got: {:?}",
+        repo.cached_names()
+    );
+}
+
+#[test]
+fn partial_write_passing_exit_code_is_rejected_by_magic() {
+    let repo = TempRepo::new();
+    fs::create_dir_all(repo.repo().join("age/secrets/hosts/atlas")).unwrap();
+    fs::write(repo.repo().join(REL), "old-material\n").unwrap();
+    repo.marker("fail-generate-partial");
+    let out = repo.run(&["rotate", "--force", REL], &[]);
+    assert!(!out.status.success(), "torn write must fail");
+    assert_eq!(read(&repo, REL), "old-material\n", "bytes must be restored");
+    assert!(
+        repo.cached_names().is_empty(),
+        "index untouched, got: {:?}",
+        repo.cached_names()
+    );
+    assert!(
+        !repo.repo().join(format!("{REL}.rotbak")).exists(),
+        "backup cleaned up after restore"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("age-encryption") || stderr.contains("partial"),
+        "must name the header check, got: {stderr}"
+    );
+}
+
+#[test]
+fn repo_lock_blocks_second_run() {
+    let repo = TempRepo::new();
+    fs::write(
+        repo.repo().join(".git/secret-manager-rotate.lock"),
+        "held\n",
+    )
+    .unwrap();
+    let out = repo.run(&["rotate", REL], &[]);
+    assert!(!out.status.success(), "locked run must fail");
+    assert!(
+        !repo.repo().join(REL).exists(),
+        "nothing may be created under lock"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("lock"), "must name the lock, got: {stderr}");
+}
+
+/// A `git` wrapper that breaks `status` only, delegating everything else
+/// to the real binary. Proves status failures propagate instead of
+/// degrading to an empty (and wrong) staging set.
+fn install_failing_status_wrapper(repo: &TempRepo) {
+    let real_git = String::from_utf8(
+        Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .expect("resolve git")
+            .stdout,
+    )
+    .expect("git path utf8")
+    .trim()
+    .to_string();
+    assert!(!real_git.is_empty(), "git must resolve");
+    fs::write(
+        repo.dir.join("bin/git"),
+        format!(
+            "#!/usr/bin/env bash\nif [ \"${{1:-}}\" = \"status\" ]; then echo \"wrapper: status broken\" >&2; exit 1; fi\nexec \"{real_git}\" \"$@\"\n"
+        ),
+    )
+    .expect("wrapper");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(repo.dir.join("bin/git"), fs::Permissions::from_mode(0o755))
+            .expect("wrapper perms");
+    }
+}
+
+#[test]
+fn git_status_failure_fails_distribution_with_source_kept() {
+    let repo = TempRepo::new();
+    fs::create_dir_all(repo.repo().join("age/secrets/hosts/atlas")).unwrap();
+    fs::write(repo.repo().join(REL), "old-material\n").unwrap();
+    install_failing_status_wrapper(&repo);
+    let out = repo.run(&["rotate", "--force", REL], &[]);
+    assert!(!out.status.success(), "status failure must fail");
+    // Replacement completed before distribution started: the new source
+    // stays, and no stale backup may block the rekey retry.
+    assert_eq!(read(&repo, REL), STUB_MATERIAL);
+    assert!(
+        !repo.repo().join(format!("{REL}.rotbak")).exists(),
+        "no stale guard may block the rekey retry"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("unknown") || stderr.contains("git status"),
+        "must report unverifiable distribution, got: {stderr}"
+    );
+}
+
+#[test]
+fn no_stage_strips_inherited_auto_staging() {
+    // With staging on, the inherited setting reaches agenix untouched.
+    let repo = TempRepo::new();
+    fs::create_dir_all(repo.repo().join("age/secrets/hosts/atlas")).unwrap();
+    fs::write(repo.repo().join(REL), "old-material\n").unwrap();
+    let out = repo.run(
+        &["rotate", "--force", REL],
+        &[("AGENIX_REKEY_ADD_TO_GIT", "1")],
+    );
+    assert!(out.status.success());
+    assert!(
+        repo.log().contains("ADD_TO_GIT=1"),
+        "inherited env must pass through by default: {}",
+        repo.log()
+    );
+    // With --no-stage the setting must not reach agenix at all, in a fresh
+    // repo so earlier staging cannot pollute the index assertion.
+    let repo = TempRepo::new();
+    fs::create_dir_all(repo.repo().join("age/secrets/hosts/atlas")).unwrap();
+    fs::write(repo.repo().join(REL), "old-material\n").unwrap();
+    let out = repo.run(
+        &["rotate", "--force", REL, "--no-stage"],
+        &[("AGENIX_REKEY_ADD_TO_GIT", "1")],
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !repo.log().contains("ADD_TO_GIT=1"),
+        "auto-staging must be stripped under --no-stage: {}",
+        repo.log()
+    );
+    assert!(
+        repo.cached_names().is_empty(),
+        "index must stay empty, got: {:?}",
+        repo.cached_names()
     );
 }
