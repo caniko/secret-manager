@@ -12,10 +12,16 @@ runner-env add`), and Pkl evaluation via nix-pklx.
 - Nix `mkForgejoRunnerFileEnv` library function for declarative runner file-env
   secret delivery through agenix + systemd-tmpfiles + container volume mounts.
 - `rotate` operation for on-demand rotation of generated agenix secret
-  sources: moves the existing source aside, regenerates with
-  `agenix generate`, and restores the backup on any failure, so the repo is
-  either rotated or untouched. Zero-knowledge — key material is never
-  printed or observed.
+  sources: copies the existing source aside (never moves it), regenerates
+  with `agenix generate --force-generate` without `-a`, validates the fresh
+  file, and stages explicitly so `--no-stage` is honored and failures leave
+  worktree and index untouched. Rekey runs as a separate distribution step:
+  on failure the new source is kept and reported as distribution-incomplete
+  with a rekey-only retry. Zero-knowledge — key material is never printed
+  or observed. Missing sources are created.
+- `StoreEnv::host_secret_dir` hook so store repos whose Nix side resolves
+  host secrets outside `age/secrets/hosts` (e.g. under `age/secrets/root`)
+  create sources where their declarations point.
 
 ### Fixed
 

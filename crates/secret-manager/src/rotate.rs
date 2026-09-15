@@ -6,107 +6,195 @@
 //! key material — generation runs inside `agenix generate`, so the operator
 //! (and this process) stays zero-knowledge.
 //!
-//! Failure safety: the existing source is renamed aside before generation.
-//! Any failure afterwards restores the backup, so the repo is either rotated
-//! or untouched — never left without a working source. The backup is dropped
-//! only on full success (generate + validate + stage/rekey).
+//! Failure safety comes in two separate stages:
+//!
+//! 1. Source replacement. The existing source is *copied* aside (never
+//!    moved), then regenerated with `agenix generate --force-generate`.
+//!    Generation and staging flags are passed explicitly — never `-a` — so
+//!    a failed run leaves both worktree and index exactly as found, and the
+//!    backup restores the previous bytes.
+//! 2. Distribution. `agenix rekey` fans the new source out to rekeyed
+//!    copies. If this fails, the new source is *kept*: the failure reports
+//!    "distribution incomplete" with a rekey-only retry command, instead of
+//!    pretending a multi-file operation was rolled back by restoring one
+//!    file.
 
 use anyhow::{Result, anyhow, bail};
 use clap::Args;
+use std::collections::BTreeSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Component, Path, PathBuf};
 
 use nix_manager_core::exec;
 
-use crate::io::{display_rel, stage_and_rekey};
+use crate::io::display_rel;
 
 /// Suffix for the in-flight rotation backup. Deliberately not `.age`, so
 /// agenix globs and `secret list` never pick it up.
 const BACKUP_SUFFIX: &str = "rotbak";
 
+/// Store subdirectory (relative to the repo root) that `agenix rekey`
+/// fans sources out to. Used to scope distribution staging.
+const REKEYED_DIR: &str = "age/rekeyed";
+
+/// Marker the store repo root must contain. Rotation refuses to run
+/// anywhere else so a stray invocation cannot scatter backups.
+const REPO_MARKER: &str = "flake.nix";
+
 #[derive(Args, Debug)]
 pub struct RotateArgs {
     /// Repo-relative path to the agenix-tracked .age source to rotate.
+    /// A missing source is created (the declaration must carry a
+    /// `generator` either way).
     pub secret_path: String,
 
-    /// Skip the trailing `agenix rekey -a`. Generation is touchless; rekey
+    /// Skip the trailing `agenix rekey`. Generation is touchless; rekey
     /// needs the FIDO2 master key, so split them when batching touches.
     #[arg(long, default_value_t = false)]
     pub no_rekey: bool,
 
-    /// Skip `git add` staging.
+    /// Skip `git add` staging of the rotated source and rekeyed copies.
     #[arg(long, default_value_t = false)]
     pub no_stage: bool,
 }
 
 impl RotateArgs {
     pub fn run(&self) -> Result<()> {
-        let repo_root = std::env::current_dir()?;
-        let rel = PathBuf::from(&self.secret_path);
-        preflight(&repo_root, &rel)?;
-        let secret_path = repo_root.join(&rel);
+        let repo_root = discover_root()?;
+        let rel = contained_rel(&repo_root, &self.secret_path)?;
+        let secret_path = ensure_parent(&repo_root, &rel)?;
         let backup_path = backup_path_for(&secret_path);
+        let existed = try_is_regular_file(&secret_path)?;
 
-        fs::rename(&secret_path, &backup_path).map_err(|e| {
-            anyhow!(
-                "could not move {} aside: {e}",
-                display_rel(&repo_root, &secret_path)
-            )
-        })?;
-
-        let outcome = regenerate(&rel)
-            .and_then(|()| validate_fresh(&repo_root, &secret_path))
-            .and_then(|()| {
-                stage_and_rekey(&repo_root, &[secret_path.as_path()], self.no_stage, self.no_rekey)
-            });
-        if let Err(e) = outcome {
-            restore(&secret_path, &backup_path, &repo_root)?;
-            return Err(e);
+        // Copy (never move) the working source aside. Exclusive creation
+        // doubles as the in-progress guard: a second rotation fails here
+        // instead of racing the first.
+        if existed {
+            create_backup(&secret_path, &backup_path, &repo_root)?;
         }
 
-        fs::remove_file(&backup_path).map_err(|e| {
-            anyhow!(
-                "rotated {}, but could not drop backup {}: {e}",
-                display_rel(&repo_root, &secret_path),
-                display_rel(&repo_root, &backup_path)
-            )
-        })?;
+        let outcome = regenerate(&repo_root, &rel, existed)
+            .and_then(|()| validate_fresh(&repo_root, &secret_path))
+            .and_then(|()| stage_source(&repo_root, &rel, self.no_stage));
+        if let Err(e) = outcome {
+            if existed {
+                restore(&secret_path, &backup_path, &repo_root)?;
+            } else {
+                remove_partial(&secret_path);
+            }
+            return Err(e);
+        }
+        if existed {
+            remove_backup(&backup_path, &repo_root)?;
+        }
+
+        if !self.no_rekey {
+            distribute(&repo_root, &rel, self.no_stage)?;
+        } else {
+            eprintln!("skipped rekey — run `agenix rekey -a` before deploying.");
+        }
         eprintln!(
-            "rotated {} (new key material generated by `agenix generate`)",
+            "{} {} (new key material generated by `agenix generate`)",
+            if existed { "rotated" } else { "created" },
             display_rel(&repo_root, &secret_path)
         );
         Ok(())
     }
 }
 
-fn preflight(repo_root: &Path, rel: &Path) -> Result<()> {
+/// Walk up from the working directory to the store repo root. Falls back
+/// to the working directory itself (the historical behavior) so standalone
+/// use outside a flake checkout keeps working.
+fn discover_root() -> Result<PathBuf> {
+    let mut dir = std::env::current_dir()?;
+    loop {
+        if dir.join(REPO_MARKER).is_file() {
+            return Ok(dir);
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent.to_path_buf(),
+            None => return Ok(std::env::current_dir()?),
+        }
+    }
+}
+
+/// Resolve a caller-supplied path against the repo root, refusing anything
+/// that is not a plain in-tree `.age` file. Symlink sources are refused:
+/// rotation must never follow a redirect it did not create.
+fn contained_rel(repo_root: &Path, input: &str) -> Result<PathBuf> {
+    if input.is_empty() {
+        bail!("rotate needs a repo-relative .age path, got an empty string");
+    }
+    let rel = PathBuf::from(input);
     if rel.is_absolute() {
-        bail!(
-            "rotate takes a repo-relative path, got {}",
-            rel.display()
-        );
+        bail!("rotate takes a repo-relative path, got {}", rel.display());
+    }
+    if rel.components().any(|c| matches!(c, Component::ParentDir)) {
+        bail!("rotate takes a path inside the repo, got {}", rel.display());
     }
     if rel.extension().is_none_or(|ext| ext != "age") {
+        bail!("rotate expects an .age source, got {}", rel.display());
+    }
+    let abs = repo_root.join(&rel);
+    if abs
+        .symlink_metadata()
+        .is_ok_and(|m| m.file_type().is_symlink())
+    {
         bail!(
-            "rotate expects an .age source, got {}",
-            rel.display()
+            "refusing to rotate symlink {}; point rotate at the real file",
+            display_rel(repo_root, &abs)
         );
     }
-    let secret_path = repo_root.join(rel);
-    if !secret_path.is_file() {
-        bail!(
-            "{} does not exist — create it with `canix secret ... password` first",
-            display_rel(repo_root, &secret_path)
-        );
+    // Canonicalize the nearest existing ancestor: the parent itself may
+    // not exist yet on the create path. `..` is already rejected above,
+    // so walking up from an in-root lexical path always reaches the root.
+    let canon_root = repo_root
+        .canonicalize()
+        .map_err(|e| anyhow!("cannot resolve repo root {}: {e}", repo_root.display()))?;
+    let mut ancestor = abs
+        .parent()
+        .ok_or_else(|| anyhow!("cannot resolve parent of {}", display_rel(repo_root, &abs)))?;
+    loop {
+        match ancestor.canonicalize() {
+            Ok(canon) => {
+                if !canon.starts_with(&canon_root) {
+                    bail!("rotate takes a path inside the repo, got {}", rel.display());
+                }
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                ancestor = ancestor.parent().ok_or_else(|| {
+                    anyhow!("cannot resolve parent of {}", display_rel(repo_root, &abs))
+                })?;
+            }
+            Err(e) => {
+                return Err(anyhow!(
+                    "parent directory of {} is unreachable: {e}",
+                    display_rel(repo_root, &abs)
+                ));
+            }
+        }
     }
-    let backup_path = backup_path_for(&secret_path);
-    if backup_path.exists() {
-        bail!(
-            "stale rotation backup {} — a previous rotation was interrupted; inspect it, restore or remove it manually, then retry",
-            display_rel(repo_root, &backup_path)
-        );
+    Ok(rel)
+}
+
+/// Create the source's parent directory (create path), re-verifying
+/// containment afterwards so a planted symlink cannot redirect it.
+fn ensure_parent(repo_root: &Path, rel: &Path) -> Result<PathBuf> {
+    let abs = repo_root.join(rel);
+    let parent = abs
+        .parent()
+        .ok_or_else(|| anyhow!("cannot resolve parent of {}", display_rel(repo_root, &abs)))?;
+    fs::create_dir_all(parent)?;
+    let canon_root = repo_root
+        .canonicalize()
+        .map_err(|e| anyhow!("cannot resolve repo root {}: {e}", repo_root.display()))?;
+    if !parent.canonicalize()?.starts_with(&canon_root) {
+        bail!("rotate takes a path inside the repo, got {}", rel.display());
     }
-    Ok(())
+    Ok(abs)
 }
 
 fn backup_path_for(secret_path: &Path) -> PathBuf {
@@ -118,13 +206,56 @@ fn backup_path_for(secret_path: &Path) -> PathBuf {
     secret_path.with_file_name(name)
 }
 
-/// Same invocation `run_plan` uses for fresh generated secrets. The source
-/// was moved aside, so generation sees the create-shaped state.
-fn regenerate(rel: &Path) -> Result<()> {
-    let rel = rel.to_str().ok_or_else(|| anyhow!("non-utf8 secret path"))?;
-    exec::run("agenix", ["generate", "-a", rel]).map_err(|e| {
+fn try_is_regular_file(path: &Path) -> Result<bool> {
+    match path.symlink_metadata() {
+        Ok(m) => Ok(m.is_file() && !m.file_type().is_symlink()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(anyhow!("cannot stat {}: {e}", path.display())),
+    }
+}
+
+/// Copy the working source to the backup path, creating it exclusively so
+/// a concurrent or interrupted rotation fails fast instead of interleaving.
+fn create_backup(secret_path: &Path, backup_path: &Path, repo_root: &Path) -> Result<()> {
+    let mut backup = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(backup_path)
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                anyhow!(
+                    "stale rotation backup {} — another rotation is running or a previous one was interrupted; inspect it, restore or remove it manually, then retry",
+                    display_rel(repo_root, backup_path)
+                )
+            } else {
+                anyhow!(
+                    "cannot create rotation backup {}: {e}",
+                    display_rel(repo_root, backup_path)
+                )
+            }
+        })?;
+    let bytes = fs::read(secret_path)?;
+    backup.write_all(&bytes)?;
+    backup.sync_all()?;
+    Ok(())
+}
+
+/// Same shape `run_plan` uses for fresh generated secrets, minus `-a`:
+/// staging is done explicitly afterwards so `--no-stage` is honored and a
+/// failed run stages nothing.
+fn regenerate(repo_root: &Path, rel: &Path, existed: bool) -> Result<()> {
+    let rel = rel
+        .to_str()
+        .ok_or_else(|| anyhow!("non-utf8 secret path"))?;
+    let mut args = vec!["generate"];
+    if existed {
+        args.push("--force-generate");
+    }
+    args.push(rel);
+    exec::run_in(repo_root, "agenix", args).map_err(|e| {
         anyhow!(
-            "{e}\n  hint: rotation needs a `generator` on the secret's Nix declaration (e.g. `generator.script = \"strong-passphrase-64\"`); the previous source was restored"
+            "{e}\n  hint: rotation needs a `generator` on the secret's Nix declaration (e.g. `generator.script = \"strong-passphrase-64\"`); the previous source is untouched"
         )
     })
 }
@@ -132,32 +263,95 @@ fn regenerate(rel: &Path) -> Result<()> {
 fn validate_fresh(repo_root: &Path, secret_path: &Path) -> Result<()> {
     let meta = fs::metadata(secret_path).map_err(|e| {
         anyhow!(
-            "`agenix generate` reported success but {} is missing ({e}); the previous source was restored",
+            "`agenix generate` reported success but {} is missing ({e}); the previous source is untouched",
             display_rel(repo_root, secret_path)
         )
     })?;
     if meta.len() == 0 {
         bail!(
-            "`agenix generate` wrote an empty {}; the previous source was restored",
+            "`agenix generate` wrote an empty {}; the previous source is untouched",
             display_rel(repo_root, secret_path)
         );
     }
     Ok(())
 }
 
-fn restore(secret_path: &Path, backup_path: &Path, repo_root: &Path) -> Result<()> {
-    // Generation failed after the move-aside; put the working source back.
-    // If the failed generate left a partial file, remove it first.
-    if secret_path.exists() {
-        fs::remove_file(secret_path)?;
+fn stage_source(repo_root: &Path, rel: &Path, no_stage: bool) -> Result<()> {
+    if no_stage {
+        return Ok(());
     }
-    fs::rename(backup_path, secret_path).map_err(|e| {
+    let rel = rel
+        .to_str()
+        .ok_or_else(|| anyhow!("non-utf8 secret path"))?;
+    exec::run_in(repo_root, "git", ["add", rel])
+}
+
+/// Fan the new source out to rekeyed copies. On failure the new source is
+/// deliberately kept: restoring one file cannot roll back a multi-file
+/// distribution, so report it as incomplete with a rekey-only retry.
+fn distribute(repo_root: &Path, rel: &Path, no_stage: bool) -> Result<()> {
+    let before = dirty_under(repo_root, REKEYED_DIR);
+    // No `-a`: rekeyed copies are staged explicitly below so `--no-stage`
+    // leaves the index alone.
+    if let Err(e) = exec::run_in(repo_root, "agenix", ["rekey"]) {
+        return Err(anyhow!(
+            "source {} updated, but distribution is incomplete: {e}\n  retry with `agenix rekey -a` (no new key will be generated)",
+            display_rel(repo_root, &repo_root.join(rel))
+        ));
+    }
+    if no_stage {
+        return Ok(());
+    }
+    let after = dirty_under(repo_root, REKEYED_DIR);
+    let mut fresh: Vec<&Path> = after.difference(&before).map(PathBuf::as_path).collect();
+    fresh.sort();
+    if !fresh.is_empty() {
+        let refs: Vec<&str> = fresh.iter().filter_map(|p| p.to_str()).collect();
+        exec::run_in(repo_root, "git", std::iter::once("add").chain(refs))?;
+    }
+    Ok(())
+}
+
+/// Paths under `scope` (repo-relative) with worktree or index changes,
+/// parsed from `git status --porcelain`. Best-effort: if git itself fails,
+/// distribution staging degrades to staging nothing rather than failing
+/// the rotation.
+fn dirty_under(repo_root: &Path, scope: &str) -> BTreeSet<PathBuf> {
+    let out = exec::cap_in(repo_root, "git", ["status", "--porcelain", "--", scope]);
+    if out.exit_code != 0 {
+        return BTreeSet::new();
+    }
+    parse_porcelain(&out.stdout)
+        .into_iter()
+        .filter(|p| !p.as_os_str().is_empty())
+        .collect()
+}
+
+fn parse_porcelain(output: &str) -> BTreeSet<PathBuf> {
+    let mut paths = BTreeSet::new();
+    for line in output.lines() {
+        // Porcelain v1: two status columns, a space, then the path. For
+        // renames (`R  old -> new`) the post-image is what changed on disk.
+        let path = line.get(3..).unwrap_or("").trim();
+        let path = path.rsplit(" -> ").next().unwrap_or(path).trim();
+        let path = path.trim_matches('"');
+        if path.is_empty() {
+            continue;
+        }
+        paths.insert(PathBuf::from(path));
+    }
+    paths
+}
+
+fn restore(secret_path: &Path, backup_path: &Path, repo_root: &Path) -> Result<()> {
+    fs::copy(backup_path, secret_path).map_err(|e| {
         anyhow!(
-            "ROTATION FAILED AND RESTORE FAILED: working source is at {}; move it back to {} manually ({e})",
+            "ROTATION FAILED AND RESTORE FAILED: working source is at {}; copy it back to {} manually ({e})",
             display_rel(repo_root, backup_path),
             display_rel(repo_root, secret_path)
         )
     })?;
+    remove_backup(backup_path, repo_root)?;
     eprintln!(
         "rotation failed; restored {}",
         display_rel(repo_root, secret_path)
@@ -165,53 +359,79 @@ fn restore(secret_path: &Path, backup_path: &Path, repo_root: &Path) -> Result<(
     Ok(())
 }
 
+fn remove_partial(secret_path: &Path) {
+    // Best effort: a failed create must not leave a partial file behind.
+    if secret_path.is_file() {
+        let _ = fs::remove_file(secret_path);
+    }
+}
+
+fn remove_backup(backup_path: &Path, repo_root: &Path) -> Result<()> {
+    fs::remove_file(backup_path).map_err(|e| {
+        anyhow!(
+            "source updated, but could not drop backup {}: {e}\n  remove it manually once the new source is confirmed deployed",
+            display_rel(repo_root, backup_path)
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::io::TempDir;
 
-    fn repo() -> TempDir {
+    fn rooted() -> TempDir {
         TempDir::new().expect("test tempdir")
     }
 
-    fn write_source(dir: &TempDir, name: &str, bytes: &[u8]) -> PathBuf {
-        let rel = PathBuf::from(name);
-        fs::write(dir.path.join(&rel), bytes).expect("write test source");
-        rel
+    #[test]
+    fn contained_rel_rejects_escapes_absolutes_and_non_age() {
+        let repo = rooted();
+        for bad in [
+            "../outside.age",
+            "a/../../outside.age",
+            "/tmp/abs.age",
+            "",
+            "token.txt",
+            "no-extension",
+        ] {
+            assert!(
+                contained_rel(&repo.path, bad).is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
     }
 
     #[test]
-    fn preflight_rejects_non_age_suffix() {
-        let repo = repo();
-        let rel = write_source(&repo, "token.txt", b"x");
-        let err = preflight(&repo.path, &rel).unwrap_err();
-        assert!(err.to_string().contains(".age"), "{err:?}");
+    fn contained_rel_accepts_in_tree_path_with_existing_parent() {
+        let repo = rooted();
+        fs::create_dir_all(repo.path.join("age/secrets/hosts/atlas")).expect("mkdir");
+        let rel = contained_rel(&repo.path, "age/secrets/hosts/atlas/token.age").unwrap();
+        assert_eq!(rel, PathBuf::from("age/secrets/hosts/atlas/token.age"));
     }
 
     #[test]
-    fn preflight_rejects_absolute_path() {
-        let repo = repo();
-        let abs = repo.path.join("token.age");
-        let err = preflight(&repo.path, &abs).unwrap_err();
-        assert!(err.to_string().contains("repo-relative"), "{err:?}");
+    fn contained_rel_accepts_missing_parent_and_ensure_parent_creates_it() {
+        let repo = rooted();
+        let rel = contained_rel(&repo.path, "age/secrets/hosts/atlas/token.age").unwrap();
+        let abs = ensure_parent(&repo.path, &rel).unwrap();
+        assert!(abs.parent().expect("parent").is_dir());
+        assert_eq!(abs, repo.path.join(&rel));
     }
 
     #[test]
-    fn preflight_missing_source_names_create_command() {
-        let repo = repo();
-        let err = preflight(&repo.path, Path::new("age/secrets/root/hosts/atlas/missing.age"))
-            .unwrap_err();
-        assert!(err.to_string().contains("password"), "{err:?}");
-    }
-
-    #[test]
-    fn preflight_refuses_stale_backup() {
-        let repo = repo();
-        let rel = write_source(&repo, "token.age", b"old");
-        let backup = backup_path_for(&repo.path.join(&rel));
-        fs::write(&backup, b"stale").expect("write stale backup");
-        let err = preflight(&repo.path, &rel).unwrap_err();
-        assert!(err.to_string().contains("stale rotation backup"), "{err:?}");
+    fn contained_rel_refuses_symlink_source() {
+        let repo = rooted();
+        fs::create_dir_all(repo.path.join("age/secrets/hosts/atlas")).expect("mkdir");
+        fs::write(repo.path.join("real.age"), b"bytes").expect("write");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            repo.path.join("real.age"),
+            repo.path.join("age/secrets/hosts/atlas/link.age"),
+        )
+        .expect("symlink");
+        let err = contained_rel(&repo.path, "age/secrets/hosts/atlas/link.age").unwrap_err();
+        assert!(err.to_string().contains("symlink"), "{err:?}");
     }
 
     #[test]
@@ -224,29 +444,21 @@ mod tests {
     }
 
     #[test]
-    fn validate_fresh_rejects_missing_and_empty() {
-        let repo = repo();
-        let missing = repo.path.join("missing.age");
-        assert!(validate_fresh(&repo.path, &missing).is_err());
-        let empty = repo.path.join("empty.age");
-        fs::write(&empty, b"").expect("write empty");
-        let err = validate_fresh(&repo.path, &empty).unwrap_err();
-        assert!(err.to_string().contains("empty"), "{err:?}");
-        let full = repo.path.join("full.age");
-        fs::write(&full, b"ciphertext").expect("write full");
-        assert!(validate_fresh(&repo.path, &full).is_ok());
+    fn parse_porcelain_reads_added_modified_and_renamed() {
+        let out = "A  age/secrets/root/hosts/atlas/new.age\n M age/rekeyed/root/atlas/x-old.age\nR  age/rekeyed/root/atlas/a.age -> age/rekeyed/root/atlas/b.age\n?? age/rekeyed/root/atlas/untracked.age\n";
+        let paths = parse_porcelain(out);
+        assert!(paths.contains(&PathBuf::from("age/secrets/root/hosts/atlas/new.age")));
+        assert!(paths.contains(&PathBuf::from("age/rekeyed/root/atlas/x-old.age")));
+        // Renames contribute the post-image.
+        assert!(paths.contains(&PathBuf::from("age/rekeyed/root/atlas/b.age")));
+        assert!(!paths.contains(&PathBuf::from("age/rekeyed/root/atlas/a.age")));
+        assert!(paths.contains(&PathBuf::from("age/rekeyed/root/atlas/untracked.age")));
+        assert_eq!(paths.len(), 4);
     }
 
     #[test]
-    fn restore_roundtrip_preserves_bytes() {
-        let repo = repo();
-        let rel = write_source(&repo, "token.age", b"working-material");
-        let secret_path = repo.path.join(&rel);
-        let backup_path = backup_path_for(&secret_path);
-        fs::rename(&secret_path, &backup_path).expect("move aside");
-        fs::write(&secret_path, b"partial").expect("simulate partial generate");
-        restore(&secret_path, &backup_path, &repo.path).expect("restore");
-        assert_eq!(fs::read(&secret_path).expect("read"), b"working-material");
-        assert!(!backup_path.exists());
+    fn parse_porcelain_ignores_blank_and_garbage_lines() {
+        let out = "\n   \nX\n";
+        assert!(parse_porcelain(out).is_empty());
     }
 }
