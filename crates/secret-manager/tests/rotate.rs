@@ -36,7 +36,7 @@ if [ "$cmd" = "generate" ]; then
     printf 'truncated-garbage' >"$rel"
     exit 0
   fi
-  printf 'age-encryption.org v1\nstub-material\n' >"$rel"
+  printf 'age-encryption.org v1\n-> X25519 abcdefghijklmnopqrstuvwxyz0123456789ABC\nZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY3ODkwYWJjZGVmZ2hpamtsbW5vcA==\n--- c29tZS1tYWMtd2hhdGV2ZXItY2hhcnMtbG9uZw==\n' >"$rel"
   exit 0
 fi
 if [ "$cmd" = "rekey" ]; then
@@ -183,7 +183,7 @@ const REL: &str = "age/secrets/hosts/atlas/token.age";
 
 /// What the stub writes on a successful generate: age magic header plus a
 /// body the assertions can recognize.
-const STUB_MATERIAL: &str = "age-encryption.org v1\nstub-material\n";
+const STUB_MATERIAL: &str = "age-encryption.org v1\n-> X25519 abcdefghijklmnopqrstuvwxyz0123456789ABC\nZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY3ODkwYWJjZGVmZ2hpamtsbW5vcA==\n--- c29tZS1tYWMtd2hhdGV2ZXItY2hhcnMtbG9uZw==\n";
 
 fn read(repo: &TempRepo, rel: &str) -> String {
     fs::read_to_string(repo.repo().join(rel)).expect("read fixture")
@@ -386,14 +386,20 @@ fn existing_backup_blocks_concurrent_run() {
 fn existing_source_is_preserved_without_force() {
     let repo = TempRepo::new();
     fs::create_dir_all(repo.repo().join("age/secrets/hosts/atlas")).unwrap();
-    fs::write(repo.repo().join(REL), "old-material\n").unwrap();
+    // A healthy existing source: valid age shape, distinct from what the
+    // stub would generate, so preservation is observable.
+    fs::write(repo.repo().join(REL), STUB_MATERIAL.replace("stub", "old")).unwrap();
     let out = repo.run(&["rotate", REL], &[]);
     assert!(
         out.status.success(),
         "preserve must succeed, stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(read(&repo, REL), "old-material\n", "bytes unchanged");
+    assert_eq!(
+        read(&repo, REL),
+        STUB_MATERIAL.replace("stub", "old"),
+        "bytes unchanged"
+    );
     assert!(
         !repo.log().contains("agenix generate"),
         "no generation on preserve: {}",
@@ -660,9 +666,26 @@ fn kill_while_holding_lock_releases_and_recovers() {
         "must name the live lock, got: {}",
         String::from_utf8_lossy(&raced.stderr)
     );
-    // SIGKILL the holder: the kernel must release the lock even though no
-    // userspace cleanup ran.
+    // SIGKILL the holder: the kernel must keep the lock held while the
+    // orphaned stub is still alive, because the lock fd is inherited
+    // across spawn. Probe BEFORE reaping: wait_with_output would drain
+    // the inherited pipes first and hide the unsafe interval.
     child.kill().expect("kill holder");
+    let flock_held = Command::new("flock")
+        .args([
+            "-n",
+            repo.repo()
+                .join(".git/secret-manager-rotate.lock")
+                .to_str()
+                .expect("utf8 lock path"),
+            "true",
+        ])
+        .status()
+        .expect("flock probe");
+    assert!(
+        !flock_held.success(),
+        "orphaned child must still hold the lock after the wrapper dies"
+    );
     let _ = child.wait_with_output();
     let flock_probe = Command::new("flock")
         .args([
@@ -677,7 +700,7 @@ fn kill_while_holding_lock_releases_and_recovers() {
         .expect("flock probe");
     assert!(
         flock_probe.success(),
-        "kernel must have released the lock on kill"
+        "kernel must have released the lock once the orphan finished"
     );
     // Recovery is an ordinary run: no manual lock removal needed.
     let out = repo.run(&["rotate", REL], &[]);
@@ -747,4 +770,73 @@ fn untracked_rekeyed_directory_stages_every_file() {
     ] {
         assert!(cached.contains(want), "missing {want}, got: {cached:?}");
     }
+}
+
+#[test]
+fn preserve_refuses_leftover_backup() {
+    // An interrupted earlier run left a backup: neither copy is known
+    // good, so "preserved" success would bless ambiguity.
+    let repo = TempRepo::new();
+    fs::create_dir_all(repo.repo().join("age/secrets/hosts/atlas")).unwrap();
+    fs::write(repo.repo().join(REL), "old-material\n").unwrap();
+    fs::write(repo.repo().join(format!("{REL}.rotbak")), "backup-bytes\n").unwrap();
+    let out = repo.run(&["rotate", REL], &[]);
+    assert!(!out.status.success(), "ambiguous state must fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("interrupted") || stderr.contains("backup"),
+        "must explain the ambiguity, got: {stderr}"
+    );
+    assert_eq!(read(&repo, REL), "old-material\n", "source untouched");
+    assert!(
+        repo.repo().join(format!("{REL}.rotbak")).exists(),
+        "backup must be kept for manual recovery"
+    );
+}
+
+#[test]
+fn preserve_refuses_damaged_source() {
+    // A source without an age header is already damaged; reporting it as
+    // preserved would certify breakage as healthy.
+    let repo = TempRepo::new();
+    fs::create_dir_all(repo.repo().join("age/secrets/hosts/atlas")).unwrap();
+    fs::write(repo.repo().join(REL), "damaged-bytes\n").unwrap();
+    let out = repo.run(&["rotate", REL], &[]);
+    assert!(!out.status.success(), "damaged source must fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--force"),
+        "must point at replacement, got: {stderr}"
+    );
+    assert_eq!(read(&repo, REL), "damaged-bytes\n", "source untouched");
+}
+
+#[test]
+fn distribute_refuses_dirty_scope_before_mutating_distribution() {
+    // Uncommitted work under age/rekeyed means staged bytes could not be
+    // attributed to this run. Replacement already happened (fail-closed
+    // ordering would need the generator result first), but rekey must
+    // not run and nothing under age/rekeyed may be staged by us.
+    let repo = TempRepo::new();
+    fs::create_dir_all(repo.repo().join("age/secrets/hosts/atlas")).unwrap();
+    fs::create_dir_all(repo.repo().join("age/rekeyed/root/atlas")).unwrap();
+    fs::write(repo.repo().join(REL), "old-material\n").unwrap();
+    fs::write(
+        repo.repo().join("age/rekeyed/root/atlas/other.age"),
+        "unrelated-work\n",
+    )
+    .unwrap();
+    let out = repo.run(&["rotate", "--force", REL], &[]);
+    assert!(!out.status.success(), "dirty scope must fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("uncommitted changes"),
+        "must name the dirt, got: {stderr}"
+    );
+    assert!(
+        !repo.log().contains("agenix rekey"),
+        "rekey must not run into a dirty scope: {}",
+        repo.log()
+    );
+    assert_eq!(read(&repo, REL), STUB_MATERIAL, "source was replaced");
 }

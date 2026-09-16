@@ -19,8 +19,12 @@
 //!    `git add` calls below. A failed run leaves both worktree and index
 //!    exactly as found, and the backup restores the previous bytes atomically
 //!    (temp file plus rename). Fresh
-//!    output must parse as an age file (binary or armored header), not
-//!    merely be non-empty.
+//!    output must parse as an age file (binary header plus plausible body,
+//!    or armored output with both delimiters), not merely be non-empty.
+//!    A repo-local kernel lock — inherited by spawned children so it
+//!    outlives a killed wrapper until orphans finish — serializes whole
+//!    runs; existence is re-read under the lock, and preserve mode refuses
+//!    ambiguous interrupted state instead of blessing it.
 //! 2. Distribution. `agenix rekey` fans the new source out to rekeyed
 //!    copies. If this fails, the new source is *kept*: the failure reports
 //!    "distribution incomplete" with a rekey-only retry command, instead of
@@ -116,6 +120,26 @@ impl RotateArgs {
         }
 
         if existed && !self.force {
+            // Preserve means "leave byte-identical" — but only when the
+            // on-disk state is unambiguous. A leftover backup means an
+            // earlier run died mid-replacement (we cannot tell which copy
+            // is good), and a source without an age header is already
+            // damaged. Reporting either as "preserved" would bless an
+            // unknown state as healthy.
+            let backup_path = backup_path_for(&secret_path);
+            if backup_path.exists() {
+                bail!(
+                    "refusing to preserve {}: leftover backup {} means a previous rotation was interrupted; inspect both files, restore or remove the backup manually, then retry",
+                    display_rel(&repo_root, &secret_path),
+                    display_rel(&repo_root, &backup_path)
+                );
+            }
+            validate_usable(&repo_root, &secret_path).map_err(|e| {
+                anyhow!(
+                    "refusing to preserve {}: {e}\n  pass --force to replace it, or restore a known-good copy first",
+                    display_rel(&repo_root, &secret_path)
+                )
+            })?;
             eprintln!(
                 "preserved {} (already exists; pass --force to rotate)",
                 display_rel(&repo_root, &secret_path)
@@ -149,7 +173,11 @@ impl RotateArgs {
             .and_then(|()| stage_source(repo_root, rel, self.no_stage));
         if let Err(e) = outcome {
             if existed {
-                restore(secret_path, &backup_path, repo_root)?;
+                // Keep the original failure visible when recovery fails
+                // too: a bare restore error would hide what went wrong.
+                restore(secret_path, &backup_path, repo_root).map_err(|r| {
+                    anyhow!("{e}\n  and restoration of the previous source also failed: {r}")
+                })?;
             } else {
                 remove_partial(secret_path);
             }
@@ -270,14 +298,36 @@ fn ensure_parent(repo_root: &Path, rel: &Path) -> Result<PathBuf> {
 
 /// Repo-local mutual exclusion for whole runs, held via a kernel `flock`
 /// on a persistent anchor file. The anchor is created on first use and
-/// never unlinked: only the kernel lock serializes holders, so a crash or
-/// kill releases the lock automatically with nothing to clean up and no
-/// stale-guard failure mode. Dropping the guard closes the fd, releasing.
+/// never unlinked; the kernel releases the lock when the last holder
+/// exits, including on crash or kill.
+///
+/// The lock fd is deliberately left inheritable (CLOEXEC cleared): every
+/// `agenix`/`git` child spawned below shares the same open file
+/// description, so killing the wrapper does NOT release the lock while an
+/// orphaned child may still be mutating the repo. A competing run then
+/// keeps refusing until the orphan finishes. Dropping the guard in the
+/// wrapper only closes our own fd.
 struct RotationLock {
     _file: fs::File,
 }
 
 fn lock_path(repo_root: &Path) -> PathBuf {
+    // Resolve through Git so linked worktrees (whose `.git` is a pointer
+    // file) get their own private git dir instead of colliding on — or
+    // failing to create — a shared anchor. Falls back to the old
+    // `.git`-directory probe when Git itself is unavailable.
+    let git_dir = exec::cap_in(repo_root, "git", ["rev-parse", "--absolute-git-dir"]);
+    if git_dir.exit_code == 0 {
+        let dir = PathBuf::from(git_dir.stdout.trim());
+        let abs = if dir.is_absolute() {
+            dir
+        } else {
+            repo_root.join(dir)
+        };
+        if abs.is_dir() {
+            return abs.join(LOCK_NAME);
+        }
+    }
     let dotgit = repo_root.join(".git");
     if dotgit.is_dir() {
         dotgit.join(LOCK_NAME)
@@ -306,7 +356,17 @@ fn acquire_lock(repo_root: &Path) -> Result<RotationLock> {
     // behind a rekey that may wait on a hardware touch.
     // ponytail: raw libc instead of an flock crate; the call is three
     // lines and the crate would exist only for this.
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    //
+    // CLOEXEC must stay CLEAR on this fd (Rust leaves inherited fds
+    // alone across spawn): children share the open file description, so
+    // the kernel lock outlives a killed wrapper until its orphaned
+    // children finish mutating. Rust's std sets CLOEXEC on files it
+    // opens, so clear it explicitly. A competing run that only probes
+    // the lock then observes the orphan, not a false free.
+    let rc = unsafe {
+        libc::fcntl(file.as_raw_fd(), libc::F_SETFD, 0);
+        libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB)
+    };
     if rc != 0 {
         let e = std::io::Error::last_os_error();
         if e.kind() == std::io::ErrorKind::WouldBlock {
@@ -409,6 +469,52 @@ fn regenerate(repo_root: &Path, rel: &Path, existed: bool) -> Result<()> {
     })
 }
 
+/// Smallest plausible age file: the 23-byte magic plus one recipient
+/// stanza, one body line, and the MAC line total well over a hundred
+/// bytes. Anything shorter with a valid header is a torn write.
+/// (Full integrity still needs decryption; this is a truncation detector.)
+const MIN_AGE_BYTES: usize = 64;
+
+/// Armored age files must open AND close. A BEGIN without END is a torn
+/// write even when the prefix check passes.
+const AGE_ARMOR_END: &[u8] = b"-----END AGE ENCRYPTED FILE-----";
+
+/// Check that an existing source is worth preserving: present, non-empty,
+/// and carrying an age header. Used on the preserve path so an
+/// interrupted earlier run is never blessed as healthy.
+fn validate_usable(repo_root: &Path, secret_path: &Path) -> Result<()> {
+    let bytes = fs::read(secret_path)
+        .map_err(|e| anyhow!("cannot read {}: {e}", display_rel(repo_root, secret_path)))?;
+    check_age_shape(&bytes).map_err(|why| {
+        anyhow!(
+            "{} looks damaged ({why})",
+            display_rel(repo_root, secret_path)
+        )
+    })
+}
+
+fn check_age_shape(bytes: &[u8]) -> Result<(), &'static str> {
+    if bytes.is_empty() {
+        return Err("empty file");
+    }
+    if bytes.starts_with(AGE_MAGIC) {
+        if bytes.len() < MIN_AGE_BYTES {
+            return Err("binary header with truncated body");
+        }
+        return Ok(());
+    }
+    if bytes.starts_with(AGE_ARMOR_BEGIN) {
+        if !bytes
+            .windows(AGE_ARMOR_END.len())
+            .any(|w| w == AGE_ARMOR_END)
+        {
+            return Err("armored file without END delimiter");
+        }
+        return Ok(());
+    }
+    Err("no age file header (binary or armored)")
+}
+
 fn validate_fresh(repo_root: &Path, secret_path: &Path) -> Result<()> {
     let bytes = fs::read(secret_path).map_err(|e| {
         anyhow!(
@@ -416,18 +522,12 @@ fn validate_fresh(repo_root: &Path, secret_path: &Path) -> Result<()> {
             display_rel(repo_root, secret_path)
         )
     })?;
-    if bytes.is_empty() {
-        bail!(
-            "`agenix generate` wrote an empty {}; the previous source is untouched",
+    check_age_shape(&bytes).map_err(|why| {
+        anyhow!(
+            "`agenix generate` wrote {} that fails structural checks ({why}); treating it as a partial write, the previous source is untouched",
             display_rel(repo_root, secret_path)
-        );
-    }
-    if !bytes.starts_with(AGE_MAGIC) && !bytes.starts_with(AGE_ARMOR_BEGIN) {
-        bail!(
-            "`agenix generate` wrote {} without an age file header (binary or armored); treating it as a partial write, the previous source is untouched",
-            display_rel(repo_root, secret_path)
-        );
-    }
+        )
+    })?;
     Ok(())
 }
 
@@ -442,20 +542,32 @@ fn stage_source(repo_root: &Path, rel: &Path, no_stage: bool) -> Result<()> {
 }
 
 /// Content snapshot of status-listed files, keyed by repo-relative path.
-/// `None` marks a file that could not be read; it counts as changed so a
-/// distribution output is never silently dropped from staging.
-fn snapshot_content(repo_root: &Path, names: &BTreeSet<PathBuf>) -> BTreeMap<PathBuf, Option<u64>> {
-    names
-        .iter()
-        .map(|name| {
-            let hash = fs::read(repo_root.join(name)).ok().map(|bytes| {
+/// Read failures fail the whole snapshot — except for files that simply
+/// do not exist (a rekey may legitimately delete a copy, and staging that
+/// deletion is correct). Staging on a guessed file set would be worse
+/// than refusing.
+fn snapshot_content(
+    repo_root: &Path,
+    names: &BTreeSet<PathBuf>,
+) -> Result<BTreeMap<PathBuf, Option<u64>>> {
+    let mut snapshot = BTreeMap::new();
+    for name in names {
+        let abs = repo_root.join(name);
+        match fs::read(&abs) {
+            Ok(bytes) => {
                 let mut hasher = DefaultHasher::new();
                 bytes.hash(&mut hasher);
-                hasher.finish()
-            });
-            (name.clone(), hash)
-        })
-        .collect()
+                snapshot.insert(name.clone(), Some(hasher.finish()));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                snapshot.insert(name.clone(), None);
+            }
+            Err(e) => {
+                bail!("cannot read {}: {e}", display_rel(repo_root, &abs));
+            }
+        }
+    }
+    Ok(snapshot)
 }
 
 /// Fan the new source out to rekeyed copies. On failure the new source is
@@ -465,12 +577,32 @@ fn snapshot_content(repo_root: &Path, names: &BTreeSet<PathBuf>) -> BTreeMap<Pat
 /// and concurrent-but-identical writes are never swept in, and genuinely
 /// redistributed copies are never missed.
 fn distribute(repo_root: &Path, rel: &Path, no_stage: bool) -> Result<()> {
-    let before = snapshot_content(repo_root, &status_names(repo_root).map_err(|e| {
+    let before_names = status_names(repo_root).map_err(|e| {
         anyhow!(
             "source {} updated, but distribution state is unknown: {e}; verify with `git status` and distribute with `agenix rekey -a`",
             display_rel(repo_root, &repo_root.join(rel))
         )
-    })?);
+    })?;
+    // Refuse to auto-stage into a dirty scope: with pre-existing changes
+    // we cannot attribute staged bytes to this operation, and the hash
+    // diff below could sweep unrelated work into the commit. The operator
+    // either commits first or takes staging over with --no-stage.
+    if !no_stage && !before_names.is_empty() {
+        let mut listed: Vec<_> = before_names.iter().take(5).collect();
+        listed.sort();
+        let listed: Vec<_> = listed.iter().filter_map(|p| p.to_str()).collect();
+        bail!(
+            "source {} updated, but {REKEYED_DIR} already has uncommitted changes ({}); commit, stash, or re-run with --no-stage and stage manually, then distribute with `agenix rekey -a`",
+            display_rel(repo_root, &repo_root.join(rel)),
+            listed.join(", ")
+        );
+    }
+    let before = snapshot_content(repo_root, &before_names).map_err(|e| {
+        anyhow!(
+            "source {} updated, but distribution state is unknown: {e}; verify with `git status` and distribute with `agenix rekey -a`",
+            display_rel(repo_root, &repo_root.join(rel))
+        )
+    })?;
     // No `-a`, and inherited auto-staging is always stripped in
     // run_child: rekeyed copies are staged explicitly below.
     if let Err(e) = run_child(repo_root, "agenix", &["rekey"]) {
@@ -487,7 +619,11 @@ fn distribute(repo_root: &Path, rel: &Path, no_stage: bool) -> Result<()> {
             "rekey completed, but changed files could not be determined: {e}; inspect `git status` under {REKEYED_DIR} and stage the redistributed copies"
         )
     })?;
-    let after = snapshot_content(repo_root, &after_names);
+    let after = snapshot_content(repo_root, &after_names).map_err(|e| {
+        anyhow!(
+            "rekey completed, but changed files could not be read back: {e}; inspect `git status` under {REKEYED_DIR} and stage the redistributed copies"
+        )
+    })?;
     let mut fresh: Vec<&Path> = after
         .iter()
         .filter(|&(path, hash)| {
@@ -690,7 +826,11 @@ mod tests {
     fn validate_fresh_accepts_binary_and_armored_age() {
         let repo = rooted();
         let binary = repo.path.join("binary.age");
-        fs::write(&binary, b"age-encryption.org v1\n-> stub\nbody\n").expect("write");
+        fs::write(
+            &binary,
+            b"age-encryption.org v1\n-> X25519 abcdefghijklmnopqrstuvwxyz0123456789ABC\nZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY3ODkwYWJjZGVmZ2hpamtsbW5vcA==\n--- c29tZS1tYWMtdmhpY2gtaXMtNDMtd2hhdGV2ZXItY2hhcnMtbG9uZw==\n",
+        )
+        .expect("write");
         assert!(validate_fresh(&repo.path, &binary).is_ok());
         let armored = repo.path.join("armored.age");
         fs::write(
@@ -702,6 +842,21 @@ mod tests {
         let garbage = repo.path.join("garbage.age");
         fs::write(&garbage, b"truncated-garbage").expect("write");
         assert!(validate_fresh(&repo.path, &garbage).is_err());
+    }
+
+    #[test]
+    fn validate_fresh_rejects_header_only_and_unclosed_armor() {
+        let repo = rooted();
+        // Magic alone is a torn write, not a key.
+        let header_only = repo.path.join("header.age");
+        fs::write(&header_only, b"age-encryption.org v1\n").expect("write");
+        let err = validate_fresh(&repo.path, &header_only).unwrap_err();
+        assert!(err.to_string().contains("truncated"), "{err:?}");
+        // Armor without its END delimiter is a torn write too.
+        let unclosed = repo.path.join("unclosed.age");
+        fs::write(&unclosed, b"-----BEGIN AGE ENCRYPTED FILE-----\nYWdlCg==\n").expect("write");
+        let err = validate_fresh(&repo.path, &unclosed).unwrap_err();
+        assert!(err.to_string().contains("END"), "{err:?}");
     }
 
     #[test]
