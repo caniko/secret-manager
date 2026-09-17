@@ -3,7 +3,6 @@
 
   inputs = {
     harbor-rs.url = "git+https://github.com/caniko/harbor-rs.git?ref=trunk&rev=fac8049316846e0ef1c1e6acd92aed7a337b333a";
-    rs-harbor.follows = "harbor-rs";
 
     nixpkgs.follows = "harbor-rs/nixpkgs";
     rust-overlay.follows = "harbor-rs/rust-overlay";
@@ -19,7 +18,7 @@
     nix-manager-core = {
       url = "git+https://github.com/caniko/nix-manager-core";
       inputs.nixpkgs.follows = "nixpkgs";
-      inputs.rs-harbor.follows = "harbor-rs";
+      inputs.harbor-rs.follows = "harbor-rs";
       inputs.rust-overlay.follows = "rust-overlay";
       inputs.crane.follows = "crane";
       inputs.treefmt-nix.follows = "treefmt-nix";
@@ -28,7 +27,7 @@
     nix-pklx = {
       url = "git+https://github.com/caniko/nix-pklx.git";
       inputs.nixpkgs.follows = "nixpkgs";
-      inputs.rs-harbor.follows = "harbor-rs";
+      inputs.harbor-rs.follows = "harbor-rs";
       inputs.rust-overlay.follows = "rust-overlay";
       inputs.crane.follows = "crane";
       inputs.plinth.follows = "plinth";

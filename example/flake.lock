@@ -835,6 +835,7 @@
       "inputs": {
         "flake-compat": "flake-compat",
         "nixpkgs": [
+          "secret-manager",
           "nixpkgs"
         ]
       },
@@ -856,6 +857,7 @@
       "inputs": {
         "flake-compat": "flake-compat_2",
         "nixpkgs": [
+          "secret-manager",
           "harbor-rs",
           "nixpkgs"
         ]
@@ -878,6 +880,7 @@
       "inputs": {
         "flake-compat": "flake-compat_3",
         "nixpkgs": [
+          "secret-manager",
           "harbor-rs",
           "harbor-android",
           "nixpkgs"
@@ -902,10 +905,12 @@
         "flake-parts": "flake-parts_2",
         "git-hooks": "git-hooks_3",
         "meta-harbor": [
+          "secret-manager",
           "harbor-rs",
           "harbor-meta"
         ],
         "nixpkgs": [
+          "secret-manager",
           "harbor-rs",
           "nixpkgs"
         ],
@@ -930,6 +935,7 @@
       "inputs": {
         "flake-parts": "flake-parts_3",
         "nixpkgs": [
+          "secret-manager",
           "harbor-rs",
           "nixpkgs"
         ]
@@ -957,12 +963,13 @@
         "harbor-android": "harbor-android",
         "harbor-meta": "harbor-meta",
         "meta-harbor": [
+          "secret-manager",
           "harbor-rs",
           "harbor-meta"
         ],
         "nix-bundle": "nix-bundle",
         "nix-opencode-lsp": "nix-opencode-lsp",
-        "nixpkgs": "nixpkgs",
+        "nixpkgs": "nixpkgs_2",
         "osxcross": "osxcross",
         "rust-overlay": "rust-overlay",
         "treefmt-nix": "treefmt-nix_2"
@@ -987,6 +994,7 @@
       "inputs": {
         "flake-parts": "flake-parts_5",
         "nixpkgs": [
+          "secret-manager",
           "nix-manager-core",
           "rs-harbor",
           "nixpkgs"
@@ -1011,6 +1019,7 @@
       "inputs": {
         "flake-parts": "flake-parts_7",
         "nixpkgs": [
+          "secret-manager",
           "nix-pklx",
           "rs-harbor",
           "nixpkgs"
@@ -1035,6 +1044,7 @@
       "inputs": {
         "flake-utils": "flake-utils_9",
         "nixpkgs": [
+          "secret-manager",
           "plinth",
           "nix-cache-pin",
           "rs-harbor",
@@ -1059,6 +1069,7 @@
     "meta-harbor_4": {
       "inputs": {
         "flake-utils": [
+          "secret-manager",
           "plinth",
           "nix-pklx",
           "plinth",
@@ -1067,6 +1078,7 @@
           "flake-utils"
         ],
         "nixpkgs": [
+          "secret-manager",
           "plinth",
           "nix-pklx",
           "plinth",
@@ -1094,6 +1106,7 @@
       "inputs": {
         "flake-utils": "flake-utils_15",
         "nixpkgs": [
+          "secret-manager",
           "plinth",
           "nix-pklx",
           "plinth",
@@ -1120,6 +1133,7 @@
       "inputs": {
         "flake-parts": "flake-parts_13",
         "nixpkgs": [
+          "secret-manager",
           "plinth",
           "nix-pklx",
           "rs-harbor",
@@ -1145,6 +1159,7 @@
       "inputs": {
         "flake-parts": "flake-parts_15",
         "nixpkgs": [
+          "secret-manager",
           "plinth",
           "rs-harbor",
           "nixpkgs"
@@ -1168,6 +1183,7 @@
     "nix-bundle": {
       "inputs": {
         "nixpkgs": [
+          "secret-manager",
           "harbor-rs",
           "nixpkgs"
         ],
@@ -1190,6 +1206,7 @@
     "nix-bundle_2": {
       "inputs": {
         "nixpkgs": [
+          "secret-manager",
           "nix-manager-core",
           "rs-harbor",
           "nixpkgs"
@@ -1213,6 +1230,7 @@
     "nix-bundle_3": {
       "inputs": {
         "nixpkgs": [
+          "secret-manager",
           "nix-pklx",
           "rs-harbor",
           "nixpkgs"
@@ -1236,6 +1254,7 @@
     "nix-bundle_4": {
       "inputs": {
         "nixpkgs": [
+          "secret-manager",
           "plinth",
           "nix-cache-pin",
           "rs-harbor",
@@ -1260,6 +1279,7 @@
     "nix-bundle_5": {
       "inputs": {
         "nixpkgs": [
+          "secret-manager",
           "plinth",
           "nix-pklx",
           "rs-harbor",
@@ -1284,6 +1304,7 @@
     "nix-bundle_6": {
       "inputs": {
         "nixpkgs": [
+          "secret-manager",
           "plinth",
           "rs-harbor",
           "nixpkgs"
@@ -1308,7 +1329,7 @@
       "inputs": {
         "crane": "crane_4",
         "flake-parts": "flake-parts_9",
-        "nixpkgs": "nixpkgs_3",
+        "nixpkgs": "nixpkgs_4",
         "plinth": "plinth_2",
         "rs-harbor": "rs-harbor_3"
       },
@@ -1330,19 +1351,24 @@
     "nix-manager-core": {
       "inputs": {
         "crane": [
+          "secret-manager",
           "crane"
         ],
         "git-hooks": [
+          "secret-manager",
           "git-hooks"
         ],
         "nixpkgs": [
+          "secret-manager",
           "nixpkgs"
         ],
         "rs-harbor": "rs-harbor",
         "rust-overlay": [
+          "secret-manager",
           "rust-overlay"
         ],
         "treefmt-nix": [
+          "secret-manager",
           "treefmt-nix"
         ]
       },
@@ -1364,6 +1390,7 @@
       "inputs": {
         "flake-utils": "flake-utils_2",
         "nixpkgs": [
+          "secret-manager",
           "harbor-rs",
           "nixpkgs"
         ]
@@ -1387,6 +1414,7 @@
       "inputs": {
         "flake-utils": "flake-utils_4",
         "nixpkgs": [
+          "secret-manager",
           "nix-manager-core",
           "rs-harbor",
           "nixpkgs"
@@ -1409,6 +1437,7 @@
       "inputs": {
         "flake-utils": "flake-utils_6",
         "nixpkgs": [
+          "secret-manager",
           "nix-pklx",
           "rs-harbor",
           "nixpkgs"
@@ -1431,6 +1460,7 @@
       "inputs": {
         "flake-utils": "flake-utils_10",
         "nixpkgs": [
+          "secret-manager",
           "plinth",
           "nix-cache-pin",
           "rs-harbor",
@@ -1454,6 +1484,7 @@
     "nix-opencode-lsp_5": {
       "inputs": {
         "flake-utils": [
+          "secret-manager",
           "plinth",
           "nix-pklx",
           "plinth",
@@ -1462,6 +1493,7 @@
           "flake-utils"
         ],
         "nixpkgs": [
+          "secret-manager",
           "plinth",
           "nix-pklx",
           "plinth",
@@ -1488,6 +1520,7 @@
       "inputs": {
         "flake-utils": "flake-utils_16",
         "nixpkgs": [
+          "secret-manager",
           "plinth",
           "nix-pklx",
           "plinth",
@@ -1513,6 +1546,7 @@
       "inputs": {
         "flake-utils": "flake-utils_18",
         "nixpkgs": [
+          "secret-manager",
           "plinth",
           "nix-pklx",
           "rs-harbor",
@@ -1537,6 +1571,7 @@
       "inputs": {
         "flake-utils": "flake-utils_20",
         "nixpkgs": [
+          "secret-manager",
           "plinth",
           "rs-harbor",
           "nixpkgs"
@@ -1559,16 +1594,20 @@
     "nix-pklx": {
       "inputs": {
         "crane": [
+          "secret-manager",
           "crane"
         ],
         "nixpkgs": [
+          "secret-manager",
           "nixpkgs"
         ],
         "plinth": [
+          "secret-manager",
           "plinth"
         ],
         "rs-harbor": "rs-harbor_2",
         "rust-overlay": [
+          "secret-manager",
           "rust-overlay"
         ]
       },
@@ -1589,16 +1628,19 @@
     "nix-pklx_2": {
       "inputs": {
         "crane": [
+          "secret-manager",
           "plinth",
           "crane"
         ],
         "nixpkgs": [
+          "secret-manager",
           "plinth",
           "nixpkgs"
         ],
         "plinth": "plinth_3",
         "rs-harbor": "rs-harbor_6",
         "rust-overlay": [
+          "secret-manager",
           "plinth",
           "rust-overlay"
         ]
@@ -1620,18 +1662,21 @@
     "nix-pklx_3": {
       "inputs": {
         "crane": [
+          "secret-manager",
           "plinth",
           "nix-pklx",
           "plinth",
           "crane"
         ],
         "flake-utils": [
+          "secret-manager",
           "plinth",
           "nix-pklx",
           "plinth",
           "flake-utils"
         ],
         "nixpkgs": [
+          "secret-manager",
           "plinth",
           "nix-pklx",
           "plinth",
@@ -1640,6 +1685,7 @@
         "plinth": "plinth_4",
         "rs-harbor": "rs-harbor_4",
         "rust-overlay": [
+          "secret-manager",
           "plinth",
           "nix-pklx",
           "plinth",
@@ -1662,16 +1708,16 @@
     },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1787394516,
-        "narHash": "sha256-pRGOQSClnXNI2iLUG6DYpsGvYcuw0drOutVZFTJNw90=",
-        "owner": "NixOS",
+        "lastModified": 1789546076,
+        "narHash": "sha256-zVxLZiSnmaaPLwnhj7pwmqe3axBg/C6nG5JZsJMh2g4=",
+        "owner": "nixos",
         "repo": "nixpkgs",
-        "rev": "c8f90650c15282fa8656a041bfbbd2403997a9a7",
+        "rev": "b1b875982b17dabde9b4a37f3e229e74913e6db3",
         "type": "github"
       },
       "original": {
-        "owner": "NixOS",
-        "ref": "nixpkgs-unstable",
+        "owner": "nixos",
+        "ref": "nixos-unstable",
         "repo": "nixpkgs",
         "type": "github"
       }
@@ -1903,6 +1949,22 @@
     },
     "nixpkgs_2": {
       "locked": {
+        "lastModified": 1787394516,
+        "narHash": "sha256-pRGOQSClnXNI2iLUG6DYpsGvYcuw0drOutVZFTJNw90=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "c8f90650c15282fa8656a041bfbbd2403997a9a7",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixpkgs-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "nixpkgs_3": {
+      "locked": {
         "lastModified": 1784282293,
         "narHash": "sha256-IpX7tmVJi9seHg5M4Wuexy78bQDlbntVk1HcT9kFts4=",
         "owner": "NixOS",
@@ -1917,7 +1979,7 @@
         "type": "github"
       }
     },
-    "nixpkgs_3": {
+    "nixpkgs_4": {
       "locked": {
         "lastModified": 1772736753,
         "narHash": "sha256-au/m3+EuBLoSzWUCb64a/MZq6QUtOV8oC0D9tY2scPQ=",
@@ -1933,7 +1995,7 @@
         "type": "github"
       }
     },
-    "nixpkgs_4": {
+    "nixpkgs_5": {
       "locked": {
         "lastModified": 1784282293,
         "narHash": "sha256-IpX7tmVJi9seHg5M4Wuexy78bQDlbntVk1HcT9kFts4=",
@@ -1953,6 +2015,7 @@
       "inputs": {
         "flake-utils": "flake-utils_3",
         "nixpkgs": [
+          "secret-manager",
           "harbor-rs",
           "nixpkgs"
         ]
@@ -1976,6 +2039,7 @@
       "inputs": {
         "flake-utils": "flake-utils_5",
         "nixpkgs": [
+          "secret-manager",
           "nix-manager-core",
           "rs-harbor",
           "nixpkgs"
@@ -2000,6 +2064,7 @@
       "inputs": {
         "flake-utils": "flake-utils_7",
         "nixpkgs": [
+          "secret-manager",
           "nix-pklx",
           "rs-harbor",
           "nixpkgs"
@@ -2024,6 +2089,7 @@
       "inputs": {
         "flake-utils": "flake-utils_11",
         "nixpkgs": [
+          "secret-manager",
           "plinth",
           "nix-cache-pin",
           "rs-harbor",
@@ -2049,6 +2115,7 @@
       "inputs": {
         "flake-utils": "flake-utils_14",
         "nixpkgs": [
+          "secret-manager",
           "plinth",
           "nix-pklx",
           "plinth",
@@ -2076,6 +2143,7 @@
       "inputs": {
         "flake-utils": "flake-utils_17",
         "nixpkgs": [
+          "secret-manager",
           "plinth",
           "nix-pklx",
           "plinth",
@@ -2102,6 +2170,7 @@
       "inputs": {
         "flake-utils": "flake-utils_19",
         "nixpkgs": [
+          "secret-manager",
           "plinth",
           "nix-pklx",
           "rs-harbor",
@@ -2127,6 +2196,7 @@
       "inputs": {
         "flake-utils": "flake-utils_21",
         "nixpkgs": [
+          "secret-manager",
           "plinth",
           "rs-harbor",
           "nixpkgs"
@@ -2154,6 +2224,7 @@
         "nix-cache-pin": "nix-cache-pin",
         "nix-pklx": "nix-pklx_2",
         "nixpkgs": [
+          "secret-manager",
           "nixpkgs"
         ],
         "rs-harbor": "rs-harbor_7",
@@ -2178,6 +2249,7 @@
         "crane": "crane_5",
         "flake-utils": "flake-utils_8",
         "nixpkgs": [
+          "secret-manager",
           "plinth",
           "nix-cache-pin",
           "nixpkgs"
@@ -2205,6 +2277,7 @@
         "flake-utils": "flake-utils_12",
         "nix-pklx": "nix-pklx_3",
         "nixpkgs": [
+          "secret-manager",
           "plinth",
           "nix-pklx",
           "nixpkgs"
@@ -2231,6 +2304,7 @@
         "crane": "crane_8",
         "flake-utils": "flake-utils_13",
         "nixpkgs": [
+          "secret-manager",
           "plinth",
           "nix-pklx",
           "plinth",
@@ -2257,6 +2331,7 @@
       "inputs": {
         "crane": "crane_9",
         "flake-utils": [
+          "secret-manager",
           "plinth",
           "nix-pklx",
           "plinth",
@@ -2265,6 +2340,7 @@
           "flake-utils"
         ],
         "nixpkgs": [
+          "secret-manager",
           "plinth",
           "nix-pklx",
           "plinth",
@@ -2291,25 +2367,8 @@
     },
     "root": {
       "inputs": {
-        "crane": [
-          "harbor-rs",
-          "crane"
-        ],
-        "flake-utils": "flake-utils",
-        "git-hooks": "git-hooks",
-        "harbor-rs": "harbor-rs",
-        "nix-manager-core": "nix-manager-core",
-        "nix-pklx": "nix-pklx",
-        "nixpkgs": [
-          "harbor-rs",
-          "nixpkgs"
-        ],
-        "plinth": "plinth",
-        "rust-overlay": [
-          "harbor-rs",
-          "rust-overlay"
-        ],
-        "treefmt-nix": "treefmt-nix_3"
+        "nixpkgs": "nixpkgs",
+        "secret-manager": "secret-manager"
       }
     },
     "rs-harbor": {
@@ -2319,7 +2378,7 @@
         "meta-harbor": "meta-harbor",
         "nix-bundle": "nix-bundle_2",
         "nix-opencode-lsp": "nix-opencode-lsp_2",
-        "nixpkgs": "nixpkgs_2",
+        "nixpkgs": "nixpkgs_3",
         "osxcross": "osxcross_2",
         "rust-overlay": "rust-overlay_2"
       },
@@ -2342,6 +2401,7 @@
     "rs-harbor_2": {
       "inputs": {
         "crane": [
+          "secret-manager",
           "nix-pklx",
           "crane"
         ],
@@ -2350,11 +2410,13 @@
         "nix-bundle": "nix-bundle_3",
         "nix-opencode-lsp": "nix-opencode-lsp_3",
         "nixpkgs": [
+          "secret-manager",
           "nix-pklx",
           "nixpkgs"
         ],
         "osxcross": "osxcross_3",
         "rust-overlay": [
+          "secret-manager",
           "nix-pklx",
           "rust-overlay"
         ]
@@ -2382,7 +2444,7 @@
         "meta-harbor": "meta-harbor_3",
         "nix-bundle": "nix-bundle_4",
         "nix-opencode-lsp": "nix-opencode-lsp_4",
-        "nixpkgs": "nixpkgs_4",
+        "nixpkgs": "nixpkgs_5",
         "osxcross": "osxcross_4",
         "rust-overlay": "rust-overlay_4"
       },
@@ -2405,6 +2467,7 @@
     "rs-harbor_4": {
       "inputs": {
         "crane": [
+          "secret-manager",
           "plinth",
           "nix-pklx",
           "plinth",
@@ -2412,6 +2475,7 @@
           "crane"
         ],
         "flake-utils": [
+          "secret-manager",
           "plinth",
           "nix-pklx",
           "plinth",
@@ -2421,6 +2485,7 @@
         "meta-harbor": "meta-harbor_4",
         "nix-opencode-lsp": "nix-opencode-lsp_5",
         "nixpkgs": [
+          "secret-manager",
           "plinth",
           "nix-pklx",
           "plinth",
@@ -2430,6 +2495,7 @@
         "osxcross": "osxcross_5",
         "plinth": "plinth_5",
         "rust-overlay": [
+          "secret-manager",
           "plinth",
           "nix-pklx",
           "plinth",
@@ -2455,6 +2521,7 @@
     "rs-harbor_5": {
       "inputs": {
         "crane": [
+          "secret-manager",
           "plinth",
           "nix-pklx",
           "plinth",
@@ -2464,6 +2531,7 @@
         "meta-harbor": "meta-harbor_5",
         "nix-opencode-lsp": "nix-opencode-lsp_6",
         "nixpkgs": [
+          "secret-manager",
           "plinth",
           "nix-pklx",
           "plinth",
@@ -2471,6 +2539,7 @@
         ],
         "osxcross": "osxcross_6",
         "rust-overlay": [
+          "secret-manager",
           "plinth",
           "nix-pklx",
           "plinth",
@@ -2496,6 +2565,7 @@
     "rs-harbor_6": {
       "inputs": {
         "crane": [
+          "secret-manager",
           "plinth",
           "nix-pklx",
           "crane"
@@ -2505,12 +2575,14 @@
         "nix-bundle": "nix-bundle_5",
         "nix-opencode-lsp": "nix-opencode-lsp_7",
         "nixpkgs": [
+          "secret-manager",
           "plinth",
           "nix-pklx",
           "nixpkgs"
         ],
         "osxcross": "osxcross_7",
         "rust-overlay": [
+          "secret-manager",
           "plinth",
           "nix-pklx",
           "rust-overlay"
@@ -2535,6 +2607,7 @@
     "rs-harbor_7": {
       "inputs": {
         "crane": [
+          "secret-manager",
           "plinth",
           "crane"
         ],
@@ -2543,11 +2616,13 @@
         "nix-bundle": "nix-bundle_6",
         "nix-opencode-lsp": "nix-opencode-lsp_8",
         "nixpkgs": [
+          "secret-manager",
           "plinth",
           "nixpkgs"
         ],
         "osxcross": "osxcross_8",
         "rust-overlay": [
+          "secret-manager",
           "plinth",
           "rust-overlay"
         ]
@@ -2571,6 +2646,7 @@
     "rust-overlay": {
       "inputs": {
         "nixpkgs": [
+          "secret-manager",
           "harbor-rs",
           "nixpkgs"
         ]
@@ -2592,6 +2668,7 @@
     "rust-overlay_2": {
       "inputs": {
         "nixpkgs": [
+          "secret-manager",
           "nix-manager-core",
           "rs-harbor",
           "nixpkgs"
@@ -2614,6 +2691,7 @@
     "rust-overlay_3": {
       "inputs": {
         "nixpkgs": [
+          "secret-manager",
           "plinth",
           "nix-cache-pin",
           "plinth",
@@ -2637,6 +2715,7 @@
     "rust-overlay_4": {
       "inputs": {
         "nixpkgs": [
+          "secret-manager",
           "plinth",
           "nix-cache-pin",
           "rs-harbor",
@@ -2660,6 +2739,7 @@
     "rust-overlay_5": {
       "inputs": {
         "nixpkgs": [
+          "secret-manager",
           "plinth",
           "nix-pklx",
           "plinth",
@@ -2685,6 +2765,7 @@
     "rust-overlay_6": {
       "inputs": {
         "nixpkgs": [
+          "secret-manager",
           "plinth",
           "nix-pklx",
           "plinth",
@@ -2711,6 +2792,7 @@
     "rust-overlay_7": {
       "inputs": {
         "nixpkgs": [
+          "secret-manager",
           "plinth",
           "nix-pklx",
           "plinth",
@@ -2734,6 +2816,7 @@
     "rust-overlay_8": {
       "inputs": {
         "nixpkgs": [
+          "secret-manager",
           "plinth",
           "nixpkgs"
         ]
@@ -2751,6 +2834,39 @@
         "repo": "rust-overlay",
         "type": "github"
       }
+    },
+    "secret-manager": {
+      "inputs": {
+        "crane": [
+          "secret-manager",
+          "harbor-rs",
+          "crane"
+        ],
+        "flake-utils": "flake-utils",
+        "git-hooks": "git-hooks",
+        "harbor-rs": "harbor-rs",
+        "nix-manager-core": "nix-manager-core",
+        "nix-pklx": "nix-pklx",
+        "nixpkgs": [
+          "nixpkgs"
+        ],
+        "plinth": "plinth",
+        "rust-overlay": [
+          "secret-manager",
+          "harbor-rs",
+          "rust-overlay"
+        ],
+        "treefmt-nix": "treefmt-nix_3"
+      },
+      "locked": {
+        "path": "..",
+        "type": "path"
+      },
+      "original": {
+        "path": "..",
+        "type": "path"
+      },
+      "parent": []
     },
     "systems": {
       "locked": {
@@ -3160,6 +3276,7 @@
     "treefmt-nix": {
       "inputs": {
         "nixpkgs": [
+          "secret-manager",
           "harbor-rs",
           "harbor-android",
           "nixpkgs"
@@ -3182,6 +3299,7 @@
     "treefmt-nix_2": {
       "inputs": {
         "nixpkgs": [
+          "secret-manager",
           "harbor-rs",
           "nixpkgs"
         ]
@@ -3203,6 +3321,7 @@
     "treefmt-nix_3": {
       "inputs": {
         "nixpkgs": [
+          "secret-manager",
           "nixpkgs"
         ]
       },
