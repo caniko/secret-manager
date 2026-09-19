@@ -664,11 +664,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1789514889,
-        "narHash": "sha256-PFD1nxptCXJyJoiYO1gf/5Vv43yqGpHtMC6LUhl9/pQ=",
+        "lastModified": 1787424939,
+        "narHash": "sha256-O2tBn84NNuHrnqNVxx/XqsXwfYvS1YwBh+7CBnbCYsk=",
         "owner": "cachix",
         "repo": "git-hooks.nix",
-        "rev": "59f4ca0d063a1a3ec722c88b51a33004862e5379",
+        "rev": "809414f0cdadf82cf11b06c2b29ba9b3168b3297",
         "type": "github"
       },
       "original": {
@@ -968,7 +968,7 @@
         "lastModified": 1787224113,
         "narHash": "sha256-7Xz0gzc0Gg1DKamnT/eoytl6xUyGIfY1nZUTjQcaXjA=",
         "ref": "trunk",
-        "rev": "b1a2cf038f39b0d496baad5be7403fea0b15ac13",
+        "rev": "519bc9305b5ba78f37c3226a9d8427c8f635afb8",
         "revCount": 7,
         "type": "git",
         "url": "https://github.com/caniko/meta-harbor.git"
@@ -1214,11 +1214,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1787918714,
-        "narHash": "sha256-7QP6Xekfe11iiwNKVGcdtv1OKVA/VRoDARoKnZ2DePg=",
+        "lastModified": 1787225516,
+        "narHash": "sha256-Bz5vUCCH7ZZpaFj/V5ANBMDLPgxEE/Fc5jYGfBlMm8Q=",
         "ref": "refs/heads/trunk",
-        "rev": "702a6b9ae53694cfecf18510704b4f64a5fb46f7",
-        "revCount": 53,
+        "rev": "ef2ed19e4747eac70daaea338e147c972e5d5f75",
+        "revCount": 52,
         "type": "git",
         "url": "https://github.com/caniko/nix-manager-core"
       },
@@ -1358,11 +1358,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1787617771,
-        "narHash": "sha256-KubQF6zSue0uzGSSKJNoC04uhbrhsqMW+Mi3i9QhucA=",
+        "lastModified": 1787617222,
+        "narHash": "sha256-nDWDyABLUxDQPc0TBHTsPsHXy6HQhfzAXN1NSlX4kno=",
         "ref": "refs/heads/trunk",
-        "rev": "4e5dbefa4c94bb8af3c9e400a1a57790a39b518b",
-        "revCount": 37,
+        "rev": "8c9014a7817d78f7c288bb7140b41f9854965f1e",
+        "revCount": 36,
         "type": "git",
         "url": "https://github.com/caniko/nix-pklx.git"
       },
