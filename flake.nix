@@ -18,7 +18,6 @@
     nix-manager-core = {
       url = "git+https://github.com/caniko/nix-manager-core";
       inputs.nixpkgs.follows = "nixpkgs";
-      inputs.harbor-rs.follows = "harbor-rs";
       inputs.rust-overlay.follows = "rust-overlay";
       inputs.crane.follows = "crane";
       inputs.treefmt-nix.follows = "treefmt-nix";
@@ -27,13 +26,12 @@
     nix-pklx = {
       url = "git+https://github.com/caniko/nix-pklx.git";
       inputs.nixpkgs.follows = "nixpkgs";
-      inputs.harbor-rs.follows = "harbor-rs";
       inputs.rust-overlay.follows = "rust-overlay";
       inputs.crane.follows = "crane";
       inputs.plinth.follows = "plinth";
     };
     plinth = {
-      url = "git+https://codeberg.org/caniko/plinth.git";
+      url = "git+https://github.com/caniko/plinth.git";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
