@@ -36,7 +36,7 @@ if [ "$cmd" = "generate" ]; then
     printf 'truncated-garbage' >"$rel"
     exit 0
   fi
-  printf 'age-encryption.org v1\n-> X25519 abcdefghijklmnopqrstuvwxyz0123456789ABC\nZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY3ODkwYWJjZGVmZ2hpamtsbW5vcA==\n--- c29tZS1tYWMtd2hhdGV2ZXItY2hhcnMtbG9uZw==\n' >"$rel"
+  printf 'age-encryption.org/v1\n-> X25519 abcdefghijklmnopqrstuvwxyz0123456789ABC\nZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY3ODkwYWJjZGVmZ2hpamtsbW5vcA==\n--- c29tZS1tYWMtd2hhdGV2ZXItY2hhcnMtbG9uZw==\n' >"$rel"
   exit 0
 fi
 if [ "$cmd" = "rekey" ]; then
@@ -183,7 +183,7 @@ const REL: &str = "age/secrets/hosts/atlas/token.age";
 
 /// What the stub writes on a successful generate: age magic header plus a
 /// body the assertions can recognize.
-const STUB_MATERIAL: &str = "age-encryption.org v1\n-> X25519 abcdefghijklmnopqrstuvwxyz0123456789ABC\nZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY3ODkwYWJjZGVmZ2hpamtsbW5vcA==\n--- c29tZS1tYWMtd2hhdGV2ZXItY2hhcnMtbG9uZw==\n";
+const STUB_MATERIAL: &str = "age-encryption.org/v1\n-> X25519 abcdefghijklmnopqrstuvwxyz0123456789ABC\nZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY3ODkwYWJjZGVmZ2hpamtsbW5vcA==\n--- c29tZS1tYWMtd2hhdGV2ZXItY2hhcnMtbG9uZw==\n";
 
 fn read(repo: &TempRepo, rel: &str) -> String {
     fs::read_to_string(repo.repo().join(rel)).expect("read fixture")
