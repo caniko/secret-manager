@@ -17,6 +17,7 @@ nix-manager-core.lib.mkManagerOutputs {
   rustEdition = "2024";
   srcDir = ../.;
   extraRuntimePackages = pkgs: [
+    pkgs.git
     pkgs.rage
   ];
   extraOutputs = {
@@ -263,9 +264,22 @@ nix-manager-core.lib.mkManagerOutputs {
       };
     });
 
-    checks = forAllSystems (system: {
-      catalog-renderers = rendererCheckFor (pkgsFor system);
-      runner-file-env-renderer = runnerFileEnvCheckFor (pkgsFor system);
+    checks = forAllSystems (system: let
+      pkgs = pkgsFor system;
+      cargo = cargoFor system;
+    in {
+      catalog-renderers = rendererCheckFor pkgs;
+      runner-file-env-renderer = runnerFileEnvCheckFor pkgs;
+      nextest = cargo.craneLib.cargoNextest (cargo.commonArgs
+        // {
+          inherit (cargo) cargoArtifacts;
+          nativeBuildInputs = [pkgs.git pkgs.flock];
+          postPatch = ''
+            substituteInPlace crates/secret-manager/tests/rotate.rs \
+              --replace-fail '#!/usr/bin/env bash' '#!${pkgs.bash}/bin/bash'
+          '';
+          cargoNextestExtraArgs = "--no-tests pass";
+        });
     });
   };
 }
