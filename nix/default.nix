@@ -11,7 +11,8 @@
   ...
 }:
 nix-manager-core.lib.mkManagerOutputs {
-  inherit self nixpkgs harbor-rs rust-overlay treefmt-nix git-hooks;
+  inherit self nixpkgs rust-overlay treefmt-nix git-hooks;
+  rs-harbor = harbor-rs;
   crateName = "secret-manager";
   rustEdition = "2024";
   srcDir = ../.;
@@ -204,7 +205,10 @@ nix-manager-core.lib.mkManagerOutputs {
       then {}
       else let
         pkgs = pkgsFor system;
-        toolchain = harbor-rs.lib.mkToolchain {inherit pkgs; toolchainProfile = "nightly";};
+        toolchain = harbor-rs.lib.mkToolchain {
+          inherit pkgs;
+          toolchainProfile = "nightly";
+        };
         cross = harbor-rs.lib.mkCross {inherit pkgs system;};
         cargo = cargoFor system;
         targetPkgs = cross.linuxAarch64.pkgsCross;
@@ -243,7 +247,10 @@ nix-manager-core.lib.mkManagerOutputs {
 
     devShells = forAllSystems (system: let
       pkgs = pkgsFor system;
-      toolchain = harbor-rs.lib.mkToolchain {inherit pkgs; toolchainProfile = "nightly";};
+      toolchain = harbor-rs.lib.mkToolchain {
+        inherit pkgs;
+        toolchainProfile = "nightly";
+      };
       cross = harbor-rs.lib.mkCross {inherit pkgs system;};
     in {
       docs = harbor-rs.lib.mkDocsShell {
