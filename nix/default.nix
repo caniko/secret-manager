@@ -11,11 +11,13 @@
   ...
 }:
 nix-manager-core.lib.mkManagerOutputs {
-  inherit self nixpkgs harbor-rs rust-overlay treefmt-nix git-hooks;
+  inherit self nixpkgs rust-overlay treefmt-nix git-hooks;
+  rs-harbor = harbor-rs;
   crateName = "secret-manager";
   rustEdition = "2024";
   srcDir = ../.;
   extraRuntimePackages = pkgs: [
+    pkgs.git
     pkgs.rage
   ];
   extraOutputs = {
@@ -204,7 +206,10 @@ nix-manager-core.lib.mkManagerOutputs {
       then {}
       else let
         pkgs = pkgsFor system;
-        toolchain = harbor-rs.lib.mkToolchain {inherit pkgs; toolchainProfile = "nightly";};
+        toolchain = harbor-rs.lib.mkToolchain {
+          inherit pkgs;
+          toolchainProfile = "nightly";
+        };
         cross = harbor-rs.lib.mkCross {inherit pkgs system;};
         cargo = cargoFor system;
         targetPkgs = cross.linuxAarch64.pkgsCross;
@@ -243,7 +248,10 @@ nix-manager-core.lib.mkManagerOutputs {
 
     devShells = forAllSystems (system: let
       pkgs = pkgsFor system;
-      toolchain = harbor-rs.lib.mkToolchain {inherit pkgs; toolchainProfile = "nightly";};
+      toolchain = harbor-rs.lib.mkToolchain {
+        inherit pkgs;
+        toolchainProfile = "nightly";
+      };
       cross = harbor-rs.lib.mkCross {inherit pkgs system;};
     in {
       docs = harbor-rs.lib.mkDocsShell {
@@ -256,9 +264,22 @@ nix-manager-core.lib.mkManagerOutputs {
       };
     });
 
-    checks = forAllSystems (system: {
-      catalog-renderers = rendererCheckFor (pkgsFor system);
-      runner-file-env-renderer = runnerFileEnvCheckFor (pkgsFor system);
+    checks = forAllSystems (system: let
+      pkgs = pkgsFor system;
+      cargo = cargoFor system;
+    in {
+      catalog-renderers = rendererCheckFor pkgs;
+      runner-file-env-renderer = runnerFileEnvCheckFor pkgs;
+      nextest = cargo.craneLib.cargoNextest (cargo.commonArgs
+        // {
+          inherit (cargo) cargoArtifacts;
+          nativeBuildInputs = [pkgs.git pkgs.flock];
+          postPatch = ''
+            substituteInPlace crates/secret-manager/tests/rotate.rs \
+              --replace-fail '#!/usr/bin/env bash' '#!${pkgs.bash}/bin/bash'
+          '';
+          cargoNextestExtraArgs = "--no-tests pass";
+        });
     });
   };
 }
