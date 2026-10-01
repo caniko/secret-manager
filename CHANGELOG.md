@@ -4,6 +4,9 @@
 
 ### Added
 
+- `gpg publish` registers public signing keys on Codefloe, GitHub, Codeberg,
+  and additional Forgejo accounts. Supports offline dry-runs, read-only checks,
+  full-fingerprint duplicate detection, and retryable per-platform results.
 - Declarative Codefloe and GitHub Actions repository sync targets, including
   GitHub variable and prune support.
 - Pkl secret registry schema (`pkl/SecretRegistry.pkl`) with Rust types, CLI

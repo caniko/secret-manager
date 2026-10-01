@@ -8,6 +8,7 @@
 
 pub mod add;
 pub mod env;
+pub mod gpg;
 pub mod io;
 pub mod legacy;
 pub mod pkl;

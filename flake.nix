@@ -17,6 +17,7 @@
 
     nix-manager-core = {
       url = "git+https://github.com/caniko/nix-manager-core";
+      inputs.harbor-rs.follows = "harbor-rs";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.rust-overlay.follows = "rust-overlay";
       inputs.crane.follows = "crane";

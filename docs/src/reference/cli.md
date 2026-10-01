@@ -8,6 +8,44 @@ Declarative secret management for Nix store repositories.
 
 ## Commands
 
+### `gpg publish` — Account signing keys
+
+Register an existing armored public key on authenticated forge accounts:
+
+```sh
+secret-manager gpg publish nomad.asc --codefloe --github --codeberg
+```
+
+| Flag                                 | Description                                                             |
+| ------------------------------------ | ----------------------------------------------------------------------- |
+| `--codefloe`                         | Register on the Forgejo account at `codefloe.com`                       |
+| `--github`                           | Register on the GitHub account at `github.com`                          |
+| `--codeberg`                         | Register on the Forgejo account at `codeberg.org`                       |
+| `--forgejo HOST`                     | Add another Forgejo destination; repeatable                             |
+| `--dry-run`                          | Validate the public key and print destinations without network calls    |
+| `--check`                            | Read back registration; fail if any selected account is missing the key |
+| `--expected-fingerprint FINGERPRINT` | Require this full fingerprint before contacting a forge                 |
+
+Choose at least one destination. The command accepts exactly one public primary
+key in one ASCII-armored block, rejects private-key packets, and inspects it with
+GnuPG in an isolated temporary keyring. It does not import into your keyring.
+Relative file paths resolve from the working directory; no secret store is needed.
+
+Forgejo destinations reuse `fj` authentication in its existing auth store.
+Tokens need `read:user` for listing and `write:user` for registration. GitHub
+reuses `gh` authentication; classic/OAuth tokens need `read:gpg_key` and
+`write:gpg_key`, respectively.
+
+Retries are idempotent: an existing key is accepted only after matching its full
+fingerprint from the API's public-key packets. Every destination is attempted
+even if another fails, and incomplete publication exits nonzero. After a failed
+POST, a read-back checks whether registration succeeded before reporting failure.
+
+Output reports registration, signing capability, email verification, and
+Forgejo's key-ownership verification separately. Uploading a key does not perform
+Forgejo's proof-of-possession challenge or verify an account email. Codefloe
+account registration uses its Forgejo API, independently of Crow CI credentials.
+
 ### `hm` — Home-manager secrets
 
 Add an agenix secret for a home-manager target.

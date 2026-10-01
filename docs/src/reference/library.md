@@ -8,6 +8,7 @@ The `secret_manager` library provides the building blocks used by the CLI.
 | -------- | ------------------------------------------------------------------------------------------------------------- |
 | `add`    | CLI argument types and plan-building for all secret types                                                     |
 | `env`    | `StoreEnv` trait for host validation and user resolution                                                      |
+| `gpg`    | `GpgCmd` / `PublishArgs`: validate and publish public account signing keys on Forgejo/GitHub                  |
 | `io`     | File I/O, temp dirs, editor integration, validation                                                           |
 | `legacy` | Legacy workflows (WireGuard, Rauthy, Gerrit cookies)                                                          |
 | `plan`   | Plan execution engine — source prep, module writing, rekey                                                    |

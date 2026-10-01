@@ -17,7 +17,10 @@ nix-manager-core.lib.mkManagerOutputs {
   srcDir = ../.;
   extraRuntimePackages = pkgs: [
     pkgs.rage
+    pkgs.gnupg
+    pkgs.gh
   ];
+  extraDevShellPackages = pkgs: [pkgs.gnupg];
   extraOutputs = {
     self,
     lib,
@@ -204,7 +207,10 @@ nix-manager-core.lib.mkManagerOutputs {
       then {}
       else let
         pkgs = pkgsFor system;
-        toolchain = harbor-rs.lib.mkToolchain {inherit pkgs; toolchainProfile = "nightly";};
+        toolchain = harbor-rs.lib.mkToolchain {
+          inherit pkgs;
+          toolchainProfile = "nightly";
+        };
         cross = harbor-rs.lib.mkCross {inherit pkgs system;};
         cargo = cargoFor system;
         targetPkgs = cross.linuxAarch64.pkgsCross;
@@ -220,7 +226,7 @@ nix-manager-core.lib.mkManagerOutputs {
             postInstall = ''
               if test -x "$out/bin/secret-manager"; then
                 wrapProgram "$out/bin/secret-manager" \
-                  --prefix PATH : ${pkgs.lib.makeBinPath [targetPkgs.rage]}
+                  --prefix PATH : ${pkgs.lib.makeBinPath [targetPkgs.rage targetPkgs.gnupg targetPkgs.gh]}
               fi
             '';
           };
@@ -243,7 +249,10 @@ nix-manager-core.lib.mkManagerOutputs {
 
     devShells = forAllSystems (system: let
       pkgs = pkgsFor system;
-      toolchain = harbor-rs.lib.mkToolchain {inherit pkgs; toolchainProfile = "nightly";};
+      toolchain = harbor-rs.lib.mkToolchain {
+        inherit pkgs;
+        toolchainProfile = "nightly";
+      };
       cross = harbor-rs.lib.mkCross {inherit pkgs system;};
     in {
       docs = harbor-rs.lib.mkDocsShell {
