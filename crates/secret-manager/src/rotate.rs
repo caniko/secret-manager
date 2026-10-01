@@ -150,8 +150,7 @@ impl RotateArgs {
             return Ok(());
         }
 
-        let result = self.run_locked(&repo_root, &rel, &secret_path, existed);
-        result
+        self.run_locked(&repo_root, &rel, &secret_path, existed)
     }
 
     fn run_locked(
@@ -344,6 +343,7 @@ fn acquire_lock(repo_root: &Path) -> Result<RotationLock> {
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .mode(0o600)
         .open(&path)
         .map_err(|e| {
@@ -684,12 +684,11 @@ fn parse_status_z(output: &str) -> BTreeSet<PathBuf> {
             continue;
         }
         paths.insert(PathBuf::from(path));
-        if status.starts_with(['R', 'C']) {
-            if let Some(other) = fields.next() {
-                if !other.is_empty() {
-                    paths.insert(PathBuf::from(other));
-                }
-            }
+        if status.starts_with(['R', 'C'])
+            && let Some(other) = fields.next()
+            && !other.is_empty()
+        {
+            paths.insert(PathBuf::from(other));
         }
         let _ = status;
     }
