@@ -14,13 +14,22 @@ nix-manager-core.lib.mkManagerOutputs {
   inherit self nixpkgs harbor-rs rust-overlay treefmt-nix git-hooks;
   crateName = "secret-manager";
   rustEdition = "2024";
+  treefmtModule = {pkgs, ...} @ args:
+    (import ./treefmt.nix {
+      rustfmtPackage =
+        (harbor-rs.lib.mkToolchain {
+          inherit pkgs;
+          toolchainProfile = "nightly";
+        }).rustToolchain;
+    })
+    args;
   srcDir = ../.;
   extraRuntimePackages = pkgs: [
     pkgs.rage
     pkgs.gnupg
     pkgs.gh
   ];
-  extraDevShellPackages = pkgs: [pkgs.gnupg];
+  extraDevShellPackages = pkgs: [pkgs.gnupg pkgs.openssl];
   extraOutputs = {
     self,
     lib,
@@ -164,6 +173,20 @@ nix-manager-core.lib.mkManagerOutputs {
       assert instance.validVolumes == ["/run/secret-manager/forgejo-runner/nixTrusted"];
         pkgs.runCommand "secret-manager-runner-file-env-renderer" {} "touch $out";
   in {
+    checks = forAllSystems (system: let
+      pkgs = pkgsFor system;
+      cargo = cargoFor system;
+    in {
+      nextest = cargo.craneLib.cargoNextest (cargo.commonArgs
+        // {
+          inherit (cargo) cargoArtifacts;
+          nativeBuildInputs = [pkgs.openssl pkgs.rage pkgs.gnupg];
+          partitions = 1;
+          partitionType = "count";
+        });
+      catalog-renderers = rendererCheckFor pkgs;
+      runner-file-env-renderer = runnerFileEnvCheckFor pkgs;
+    });
     nixosModules = {
       secretSync = module;
       default = module;
@@ -263,11 +286,6 @@ nix-manager-core.lib.mkManagerOutputs {
           echo "Documentation: mdbook serve docs"
         '';
       };
-    });
-
-    checks = forAllSystems (system: {
-      catalog-renderers = rendererCheckFor (pkgsFor system);
-      runner-file-env-renderer = runnerFileEnvCheckFor (pkgsFor system);
     });
   };
 }

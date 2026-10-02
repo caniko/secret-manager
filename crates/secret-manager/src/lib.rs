@@ -8,6 +8,7 @@
 
 pub mod add;
 pub mod env;
+pub mod github_app;
 pub mod gpg;
 pub mod io;
 pub mod legacy;

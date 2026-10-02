@@ -4,6 +4,11 @@
 
 ### Added
 
+- `github app enroll|import|installation|publish|verify` manages GitHub-issued
+  App keys through encrypted, policy-bound transactions. Verifies app ownership,
+  exact permissions, selected installations and repository-scoped tokens before
+  publishing the PEM and public identity to configured Actions slots.
+
 - `gpg publish` registers public signing keys on Codefloe, GitHub, Codeberg,
   and additional Forgejo accounts. Supports offline dry-runs, read-only checks,
   full-fingerprint duplicate detection, and retryable per-platform results.

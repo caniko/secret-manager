@@ -1082,17 +1082,19 @@
         ]
       },
       "locked": {
-        "lastModified": 1790799212,
-        "narHash": "sha256-cB8CS8LKi5M/9rIpQyElonqJxqH06iRpV+cV8sJhM1s=",
-        "ref": "refs/heads/trunk",
-        "rev": "ccf149f1b61078cf5b281b26a86aeb66d5518aeb",
-        "revCount": 65,
+        "lastModified": 1790948115,
+        "narHash": "sha256-BMfhlvckWDDY5U3hgs6qIxYAGbJsb6iaSsIowqg3P3I=",
+        "ref": "feat/manager-formatter-policy",
+        "rev": "46c9522a67f1a75e61755ce2256191b6e722a700",
+        "revCount": 66,
         "type": "git",
-        "url": "https://github.com/caniko/nix-manager-core"
+        "url": "https://github.com/caniko/nix-manager-core.git"
       },
       "original": {
+        "ref": "feat/manager-formatter-policy",
+        "rev": "46c9522a67f1a75e61755ce2256191b6e722a700",
         "type": "git",
-        "url": "https://github.com/caniko/nix-manager-core"
+        "url": "https://github.com/caniko/nix-manager-core.git"
       }
     },
     "nix-opencode-lsp": {

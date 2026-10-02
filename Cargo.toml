@@ -10,7 +10,7 @@ repository = "https://github.com/caniko/secret-manager"
 authors = ["caniko"]
 
 [workspace.dependencies]
-nix-manager-core = { git = "https://github.com/caniko/nix-manager-core.git", rev = "ccf149f1b61078cf5b281b26a86aeb66d5518aeb" }
+nix-manager-core = { git = "https://github.com/caniko/nix-manager-core.git", rev = "46c9522a67f1a75e61755ce2256191b6e722a700" }
 anyhow = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
@@ -21,6 +21,12 @@ forgejo-api = { version = "0.10", default-features = false, features = [
 libc = "0.2"
 pklx = { git = "https://github.com/caniko/nix-pklx.git" }
 rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = [
+  "blocking",
+  "json",
+  "rustls-tls",
+] }
+ring = "0.17"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
@@ -28,6 +34,7 @@ tokio = { version = "1", features = ["rt"] }
 toml = "0.9"
 url = "2"
 walkdir = "2"
+zeroize = "1"
 
 [workspace.metadata.crane]
 name = "secret-manager"

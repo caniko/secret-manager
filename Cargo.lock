@@ -1068,7 +1068,7 @@ dependencies = [
 [[package]]
 name = "nix-manager-core"
 version = "0.3.0"
-source = "git+https://github.com/caniko/nix-manager-core.git?rev=ccf149f1b61078cf5b281b26a86aeb66d5518aeb#ccf149f1b61078cf5b281b26a86aeb66d5518aeb"
+source = "git+https://github.com/caniko/nix-manager-core.git?rev=46c9522a67f1a75e61755ce2256191b6e722a700#46c9522a67f1a75e61755ce2256191b6e722a700"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1595,6 +1595,8 @@ dependencies = [
  "nix-manager-core",
  "pklx",
  "rand 0.8.6",
+ "reqwest 0.12.28",
+ "ring",
  "serde",
  "serde_json",
  "tempfile",
@@ -1602,6 +1604,7 @@ dependencies = [
  "toml",
  "url",
  "walkdir",
+ "zeroize",
 ]
 
 [[package]]

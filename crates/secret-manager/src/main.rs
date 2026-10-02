@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 
 use secret_manager::env::LocalEnv;
-use secret_manager::{add, gpg, legacy, push, registry, rotate, sync};
+use secret_manager::{add, github_app, gpg, legacy, push, registry, rotate, sync};
 
 #[derive(Parser)]
 #[command(
@@ -30,6 +30,10 @@ enum Command {
     /// Register public signing keys on authenticated forge accounts.
     #[command(subcommand, arg_required_else_help = true)]
     Gpg(gpg::GpgCmd),
+
+    /// Enroll and publish GitHub-issued App credentials.
+    #[command(subcommand, arg_required_else_help = true)]
+    Github(github_app::GithubCmd),
 
     /// Validate or export Pkl secret registries.
     #[command(subcommand, arg_required_else_help = true)]
@@ -84,6 +88,7 @@ fn main() -> anyhow::Result<()> {
         Command::Nixos(cmd) => cmd.run(&env),
         Command::Forgejo(cmd) => cmd.run(),
         Command::Gpg(cmd) => cmd.run(),
+        Command::Github(cmd) => cmd.run(),
         Command::Registry(cmd) => cmd.run(),
         Command::List => legacy::list(),
         Command::Sync(args) => args.run(),
