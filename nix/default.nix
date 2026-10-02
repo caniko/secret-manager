@@ -176,10 +176,25 @@ nix-manager-core.lib.mkManagerOutputs {
     checks = forAllSystems (system: let
       pkgs = pkgsFor system;
       cargo = cargoFor system;
-    in {
-      nextest = cargo.craneLib.cargoNextest (cargo.commonArgs
+      testArgs =
+        cargo.commonArgs
         // {
           inherit (cargo) cargoArtifacts;
+          # Crane's Cargo filter omits the public signing-key test fixture.
+          src = lib.cleanSourceWith {
+            src = ../.;
+            filter = path: type:
+              cargo.craneLib.filterCargoSources path type
+              || path == "${toString ../.}/crates/secret-manager/tests/fixtures/gpg-public.asc";
+          };
+        };
+    in {
+      clippy = cargo.craneLib.cargoClippy (testArgs
+        // {
+          cargoClippyExtraArgs = "--all-targets -- --deny warnings";
+        });
+      nextest = cargo.craneLib.cargoNextest (testArgs
+        // {
           nativeBuildInputs = [pkgs.openssl pkgs.rage pkgs.gnupg];
           partitions = 1;
           partitionType = "count";
