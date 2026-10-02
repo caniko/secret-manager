@@ -180,6 +180,12 @@ nix-manager-core.lib.mkManagerOutputs {
         cargo.commonArgs
         // {
           inherit (cargo) cargoArtifacts;
+          # The embedded helper scripts need a store-backed interpreter in the
+          # sandbox, where /usr/bin/env is unavailable.
+          postPatch = ''
+            substituteInPlace crates/secret-manager/tests/rotate.rs \
+              --replace-fail '#!/usr/bin/env bash' '#!${pkgs.bash}/bin/bash'
+          '';
           # Crane's Cargo filter omits the public signing-key test fixture.
           src = lib.cleanSourceWith {
             src = ../.;
