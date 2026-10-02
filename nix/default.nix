@@ -195,7 +195,7 @@ nix-manager-core.lib.mkManagerOutputs {
         });
       nextest = cargo.craneLib.cargoNextest (testArgs
         // {
-          nativeBuildInputs = [pkgs.openssl pkgs.rage pkgs.gnupg];
+          nativeBuildInputs = [pkgs.git pkgs.openssl pkgs.rage pkgs.gnupg];
           partitions = 1;
           partitionType = "count";
         });
