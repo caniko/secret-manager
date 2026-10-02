@@ -146,6 +146,29 @@ impl TempRepo {
         fs::write(self.dir.join("stub-state").join(name), "").expect("marker");
     }
 
+    fn rotation_lock_is_held(&self) -> bool {
+        use std::os::fd::AsRawFd;
+
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(self.repo().join(".git/secret-manager-rotate.lock"))
+            .expect("open rotation lock for probe");
+        // Use the kernel directly so the probe also works in a Nix sandbox
+        // without a host flock executable. Dropping the file releases our probe.
+        let result = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if result == 0 {
+            return false;
+        }
+        let error = std::io::Error::last_os_error();
+        assert_eq!(
+            error.raw_os_error(),
+            Some(libc::EWOULDBLOCK),
+            "flock probe: {error}"
+        );
+        true
+    }
+
     fn porcelain(&self) -> BTreeSet<String> {
         let out = Command::new("git")
             .args(["status", "--porcelain"])
@@ -671,35 +694,13 @@ fn kill_while_holding_lock_releases_and_recovers() {
     // across spawn. Probe BEFORE reaping: wait_with_output would drain
     // the inherited pipes first and hide the unsafe interval.
     child.kill().expect("kill holder");
-    let flock_held = Command::new("flock")
-        .args([
-            "-n",
-            repo.repo()
-                .join(".git/secret-manager-rotate.lock")
-                .to_str()
-                .expect("utf8 lock path"),
-            "true",
-        ])
-        .status()
-        .expect("flock probe");
     assert!(
-        !flock_held.success(),
+        repo.rotation_lock_is_held(),
         "orphaned child must still hold the lock after the wrapper dies"
     );
     let _ = child.wait_with_output();
-    let flock_probe = Command::new("flock")
-        .args([
-            "-n",
-            repo.repo()
-                .join(".git/secret-manager-rotate.lock")
-                .to_str()
-                .expect("utf8 lock path"),
-            "true",
-        ])
-        .status()
-        .expect("flock probe");
     assert!(
-        flock_probe.success(),
+        !repo.rotation_lock_is_held(),
         "kernel must have released the lock once the orphan finished"
     );
     // Recovery is an ordinary run: no manual lock removal needed.
