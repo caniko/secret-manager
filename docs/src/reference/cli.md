@@ -38,7 +38,11 @@ The public policy is JSON:
   "homepage": "https://github.com/example/project",
   "source": "age/secrets/review-app.age",
   "recipients": ["age1..."],
-  "permissions": {"contents": "read", "pull_requests": "write", "checks": "write"},
+  "permissions": {
+    "contents": "read",
+    "pull_requests": "write",
+    "checks": "write"
+  },
   "keySecretName": "COMMITPERCLIP_KEY",
   "appIdVariable": "COMMITPERCLIP_APP_ID",
   "appSlugVariable": "COMMITPERCLIP_APP_SLUG"
