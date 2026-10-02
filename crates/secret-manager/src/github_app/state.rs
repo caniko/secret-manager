@@ -37,6 +37,14 @@ pub(super) struct Transaction {
     _lock: File,
 }
 
+impl Drop for Transaction {
+    fn drop(&mut self) {
+        // Close alone leaves a flock held by a helper's inherited open file
+        // description until exec. Release this owner's lock before closing it.
+        let _ = self._lock.unlock();
+    }
+}
+
 impl Transaction {
     pub fn open(directory: &Path, store: &Path, config: &Config) -> Result<Self> {
         match fs::DirBuilder::new().mode(0o700).create(directory) {
@@ -216,4 +224,28 @@ pub(super) fn source_path(store: &Path, config: &Config) -> Result<PathBuf> {
         );
     }
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dropping_transaction_releases_lock_with_an_inherited_descriptor() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("transaction");
+        let config = super::super::tests::policy();
+        let transaction = Transaction::open(&directory, root.path(), &config).unwrap();
+        // A concurrent helper can inherit the open file description between
+        // fork and exec, even though Rust opens the descriptor CLOEXEC.
+        let inherited = transaction._lock.try_clone().unwrap();
+        assert!(Transaction::open(&directory, root.path(), &config).is_err());
+        drop(transaction);
+        let reopened = Transaction::open(&directory, root.path(), &config).unwrap();
+        assert!(Transaction::open(&directory, root.path(), &config).is_err());
+        drop(inherited);
+        assert!(Transaction::open(&directory, root.path(), &config).is_err());
+        drop(reopened);
+        assert!(Transaction::open(&directory, root.path(), &config).is_ok());
+    }
 }
