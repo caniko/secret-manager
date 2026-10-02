@@ -38,6 +38,9 @@ runner-env add`), and Pkl evaluation via nix-pklx.
 
 ### Fixed
 
+- Patched HTTP/TLS dependencies and `anyhow` to address the RustSec findings
+  reported by hosted qualification.
+
 - Nix library wiring now exposes the shared Forgejo runner file-environment
   helper from the expected module surface.
 - Corrected "foregejo" typos to "forgejo" in Nix module paths and source
