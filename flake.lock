@@ -1082,17 +1082,17 @@
         ]
       },
       "locked": {
-        "lastModified": 1790948115,
-        "narHash": "sha256-BMfhlvckWDDY5U3hgs6qIxYAGbJsb6iaSsIowqg3P3I=",
+        "lastModified": 1790955475,
+        "narHash": "sha256-y02SQog6lK+VWV2Z8fh5xJJQUKybcNhYisd1hoT4IXk=",
         "ref": "feat/manager-formatter-policy",
-        "rev": "46c9522a67f1a75e61755ce2256191b6e722a700",
-        "revCount": 66,
+        "rev": "1e93309793e52347c62e42d85085f53912484f0f",
+        "revCount": 72,
         "type": "git",
         "url": "https://github.com/caniko/nix-manager-core.git"
       },
       "original": {
         "ref": "feat/manager-formatter-policy",
-        "rev": "46c9522a67f1a75e61755ce2256191b6e722a700",
+        "rev": "1e93309793e52347c62e42d85085f53912484f0f",
         "type": "git",
         "url": "https://github.com/caniko/nix-manager-core.git"
       }
