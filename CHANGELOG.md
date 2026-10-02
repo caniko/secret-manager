@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Resume interrupted GitHub App imports after encrypted checkpoint persistence,
+  retaining the original app identity and key fingerprint bindings.
+
 ### Added
 
 - `github app enroll|import|installation|publish|verify` manages GitHub-issued

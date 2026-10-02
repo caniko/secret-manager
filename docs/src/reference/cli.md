@@ -73,6 +73,12 @@ GitHub `/app`. It retains the original file; remove it through your normal priva
 credential handling after encrypted adoption. App-key generation/revocation is a
 GitHub settings operation; this CLI automates adoption and publication.
 
+If an import stops after saving `issued.age` but before saving its digest, retry
+with the same transaction, PEM and age identity. Recovery binds the retained
+ciphertext to the pending transaction and checks the original app identity and
+key fingerprint before completing adoption. A recorded digest mismatch or an
+unbound checkpoint in a completed transaction is refused.
+
 `installation` prints the authorization URL. With `--installation-id`, it can
 add the declared repository to an existing selected installation using the
 operator's authenticated `gh` account. It verifies app/installation ownership and

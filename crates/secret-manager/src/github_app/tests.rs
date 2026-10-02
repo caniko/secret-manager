@@ -231,6 +231,135 @@ fn symlinks_and_shared_transaction_directories_are_refused() {
 }
 
 #[test]
+fn pending_capture_recovers_the_checkpoint_hash_after_ciphertext_persistence() {
+    for phase in ["capture-started", "exchange-started"] {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("transaction");
+        let mut transaction = Transaction::open(&directory, root.path(), &policy()).unwrap();
+        transaction.state.phase = phase.into();
+        transaction.save().unwrap();
+        // Model a crash after the ciphertext rename/fsync but before state.json
+        // acquired its digest. Recovery must use this file, never exchange again.
+        let ciphertext = b"retained encrypted checkpoint";
+        atomic_write(&directory.join("issued.age"), ciphertext).unwrap();
+        drop(transaction);
+
+        let mut transaction = Transaction::open(&directory, root.path(), &policy()).unwrap();
+        assert!(transaction.state.checkpoint_sha256.is_none());
+        assert_eq!(
+            transaction.checked_checkpoint().unwrap(),
+            directory.join("issued.age")
+        );
+        drop(transaction);
+
+        let transaction = Transaction::open(&directory, root.path(), &policy()).unwrap();
+        assert_eq!(
+            transaction.state.checkpoint_sha256,
+            Some(sha256(ciphertext))
+        );
+        assert_eq!(fs::read(directory.join("issued.age")).unwrap(), ciphertext);
+    }
+}
+
+#[test]
+fn settled_transactions_cannot_adopt_an_unbound_checkpoint() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("transaction");
+    let mut transaction = Transaction::open(&directory, root.path(), &policy()).unwrap();
+    transaction.state.phase = "enrolled".into();
+    transaction.save().unwrap();
+    atomic_write(&directory.join("issued.age"), b"unbound checkpoint").unwrap();
+    assert!(transaction.checked_checkpoint().is_err());
+    assert!(transaction.state.checkpoint_sha256.is_none());
+}
+
+#[test]
+fn interrupted_import_preserves_app_and_key_bindings_when_recovering_ciphertext() {
+    let root = tempfile::tempdir().unwrap();
+    let identity = process::capture(&mut Command::new("rage-keygen"), None).unwrap();
+    let recipient =
+        process::capture(Command::new("rage-keygen").arg("-y"), Some(&identity)).unwrap();
+    let identity_path = root.path().join("identity");
+    atomic_write(&identity_path, &identity).unwrap();
+    let mut config = policy();
+    config.recipients = vec![
+        String::from_utf8(recipient.to_vec())
+            .unwrap()
+            .trim()
+            .to_owned(),
+    ];
+    let store = crate::store::Store {
+        root: root.path().to_owned(),
+    };
+    let original = Issued {
+        app: app(),
+        pem: pem(),
+    };
+    let fingerprint = Key::parse(&original.pem).unwrap().fingerprint();
+
+    for fault in ["none", "app", "key"] {
+        let common = CommonArgs {
+            config: root.path().join("policy.json"),
+            transaction: root.path().join(fault),
+            store: Some(store.root.clone()),
+            identities: vec![identity_path.clone()],
+        };
+        let mut transaction = Transaction::open(&common.transaction, &store.root, &config).unwrap();
+        transaction.state.phase = "capture-started".into();
+        transaction.state.app = Some(original.app.clone());
+        transaction.state.public_key_sha256 = Some(fingerprint.clone());
+        transaction.save().unwrap();
+        let mut checkpoint = Issued {
+            app: original.app.clone(),
+            pem: original.pem.clone(),
+        };
+        if fault == "app" {
+            checkpoint.app.id += 1;
+        }
+        if fault == "key" {
+            checkpoint.pem = pem();
+        }
+        let ciphertext =
+            process::encrypt(&config, &serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+        // Fault injection: retain the real age output, then lose the process
+        // before checkpoint() saves the digest. No GitHub call is replayed.
+        atomic_write(&common.transaction.join("issued.age"), &ciphertext).unwrap();
+        drop(transaction);
+
+        let mut transaction = Transaction::open(&common.transaction, &store.root, &config).unwrap();
+        let recovered = common.issued(&store, &mut transaction);
+        if fault == "none" {
+            let recovered = recovered.unwrap();
+            settle(&config, &mut transaction, &recovered).unwrap();
+            assert_eq!(transaction.state.phase, "enrolled");
+        } else {
+            assert!(recovered.is_err());
+            assert!(settle(&config, &mut transaction, &checkpoint).is_err());
+            assert_eq!(transaction.state.phase, "capture-started");
+        }
+        assert_eq!(transaction.state.app.as_ref().unwrap().id, original.app.id);
+        assert_eq!(
+            transaction.state.public_key_sha256.as_ref(),
+            Some(&fingerprint)
+        );
+        assert_eq!(
+            transaction.state.checkpoint_sha256,
+            Some(sha256(&ciphertext))
+        );
+        assert_eq!(
+            fs::read(common.transaction.join("issued.age")).unwrap(),
+            *ciphertext
+        );
+        drop(transaction);
+        let transaction = Transaction::open(&common.transaction, &store.root, &config).unwrap();
+        assert_eq!(
+            transaction.state.public_key_sha256.as_ref(),
+            Some(&fingerprint)
+        );
+    }
+}
+
+#[test]
 fn interrupted_publication_resumes_from_real_age_ciphertext_without_replacing_source() {
     let root = tempfile::tempdir().unwrap();
     let identity = process::capture(&mut Command::new("rage-keygen"), None).unwrap();
@@ -287,7 +416,7 @@ fn interrupted_publication_resumes_from_real_age_ciphertext_without_replacing_so
     assert!(!String::from_utf8_lossy(&source_before).contains("PRIVATE KEY"));
     drop(transaction);
     let mut transaction = Transaction::open(&common.transaction, &store.root, &config).unwrap();
-    let recovered = common.issued(&store, &transaction).unwrap();
+    let recovered = common.issued(&store, &mut transaction).unwrap();
     let mut slots = Vec::new();
     Publication {
         common: &common,

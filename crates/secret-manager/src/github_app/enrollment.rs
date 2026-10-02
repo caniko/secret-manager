@@ -2,9 +2,7 @@ use super::{
     EnrollArgs, Issued,
     api::{Api, Github},
     config::Config,
-    crypto::sha256,
     installation_url, now, process, publish, settle,
-    state::{private_metadata, read_bounded},
 };
 use anyhow::{Context, Result, ensure};
 use reqwest::Method;
@@ -29,14 +27,7 @@ pub(super) fn run(args: EnrollArgs) -> Result<()> {
             path.exists(),
             "manifest conversion outcome is ambiguous and no encrypted response exists; recover the app's issued key with github app import in a fresh transaction"
         );
-        private_metadata(&path, false)?;
-        let digest = sha256(&read_bounded(&path)?);
-        if let Some(expected) = &transaction.state.checkpoint_sha256 {
-            ensure!(*expected == digest, "encrypted checkpoint hash mismatch");
-        } else {
-            transaction.state.checkpoint_sha256 = Some(digest);
-            transaction.save()?;
-        }
+        let path = transaction.checked_checkpoint()?;
         let identities = store.resolve_identities(&args.common.identities)?;
         let plaintext = Zeroizing::new(crate::age::decrypt_with_identities(&path, &identities)?);
         let issued: Issued = serde_json::from_str(&plaintext)?;
@@ -187,7 +178,7 @@ pub(super) fn run(args: EnrollArgs) -> Result<()> {
             "/installed" => {
                 let result = (|| {
                     callback_state(&url, &transaction.state.nonce)?;
-                    let issued = args.common.issued(&store, &transaction)?;
+                    let issued = args.common.issued(&store, &mut transaction)?;
                     publish(
                         &args.common,
                         &config,

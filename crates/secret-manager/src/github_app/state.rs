@@ -117,11 +117,24 @@ impl Transaction {
         self.save()
     }
 
-    pub fn checked_checkpoint(&self) -> Result<PathBuf> {
+    pub fn checked_checkpoint(&mut self) -> Result<PathBuf> {
         let path = self.directory.join("issued.age");
         private_metadata(&path, false)?;
+        let digest = sha256(&read_bounded(&path)?);
+        // Ciphertext is durable before its hash is checkpointed. Resume only
+        // that pending capture window; an enrolled transaction must stay bound
+        // to its previously recorded ciphertext, including on refusal paths.
+        if self.state.checkpoint_sha256.is_none()
+            && matches!(
+                self.state.phase.as_str(),
+                "capture-started" | "exchange-started"
+            )
+        {
+            self.state.checkpoint_sha256 = Some(digest.clone());
+            self.save()?;
+        }
         ensure!(
-            self.state.checkpoint_sha256.as_ref() == Some(&sha256(&read_bounded(&path)?)),
+            self.state.checkpoint_sha256.as_ref() == Some(&digest),
             "encrypted enrollment checkpoint hash does not match transaction"
         );
         Ok(path)

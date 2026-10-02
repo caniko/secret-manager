@@ -161,7 +161,7 @@ impl CommonArgs {
         Ok((config, store, transaction))
     }
 
-    fn issued(&self, store: &crate::store::Store, transaction: &Transaction) -> Result<Issued> {
+    fn issued(&self, store: &crate::store::Store, transaction: &mut Transaction) -> Result<Issued> {
         let path = transaction.checked_checkpoint()?;
         let identities = store.resolve_identities(&self.identities)?;
         let plaintext = Zeroizing::new(crate::age::decrypt_with_identities(&path, &identities)?);
@@ -176,6 +176,11 @@ impl CommonArgs {
                 && issued.app.slug == expected.slug
                 && issued.app.owner.login == expected.owner.login,
             "encrypted checkpoint app identity mismatch"
+        );
+        ensure!(
+            transaction.state.public_key_sha256.as_ref()
+                == Some(&Key::parse(&issued.pem)?.fingerprint()),
+            "encrypted checkpoint key fingerprint mismatch"
         );
         Ok(issued)
     }
@@ -216,7 +221,7 @@ impl AppCmd {
                 app.validate(&config)?;
                 let issued = Issued { app, pem };
                 if transaction.directory.join("issued.age").exists() {
-                    let previous = args.common.issued(&store, &transaction)?;
+                    let previous = args.common.issued(&store, &mut transaction)?;
                     ensure!(
                         Key::parse(&previous.pem)?.fingerprint() == key.fingerprint(),
                         "retry PEM differs from encrypted checkpoint"
@@ -243,7 +248,7 @@ impl AppCmd {
             }
             Self::Publish(args) => {
                 let (config, store, mut transaction) = args.common.load()?;
-                let issued = args.common.issued(&store, &transaction)?;
+                let issued = args.common.issued(&store, &mut transaction)?;
                 publish(
                     &args.common,
                     &config,
@@ -280,8 +285,8 @@ impl AppCmd {
                 Ok(())
             }
             Self::Installation(args) => {
-                let (config, store, transaction) = args.common.load()?;
-                let issued = args.common.issued(&store, &transaction)?;
+                let (config, store, mut transaction) = args.common.load()?;
+                let issued = args.common.issued(&store, &mut transaction)?;
                 let key = Key::parse(&issued.pem)?;
                 let github = Github::new()?;
                 api::authenticated_app(&github, &config, &issued.app, &key)?;
@@ -343,6 +348,20 @@ impl AppCmd {
 fn settle(config: &Config, transaction: &mut Transaction, issued: &Issued) -> Result<()> {
     issued.app.validate(config)?;
     let key = Key::parse(&issued.pem)?;
+    if let Some(expected) = &transaction.state.app {
+        ensure!(
+            issued.app.id == expected.id
+                && issued.app.slug == expected.slug
+                && issued.app.owner.login == expected.owner.login,
+            "encrypted checkpoint app identity mismatch"
+        );
+    }
+    if let Some(expected) = &transaction.state.public_key_sha256 {
+        ensure!(
+            *expected == key.fingerprint(),
+            "encrypted checkpoint key fingerprint mismatch"
+        );
+    }
     transaction.state.app = Some(issued.app.clone());
     transaction.state.public_key_sha256 = Some(key.fingerprint());
     transaction.state.phase = "enrolled".into();
