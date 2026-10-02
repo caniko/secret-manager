@@ -228,7 +228,12 @@ pub(super) fn verify(
         Some(&access.token),
         None,
     );
-    let verification = result?;
-    revoked?;
-    Ok(verification)
+    match (result, revoked) {
+        (Ok(verification), Ok(_)) => Ok(verification),
+        (Err(error), Ok(_)) => Err(error),
+        (Ok(_), Err(error)) => Err(error.context("installation token revocation failed")),
+        (Err(error), Err(revocation_error)) => Err(error.context(format!(
+            "installation token revocation also failed: {revocation_error:#}"
+        ))),
+    }
 }

@@ -7,7 +7,7 @@ use std::{
     process::Command,
 };
 
-fn policy() -> Config {
+pub(super) fn policy() -> Config {
     Config {
         version: 1,
         slug: "caniko-paperclip-review".into(),
@@ -51,6 +51,8 @@ struct FixtureApi {
     installation: serde_json::Value,
     repositories: serde_json::Value,
     revoked: Cell<bool>,
+    fail_repository_lookup: bool,
+    fail_revocation: bool,
     token_scope: RefCell<Option<serde_json::Value>>,
 }
 
@@ -63,6 +65,8 @@ impl FixtureApi {
             "repository_selection": "selected", "suspended_at": null}),
             repositories: serde_json::json!({"total_count": 1, "repositories": [{"id": 789, "full_name": "caniko/paperclip"}]}),
             revoked: Cell::new(false),
+            fail_repository_lookup: false,
+            fail_revocation: false,
             token_scope: RefCell::new(None),
         }
     }
@@ -84,9 +88,13 @@ impl Api for FixtureApi {
                 *self.token_scope.borrow_mut() = body.cloned();
                 serde_json::json!({"token": "fixture-ephemeral-token", "expires_at": "2026-10-02T20:00:00Z", "permissions": policy().permissions})
             }
-            (Method::GET, "/installation/repositories") => self.repositories.clone(),
+            (Method::GET, "/installation/repositories") => {
+                ensure!(!self.fail_repository_lookup, "GitHub transport failed");
+                self.repositories.clone()
+            }
             (Method::DELETE, "/installation/token") => {
                 self.revoked.set(true);
+                ensure!(!self.fail_revocation, "GitHub request failed with HTTP 503");
                 serde_json::json!({})
             }
             _ => anyhow::bail!("unexpected request"),
@@ -144,6 +152,42 @@ fn wrong_repository_or_broadened_scope_refuses_and_revokes_token() {
         assert!(api::verify(&api, &policy(), &app(), &key).is_err());
         assert!(api.revoked.get());
     }
+}
+
+#[test]
+fn verification_and_revocation_failures_are_both_reported_without_credentials() {
+    let key = Key::parse(&pem()).unwrap();
+    for transport_failure in [false, true] {
+        let mut api = FixtureApi::new();
+        api.fail_revocation = true;
+        api.fail_repository_lookup = transport_failure;
+        api.repositories["total_count"] = serde_json::json!(2);
+        let error = api::verify(&api, &policy(), &app(), &key).unwrap_err();
+        let diagnostic = format!("{error:#}");
+        assert!(api.revoked.get());
+        assert!(diagnostic.contains(if transport_failure {
+            "GitHub transport failed"
+        } else {
+            "not scoped to exactly one repository"
+        }));
+        assert!(diagnostic.contains("revocation"));
+        assert!(diagnostic.contains("HTTP 503"));
+        assert!(!diagnostic.contains("fixture-ephemeral-token"));
+        assert!(!diagnostic.contains("PRIVATE KEY"));
+    }
+}
+
+#[test]
+fn successful_verification_cannot_return_a_receipt_when_revocation_fails() {
+    let mut api = FixtureApi::new();
+    api.fail_revocation = true;
+    let key = Key::parse(&pem()).unwrap();
+    let error = api::verify(&api, &policy(), &app(), &key).unwrap_err();
+    assert!(api.revoked.get());
+    let diagnostic = format!("{error:#}");
+    assert!(diagnostic.contains("revocation"));
+    assert!(diagnostic.contains("HTTP 503"));
+    assert!(!diagnostic.contains("fixture-ephemeral-token"));
 }
 
 #[test]

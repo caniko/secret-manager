@@ -88,6 +88,8 @@ repository administration before mutation, then verifies token scope afterward.
 installation, mints an exactly-one-repository token and revokes that verification
 token. It writes the encrypted source and adjacent `.app-id` / `.app-slug` public
 files, then uses `gh` stdin to set the named repository secret and variables.
+Failed token revocation refuses publication or a successful verification receipt.
+If verification and revocation both fail, the diagnostic reports both outcomes.
 Partial publication is retryable using the same transaction. `--replace-key`
 permits an explicit verified rotation and retains the previous ciphertext in
 `previous.age`. Publication is serialized per source.
