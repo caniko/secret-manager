@@ -11,15 +11,25 @@
   ...
 }:
 nix-manager-core.lib.mkManagerOutputs {
-  inherit self nixpkgs rust-overlay treefmt-nix git-hooks;
-  rs-harbor = harbor-rs;
+  inherit self nixpkgs harbor-rs rust-overlay treefmt-nix git-hooks;
   crateName = "secret-manager";
   rustEdition = "2024";
+  treefmtModule = {pkgs, ...} @ args:
+    (import ./treefmt.nix {
+      rustfmtPackage =
+        (harbor-rs.lib.mkToolchain {
+          inherit pkgs;
+          toolchainProfile = "nightly";
+        }).rustToolchain;
+    })
+    args;
   srcDir = ../.;
   extraRuntimePackages = pkgs: [
-    pkgs.git
     pkgs.rage
+    pkgs.gnupg
+    pkgs.gh
   ];
+  extraDevShellPackages = pkgs: [pkgs.gnupg pkgs.openssl];
   extraOutputs = {
     self,
     lib,
@@ -163,6 +173,41 @@ nix-manager-core.lib.mkManagerOutputs {
       assert instance.validVolumes == ["/run/secret-manager/forgejo-runner/nixTrusted"];
         pkgs.runCommand "secret-manager-runner-file-env-renderer" {} "touch $out";
   in {
+    checks = forAllSystems (system: let
+      pkgs = pkgsFor system;
+      cargo = cargoFor system;
+      testArgs =
+        cargo.commonArgs
+        // {
+          inherit (cargo) cargoArtifacts;
+          # The embedded helper scripts need a store-backed interpreter in the
+          # sandbox, where /usr/bin/env is unavailable.
+          postPatch = ''
+            substituteInPlace crates/secret-manager/tests/rotate.rs \
+              --replace-fail '#!/usr/bin/env bash' '#!${pkgs.bash}/bin/bash'
+          '';
+          # Crane's Cargo filter omits the public signing-key test fixture.
+          src = lib.cleanSourceWith {
+            src = ../.;
+            filter = path: type:
+              cargo.craneLib.filterCargoSources path type
+              || path == "${toString ../.}/crates/secret-manager/tests/fixtures/gpg-public.asc";
+          };
+        };
+    in {
+      clippy = cargo.craneLib.cargoClippy (testArgs
+        // {
+          cargoClippyExtraArgs = "--all-targets -- --deny warnings";
+        });
+      nextest = cargo.craneLib.cargoNextest (testArgs
+        // {
+          nativeBuildInputs = [pkgs.git pkgs.openssl pkgs.rage pkgs.gnupg];
+          partitions = 1;
+          partitionType = "count";
+        });
+      catalog-renderers = rendererCheckFor pkgs;
+      runner-file-env-renderer = runnerFileEnvCheckFor pkgs;
+    });
     nixosModules = {
       secretSync = module;
       default = module;
@@ -225,7 +270,7 @@ nix-manager-core.lib.mkManagerOutputs {
             postInstall = ''
               if test -x "$out/bin/secret-manager"; then
                 wrapProgram "$out/bin/secret-manager" \
-                  --prefix PATH : ${pkgs.lib.makeBinPath [targetPkgs.rage]}
+                  --prefix PATH : ${pkgs.lib.makeBinPath [targetPkgs.rage targetPkgs.gnupg targetPkgs.gh]}
               fi
             '';
           };
@@ -262,24 +307,6 @@ nix-manager-core.lib.mkManagerOutputs {
           echo "Documentation: mdbook serve docs"
         '';
       };
-    });
-
-    checks = forAllSystems (system: let
-      pkgs = pkgsFor system;
-      cargo = cargoFor system;
-    in {
-      catalog-renderers = rendererCheckFor pkgs;
-      runner-file-env-renderer = runnerFileEnvCheckFor pkgs;
-      nextest = cargo.craneLib.cargoNextest (cargo.commonArgs
-        // {
-          inherit (cargo) cargoArtifacts;
-          nativeBuildInputs = [pkgs.git pkgs.flock];
-          postPatch = ''
-            substituteInPlace crates/secret-manager/tests/rotate.rs \
-              --replace-fail '#!/usr/bin/env bash' '#!${pkgs.bash}/bin/bash'
-          '';
-          cargoNextestExtraArgs = "--no-tests pass";
-        });
     });
   };
 }
