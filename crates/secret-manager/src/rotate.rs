@@ -69,7 +69,7 @@ const ADD_TO_GIT_ENV: &str = "AGENIX_REKEY_ADD_TO_GIT";
 /// Every age v1 file starts with this header line. Armor uses the
 /// standard PEM-style prelude instead. A "successful" generate that
 /// produces neither is a partial write, not a key.
-const AGE_MAGIC: &[u8] = b"age-encryption.org v1\n";
+const AGE_MAGIC: &[u8] = b"age-encryption.org/v1\n";
 const AGE_ARMOR_BEGIN: &[u8] = b"-----BEGIN AGE ENCRYPTED FILE-----";
 
 #[derive(Args, Debug)]
@@ -822,12 +822,24 @@ mod tests {
     }
 
     #[test]
+    fn validate_fresh_accepts_standard_v1_header() {
+        let repo = rooted();
+        let encrypted = repo.path.join("generated.age");
+        fs::write(
+            &encrypted,
+            b"age-encryption.org/v1\n-> X25519 abcdefghijklmnopqrstuvwxyz0123456789ABC\nZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY3ODkwYWJjZGVmZ2hpamtsbW5vcA==\n--- c29tZS1tYWMtdmhpY2gtaXMtNDMtd2hhdGV2ZXItY2hhcnMtbG9uZw==\n",
+        )
+        .expect("write");
+        assert!(validate_fresh(&repo.path, &encrypted).is_ok());
+    }
+
+    #[test]
     fn validate_fresh_accepts_binary_and_armored_age() {
         let repo = rooted();
         let binary = repo.path.join("binary.age");
         fs::write(
             &binary,
-            b"age-encryption.org v1\n-> X25519 abcdefghijklmnopqrstuvwxyz0123456789ABC\nZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY3ODkwYWJjZGVmZ2hpamtsbW5vcA==\n--- c29tZS1tYWMtdmhpY2gtaXMtNDMtd2hhdGV2ZXItY2hhcnMtbG9uZw==\n",
+            b"age-encryption.org/v1\n-> X25519 abcdefghijklmnopqrstuvwxyz0123456789ABC\nZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY3ODkwYWJjZGVmZ2hpamtsbW5vcA==\n--- c29tZS1tYWMtdmhpY2gtaXMtNDMtd2hhdGV2ZXItY2hhcnMtbG9uZw==\n",
         )
         .expect("write");
         assert!(validate_fresh(&repo.path, &binary).is_ok());
@@ -848,7 +860,7 @@ mod tests {
         let repo = rooted();
         // Magic alone is a torn write, not a key.
         let header_only = repo.path.join("header.age");
-        fs::write(&header_only, b"age-encryption.org v1\n").expect("write");
+        fs::write(&header_only, b"age-encryption.org/v1\n").expect("write");
         let err = validate_fresh(&repo.path, &header_only).unwrap_err();
         assert!(err.to_string().contains("truncated"), "{err:?}");
         // Armor without its END delimiter is a torn write too.

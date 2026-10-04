@@ -8,6 +8,146 @@ Declarative secret management for Nix store repositories.
 
 ## Commands
 
+### `github app` — GitHub-issued App credentials
+
+`enroll` serves a local manifest form and callback on `127.0.0.1`. Open the
+printed URL in an authenticated GitHub browser, register the app, then authorize
+its **selected-repository** installation. The conversion response is encrypted
+before parsing or publication; the CLI never generates an app private key.
+
+```sh
+secret-manager github app enroll --config review-app.json \
+  --store /path/to/canix --transaction /private/state/review-app \
+  --identity age/master_identities/master_nitro3c_identity.pub
+```
+
+The transaction's parent directory must already exist. The CLI creates the
+transaction directory with mode `0700`; files use `0600`. Keep it outside tracked
+source trees. The manifest callback must complete within one hour; the default
+listener deadline is 900 seconds (`--timeout-seconds`, maximum 3500). `--port`
+chooses a loopback port. Retries reuse the original port and policy/store binding.
+
+The public policy is JSON:
+
+```json
+{
+  "version": 1,
+  "slug": "example-review",
+  "owner": "example",
+  "repository": "example/project",
+  "homepage": "https://github.com/example/project",
+  "source": "age/secrets/review-app.age",
+  "recipients": ["age1..."],
+  "permissions": {
+    "contents": "read",
+    "pull_requests": "write",
+    "checks": "write"
+  },
+  "keySecretName": "COMMITPERCLIP_KEY",
+  "appIdVariable": "COMMITPERCLIP_APP_ID",
+  "appSlugVariable": "COMMITPERCLIP_APP_SLUG"
+}
+```
+
+Use real public age recipients. The app owner must match the repository owner;
+permissions must match the declaration, with only GitHub's automatic
+`metadata: read` permitted additionally. The issued slug must match the declared
+slug. If GitHub assigns a different slug, retain the encrypted checkpoint and
+import a settings-issued key with a corrected policy in a fresh transaction.
+
+For an already registered app or a settings-issued replacement key:
+
+```sh
+secret-manager github app import --config review-app.json --store /path/to/canix \
+  --transaction /private/state/review-app --app-id 12345 --pem-file /private/key.pem
+secret-manager github app installation --config review-app.json \
+  --store /path/to/canix --transaction /private/state/review-app
+secret-manager github app publish --config review-app.json --store /path/to/canix \
+  --transaction /private/state/review-app --identity /private/age-identity
+secret-manager github app verify --config review-app.json --store /path/to/canix \
+  --transaction /private/state/review-app --identity /private/age-identity
+```
+
+`import` requires an operator-owned private PEM file and verifies its JWT against
+GitHub `/app`. It retains the original file; remove it through your normal private
+credential handling after encrypted adoption. App-key generation/revocation is a
+GitHub settings operation; this CLI automates adoption and publication.
+
+If an import stops after saving `issued.age` but before saving its digest, retry
+with the same transaction, PEM and age identity. Recovery binds the retained
+ciphertext to the pending transaction and checks the original app identity and
+key fingerprint before completing adoption. A recorded digest mismatch or an
+unbound checkpoint in a completed transaction is refused.
+
+`installation` prints the authorization URL. With `--installation-id`, it can
+add the declared repository to an existing selected installation using the
+operator's authenticated `gh` account. It verifies app/installation ownership and
+repository administration before mutation, then verifies token scope afterward.
+
+`publish` verifies the encrypted checkpoint, authenticates the app, checks the
+installation, mints an exactly-one-repository token and revokes that verification
+token. It writes the encrypted source and adjacent `.app-id` / `.app-slug` public
+files, then uses `gh` stdin to set the named repository secret and variables.
+Failed token revocation refuses publication or a successful verification receipt.
+If verification and revocation both fail, the diagnostic reports both outcomes.
+Partial publication is retryable using the same transaction. `--replace-key`
+permits an explicit verified rotation and retains the previous ciphertext in
+`previous.age`. Publication is serialized per source.
+
+The JSON receipt contains IDs, public-key fingerprint, policy/checkpoint/source
+hashes, token expiry and successful slot names. It contains no PEM, JWT or token.
+Its `actionsSlotQualified` stays `false`: GitHub does not return stored Actions
+secret plaintext, so the trusted hosted workflow must prove destination use.
+`verify` checks the encrypted source credential, not the installed Actions slot.
+
+If a crash follows manifest exchange, retry `enroll` with the same transaction:
+an encrypted response can be recovered. If no ciphertext exists, the consumed
+code has an ambiguous outcome; inspect GitHub settings and import an issued key
+in a fresh transaction. Never replay that conversion blindly.
+
+`gh` must already be authenticated to `github.com`; age identities use the
+existing `--identity` / `SECRET_MANAGER_AGE_IDENTITIES` contract. Canix hardware
+identity stubs under `age/master_identities/` should be passed explicitly.
+Declaration of `services.secretSync.targets` does not schedule execution.
+
+### `gpg publish` — Account signing keys
+
+Register an existing armored public key on authenticated forge accounts:
+
+```sh
+secret-manager gpg publish nomad.asc --codefloe --github --codeberg
+```
+
+| Flag                                 | Description                                                             |
+| ------------------------------------ | ----------------------------------------------------------------------- |
+| `--codefloe`                         | Register on the Forgejo account at `codefloe.com`                       |
+| `--github`                           | Register on the GitHub account at `github.com`                          |
+| `--codeberg`                         | Register on the Forgejo account at `codeberg.org`                       |
+| `--forgejo HOST`                     | Add another Forgejo destination; repeatable                             |
+| `--dry-run`                          | Validate the public key and print destinations without network calls    |
+| `--check`                            | Read back registration; fail if any selected account is missing the key |
+| `--expected-fingerprint FINGERPRINT` | Require this full fingerprint before contacting a forge                 |
+
+Choose at least one destination. The command accepts exactly one public primary
+key in one ASCII-armored block, rejects private-key packets, and inspects it with
+GnuPG in an isolated temporary keyring. It does not import into your keyring.
+Relative file paths resolve from the working directory; no secret store is needed.
+
+Forgejo destinations reuse `fj` authentication in its existing auth store.
+Tokens need `read:user` for listing and `write:user` for registration. GitHub
+reuses `gh` authentication; classic/OAuth tokens need `read:gpg_key` and
+`write:gpg_key`, respectively.
+
+Retries are idempotent: an existing key is accepted only after matching its full
+fingerprint from the API's public-key packets. Every destination is attempted
+even if another fails, and incomplete publication exits nonzero. After a failed
+POST, a read-back checks whether registration succeeded before reporting failure.
+
+Output reports registration, signing capability, email verification, and
+Forgejo's key-ownership verification separately. Uploading a key does not perform
+Forgejo's proof-of-possession challenge or verify an account email. Codefloe
+account registration uses its Forgejo API, independently of Crow CI credentials.
+
 ### `hm` — Home-manager secrets
 
 Add an agenix secret for a home-manager target.

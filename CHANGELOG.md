@@ -2,8 +2,21 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Resume interrupted GitHub App imports after encrypted checkpoint persistence,
+  retaining the original app identity and key fingerprint bindings.
+
 ### Added
 
+- `github app enroll|import|installation|publish|verify` manages GitHub-issued
+  App keys through encrypted, policy-bound transactions. Verifies app ownership,
+  exact permissions, selected installations and repository-scoped tokens before
+  publishing the PEM and public identity to configured Actions slots.
+
+- `gpg publish` registers public signing keys on Codefloe, GitHub, Codeberg,
+  and additional Forgejo accounts. Supports offline dry-runs, read-only checks,
+  full-fingerprint duplicate detection, and retryable per-platform results.
 - Declarative Codefloe and GitHub Actions repository sync targets, including
   GitHub variable and prune support.
 - Pkl secret registry schema (`pkl/SecretRegistry.pkl`) with Rust types, CLI
@@ -29,6 +42,9 @@ runner-env add`), and Pkl evaluation via nix-pklx.
   declarations point.
 
 ### Fixed
+
+- Patched HTTP/TLS dependencies and `anyhow` to address the RustSec findings
+  reported by hosted qualification.
 
 - Nix library wiring now exposes the shared Forgejo runner file-environment
   helper from the expected module surface.
