@@ -13,6 +13,8 @@
   agenix sources using bounded private pipes and atomic ciphertext installation.
 - Expose in-memory item projection and the consumer-configured agenix master
   encryption backend for authenticated-application adapters.
+- Validate projected vault documents with application-owned helpers over bounded
+  private pipes, reusing one item snapshot and redacting child diagnostics.
 
 - `github app enroll|import|installation|publish|verify` manages GitHub-issued
   App keys through encrypted, policy-bound transactions. Verifies app ownership,

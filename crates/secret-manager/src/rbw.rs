@@ -101,6 +101,34 @@ impl RbwSource {
         bytes.truncate(length);
         Ok(bytes)
     }
+
+    /// Let an application-owned helper validate/normalize a projection from the
+    /// same snapshot, using private bounded pipes and redacted child diagnostics.
+    /// Arguments describe the helper protocol; never put credentials in them.
+    pub fn project_with_validator(
+        &self,
+        item: &RbwItem,
+        executable: &Path,
+        arguments: &[&str],
+    ) -> Result<Zeroizing<Vec<u8>>> {
+        ensure!(
+            executable.is_absolute() && executable.is_file(),
+            "credential validator must be an existing absolute executable path"
+        );
+        disable_core_dumps()?;
+        let projected = self.project(item)?;
+        let validated = capture_with_timeout(
+            Command::new(executable).args(arguments),
+            Some(&projected),
+            self.timeout,
+        )
+        .context("application credential validation failed; encrypted sources were not replaced")?;
+        ensure!(
+            !validated.is_empty() && validated.len() <= MAX_BYTES / 2,
+            "validated credential document must be nonempty and at most 512 KiB"
+        );
+        Ok(validated)
+    }
 }
 
 fn valid_uuid(value: &str) -> bool {
@@ -299,5 +327,69 @@ mod tests {
         assert!(!format!("{error:#}").contains("fixture-secret"));
         std::fs::write(&executable, "#!/bin/sh\nsleep 10\n").unwrap();
         assert!(source.read_with(&executable).is_err());
+    }
+
+    #[test]
+    fn application_validator_receives_only_projected_fields_over_stdin() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("validator");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\n[ \"$*\" = 'enroll --stdin --stdout' ] || exit 2\ncat\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let source = RbwSource {
+            item_id: ID.into(),
+            field: "password".into(),
+            json_fields: BTreeMap::from([
+                ("username".into(), "username".into()),
+                ("password".into(), "password".into()),
+            ]),
+            sync: false,
+            timeout: Duration::from_secs(1),
+        };
+        let item = RbwItem::from_json(ITEM, ID).unwrap();
+        let result = source
+            .project_with_validator(&item, &executable, &["enroll", "--stdin", "--stdout"])
+            .unwrap();
+        let document: serde_json::Value = serde_json::from_slice(&result).unwrap();
+        assert_eq!(document.as_object().unwrap().len(), 2);
+        assert_eq!(document["password"], "fixture-password");
+        assert!(!std::str::from_utf8(&result).unwrap().contains("old-secret"));
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn application_validator_rejects_unqualified_paths_and_redacts_failures() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("validator");
+        let source = RbwSource {
+            item_id: ID.into(),
+            field: "password".into(),
+            json_fields: BTreeMap::new(),
+            sync: false,
+            timeout: Duration::from_millis(150),
+        };
+        let item = RbwItem::from_json(ITEM, ID).unwrap();
+        assert!(
+            source
+                .project_with_validator(&item, Path::new("validator"), &[])
+                .is_err()
+        );
+        for script in [
+            "cat >/dev/null; echo fixture-password >&2; exit 1",
+            "cat >/dev/null; head -c 1100000 /dev/zero",
+            "cat >/dev/null; sleep 10",
+        ] {
+            std::fs::write(&executable, format!("#!/bin/sh\n{script}\n")).unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let error = source
+                .project_with_validator(&item, &executable, &[])
+                .unwrap_err();
+            assert!(!format!("{error:#}").contains("fixture-password"));
+        }
     }
 }
