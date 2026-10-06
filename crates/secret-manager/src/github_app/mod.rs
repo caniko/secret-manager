@@ -434,8 +434,7 @@ impl Publication<'_> {
             .custom_flags(libc::O_NOFOLLOW)
             .open(&lock_path)?;
         state::private_metadata(&lock_path, false)?;
-        publication_lock
-            .try_lock()
+        state::try_lock_exclusive(&publication_lock)
             .context("another transaction owns publication of this source")?;
         let verification = api::verify(api, config, &issued.app, &key)?;
         let id_path = source.with_extension("app-id");

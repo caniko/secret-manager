@@ -9,7 +9,10 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
-    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+    os::{
+        fd::AsRawFd,
+        unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+    },
     path::{Path, PathBuf},
 };
 use zeroize::Zeroizing;
@@ -41,7 +44,28 @@ impl Drop for Transaction {
     fn drop(&mut self) {
         // Close alone leaves a flock held by a helper's inherited open file
         // description until exec. Release this owner's lock before closing it.
-        let _ = self._lock.unlock();
+        let _ = flock(&self._lock, libc::LOCK_UN);
+    }
+}
+
+// These locks must also work for consumers using Rust 1.88, before std's
+// File locking API was stabilized. Keep the nonblocking flock semantics and
+// explicit unlock of the shared open file description.
+pub(super) fn try_lock_exclusive(file: &File) -> std::io::Result<()> {
+    flock(file, libc::LOCK_EX | libc::LOCK_NB)
+}
+
+fn flock(file: &File, operation: libc::c_int) -> std::io::Result<()> {
+    loop {
+        // SAFETY: file owns a live descriptor throughout this call. flock
+        // borrows that descriptor and does not consume or access Rust memory.
+        if unsafe { libc::flock(file.as_raw_fd(), operation) } == 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
     }
 }
 
@@ -66,7 +90,7 @@ impl Transaction {
             .custom_flags(libc::O_NOFOLLOW)
             .open(directory.join("lock"))?;
         private_metadata(&directory.join("lock"), false)?;
-        lock.try_lock().context("GitHub App transaction is busy")?;
+        try_lock_exclusive(&lock).context("GitHub App transaction is busy")?;
         let policy_sha256 = sha256(&serde_json::to_vec(config)?);
         let path = directory.join("state.json");
         let state = if path.exists() {
