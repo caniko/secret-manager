@@ -221,7 +221,7 @@ fn discover_root() -> Result<PathBuf> {
 /// Resolve a caller-supplied path against the repo root, refusing anything
 /// that is not a plain in-tree `.age` file. Symlink sources are refused:
 /// rotation must never follow a redirect it did not create.
-fn contained_rel(repo_root: &Path, input: &str) -> Result<PathBuf> {
+pub(crate) fn contained_rel(repo_root: &Path, input: &str) -> Result<PathBuf> {
     if input.is_empty() {
         bail!("rotate needs a repo-relative .age path, got an empty string");
     }
@@ -280,7 +280,7 @@ fn contained_rel(repo_root: &Path, input: &str) -> Result<PathBuf> {
 
 /// Create the source's parent directory (create path), re-verifying
 /// containment afterwards so a planted symlink cannot redirect it.
-fn ensure_parent(repo_root: &Path, rel: &Path) -> Result<PathBuf> {
+pub(crate) fn ensure_parent(repo_root: &Path, rel: &Path) -> Result<PathBuf> {
     let abs = repo_root.join(rel);
     let parent = abs
         .parent()
@@ -306,7 +306,7 @@ fn ensure_parent(repo_root: &Path, rel: &Path) -> Result<PathBuf> {
 /// orphaned child may still be mutating the repo. A competing run then
 /// keeps refusing until the orphan finishes. Dropping the guard in the
 /// wrapper only closes our own fd.
-struct RotationLock {
+pub(crate) struct RotationLock {
     _file: fs::File,
 }
 
@@ -335,7 +335,7 @@ fn lock_path(repo_root: &Path) -> PathBuf {
     }
 }
 
-fn acquire_lock(repo_root: &Path) -> Result<RotationLock> {
+pub(crate) fn acquire_lock(repo_root: &Path) -> Result<RotationLock> {
     use std::os::unix::io::AsRawFd;
 
     let path = lock_path(repo_root);
@@ -576,7 +576,7 @@ fn snapshot_content(
 /// Staging compares file *contents* before and after, so pre-existing dirt
 /// and concurrent-but-identical writes are never swept in, and genuinely
 /// redistributed copies are never missed.
-fn distribute(repo_root: &Path, rel: &Path, no_stage: bool) -> Result<()> {
+pub(crate) fn distribute(repo_root: &Path, rel: &Path, no_stage: bool) -> Result<()> {
     let before_names = status_names(repo_root).map_err(|e| {
         anyhow!(
             "source {} updated, but distribution state is unknown: {e}; verify with `git status` and distribute with `agenix rekey -a`",

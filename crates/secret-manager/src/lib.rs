@@ -7,6 +7,8 @@
 //! thin shim over this library.
 
 pub mod add;
+mod credential_process;
+pub mod encryption;
 pub mod env;
 pub mod github_app;
 pub mod gpg;
@@ -15,6 +17,7 @@ pub mod legacy;
 pub mod pkl;
 pub mod plan;
 pub mod push;
+pub mod rbw;
 pub mod registry;
 pub mod render;
 pub mod rotate;

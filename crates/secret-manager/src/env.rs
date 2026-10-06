@@ -14,6 +14,15 @@ pub const DEFAULT_HOST_SECRET_DIR: &str = "age/secrets/hosts";
 /// The standalone `secret-manager` binary uses [`LocalEnv`], which trusts
 /// the caller.
 pub trait StoreEnv {
+    /// Prepare the consumer's agenix master-policy backend before vault access.
+    /// Embedders own bounded evaluation/build leases; no secret reaches Nix.
+    fn stream_encryptor(
+        &self,
+        _root: &std::path::Path,
+    ) -> Result<crate::encryption::StreamEncryptor> {
+        crate::encryption::StreamEncryptor::from_env()
+    }
+
     /// Validate that `host` is a known deploy target for system secrets.
     fn validate_host(&self, _host: &str) -> Result<()> {
         Ok(())

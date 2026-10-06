@@ -379,5 +379,6 @@
     instances = lib.mapAttrs instanceRuntime byInstance;
   };
 in {
+  mkAgenixStreamEncryptor = import ./stream-encryptor.nix;
   inherit mkForgejoRunnerFileEnv mkHomeEnvSecretModules mkSecret mkSecretSyncTargets mkSharedSecret pubOf secretFileName;
 }

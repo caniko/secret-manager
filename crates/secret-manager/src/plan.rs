@@ -30,6 +30,10 @@ pub enum SourceKind {
     Generate(GeneratorSpec),
     Plaintext,
     FromAge(PathBuf),
+    Rbw {
+        source: crate::rbw::RbwSource,
+        rotate: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,10 +79,13 @@ pub fn run_plan(args: &CommonSourceArgs, plan: AddPlan, env: &dyn StoreEnv) -> R
         &plan.targets,
         match &plan.source {
             SourceKind::Generate(generator) => Some(generator),
-            SourceKind::Plaintext | SourceKind::FromAge(_) => None,
+            SourceKind::Plaintext | SourceKind::FromAge(_) | SourceKind::Rbw { .. } => None,
         },
     );
 
+    if let SourceKind::Rbw { source, rotate } = &plan.source {
+        return run_rbw_plan(&repo_root, args, &plan, &modules, (source, *rotate), env);
+    }
     validate_module_destinations(&repo_root, &modules)?;
     write_modules(&repo_root, &modules)?;
     if !modules.is_empty() {
@@ -98,7 +105,7 @@ pub fn run_plan(args: &CommonSourceArgs, plan: AddPlan, env: &dyn StoreEnv) -> R
             )?;
             print_generated_summary(&repo_root, &modules, &plan.source_only_paths);
         }
-        SourceKind::Plaintext | SourceKind::FromAge(_) => {
+        SourceKind::Plaintext | SourceKind::FromAge(_) | SourceKind::Rbw { .. } => {
             let paths = touched_paths(&repo_root, &modules, &plan.source_only_paths, true);
             let refs = paths.iter().map(PathBuf::as_path).collect::<Vec<_>>();
             stage_and_rekey(&repo_root, &refs, args.no_stage, args.no_rekey)?;
@@ -106,6 +113,74 @@ pub fn run_plan(args: &CommonSourceArgs, plan: AddPlan, env: &dyn StoreEnv) -> R
         }
     }
 
+    Ok(())
+}
+
+fn run_rbw_plan(
+    root: &Path,
+    args: &CommonSourceArgs,
+    plan: &AddPlan,
+    modules: &[RenderedModule],
+    (source, rotate): (&crate::rbw::RbwSource, bool),
+    env: &dyn StoreEnv,
+) -> Result<()> {
+    let paths = planned_secret_paths(modules, &plan.source_only_paths);
+    if paths.len() != 1 {
+        bail!("rbw import requires exactly one encrypted source destination");
+    }
+    let rel = crate::rotate::contained_rel(root, &paths[0].to_string_lossy())?;
+    let destination = crate::rotate::ensure_parent(root, &rel)?;
+    let validate = || -> Result<Option<Vec<u8>>> {
+        crate::rotate::contained_rel(root, &rel.to_string_lossy())?;
+        if rotate {
+            for module in modules {
+                if !root.join(&module.path).is_file() {
+                    bail!(
+                        "rbw rotation requires existing module wiring; it cannot create a new target"
+                    );
+                }
+            }
+            return Ok(Some(crate::encryption::existing_ciphertext(&destination)?));
+        } else {
+            validate_module_destinations(root, modules)?;
+            crate::encryption::require_missing(&destination)?;
+        }
+        Ok(None)
+    };
+    let previous = validate()?;
+    // Resolve public policy before opening the vault; embedders release their
+    // evaluation/build capacity before returning this backend.
+    let encryptor = env.stream_encryptor(root)?;
+    let payload = source.payload()?;
+    let _guard = crate::rotate::acquire_lock(root)?;
+    if validate()? != previous {
+        bail!("encrypted source changed during vault lookup; refusing replacement");
+    }
+    if rotate {
+        encryptor.encrypt_replace(&destination, &payload)?;
+    } else {
+        encryptor.encrypt_new(&destination, &payload)?;
+    }
+    drop(payload);
+    if !rotate {
+        write_modules(root, modules)?;
+    }
+    let touched = if rotate {
+        vec![destination]
+    } else {
+        touched_paths(root, modules, &plan.source_only_paths, true)
+    };
+    let finish = || -> Result<()> {
+        stage_paths(root, &touched, args.no_stage)?;
+        if !args.no_rekey {
+            crate::rotate::distribute(root, &rel, args.no_stage)?;
+        } else {
+            eprintln!("skipped rekey — run `agenix rekey -a` before deploying.");
+        }
+        Ok(())
+    };
+    finish().map_err(|error| anyhow!("encrypted rbw source is saved; distribution is incomplete. Retry staging/rekeying: {error}"))?;
+    print_written_summary(root, modules, &plan.source_only_paths);
     Ok(())
 }
 
@@ -519,6 +594,7 @@ pub(crate) fn prepare_secret_sources(
             }
             Ok(())
         }
+        SourceKind::Rbw { .. } => bail!("rbw imports require the direct encryption path"),
     }
 }
 

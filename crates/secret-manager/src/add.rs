@@ -90,16 +90,45 @@ pub struct NixosBaseArgs {
 #[derive(Args, Debug, Clone)]
 pub struct FileSourceArgs {
     /// Read plaintext from this file. If no source flag is passed, plaintext is read from stdin.
-    #[arg(long = "from-file")]
+    #[arg(long = "from-file", conflicts_with = "from_rbw")]
     pub from_file: Option<PathBuf>,
 
     /// Adopt an existing encrypted .age file.
-    #[arg(long = "from-age", conflicts_with = "from_file")]
+    #[arg(long = "from-age", conflicts_with_all = ["from_file", "from_rbw"])]
     pub from_age: Option<PathBuf>,
 
     /// Bypass duplicate-reference checks when adopting --from-age.
     #[arg(long, default_value_t = false)]
     pub force_existing: bool,
+
+    /// Read one exact Bitwarden item through rbw and encrypt directly from memory.
+    #[arg(long, value_name = "ITEM_UUID", conflicts_with_all = ["from_file", "from_age", "force_existing"])]
+    pub from_rbw: Option<String>,
+
+    /// Stored field to import (default: password); use custom:NAME for custom fields.
+    #[arg(long, requires = "from_rbw", conflicts_with = "rbw_map")]
+    pub rbw_field: Option<String>,
+
+    /// Build a JSON document from selected fields: OUTPUT=FIELD (repeatable).
+    #[arg(
+        long,
+        requires = "from_rbw",
+        conflicts_with = "rbw_field",
+        value_name = "OUTPUT=FIELD"
+    )]
+    pub rbw_map: Vec<String>,
+
+    /// Replace an existing encrypted source explicitly; preserve its wiring.
+    #[arg(long, requires = "from_rbw")]
+    pub rbw_rotate: bool,
+
+    /// Synchronize the vault before reading; otherwise use rbw's local cache.
+    #[arg(long, requires = "from_rbw")]
+    pub rbw_sync: bool,
+
+    /// Maximum duration of each rbw invocation, including pinentry interaction.
+    #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u64).range(1..=300))]
+    pub rbw_timeout_seconds: u64,
 }
 
 #[derive(Args, Debug)]
@@ -451,12 +480,17 @@ impl NixosCmd {
 
 impl ForgejoCmd {
     pub fn run(self) -> Result<()> {
+        self.run_with_env(&LocalEnv)
+    }
+
+    /// Embedding applications provide their own direct-encryption policy.
+    pub fn run_with_env(self, env: &dyn StoreEnv) -> Result<()> {
         match self {
             ForgejoCmd::Ssh(args) => args.run(),
             ForgejoCmd::GpgKeyPair(args) => args.run(),
             ForgejoCmd::Password(args) => args.run(),
             ForgejoCmd::Text(args) => args.run(),
-            ForgejoCmd::File(args) => args.run(),
+            ForgejoCmd::File(args) => args.run_with_env(env),
             ForgejoCmd::RunnerEnv(args) => args.run(),
         }
     }
@@ -609,7 +643,7 @@ impl HmTextArgs {
 
 impl HmFileArgs {
     pub fn run(self, env: &dyn StoreEnv) -> Result<()> {
-        let source = file_source_kind(&self.source);
+        let source = file_source_kind(&self.source)?;
         let plan = self.build_plan(&source, env)?;
         run_plan(
             &common_source(
@@ -769,7 +803,7 @@ impl NixosTextArgs {
 
 impl NixosFileArgs {
     pub fn run(self, env: &dyn StoreEnv) -> Result<()> {
-        let source = file_source_kind(&self.source);
+        let source = file_source_kind(&self.source)?;
         let plan = self.build_plan(&source, env)?;
         run_plan(
             &common_source(
@@ -893,7 +927,11 @@ impl ForgejoTextArgs {
 
 impl ForgejoFileArgs {
     pub fn run(self) -> Result<()> {
-        let source = file_source_kind(&self.source);
+        self.run_with_env(&LocalEnv)
+    }
+
+    pub fn run_with_env(self, env: &dyn StoreEnv) -> Result<()> {
+        let source = file_source_kind(&self.source)?;
         let plan = self.build_plan(&source)?;
         run_plan(
             &common_source(
@@ -903,9 +941,7 @@ impl ForgejoFileArgs {
                 &self.exec,
             ),
             plan,
-            // Forgejo targets never resolve host secret paths; the
-            // environment default applies.
-            &LocalEnv,
+            env,
         )
     }
 
@@ -971,7 +1007,7 @@ fn common_source(
     CommonSourceArgs {
         from_file: match source {
             SourceKind::Plaintext => from_file,
-            SourceKind::FromAge(_) | SourceKind::Generate(_) => None,
+            SourceKind::FromAge(_) | SourceKind::Generate(_) | SourceKind::Rbw { .. } => None,
         },
         editor_when_tty: false,
         force_existing,
@@ -1010,11 +1046,53 @@ fn shared_home_target(slug: &str, env_vars: Vec<String>) -> Result<TargetSpec> {
     }))
 }
 
-fn file_source_kind(source: &FileSourceArgs) -> SourceKind {
-    match &source.from_age {
+fn file_source_kind(source: &FileSourceArgs) -> Result<SourceKind> {
+    if let Some(item_id) = &source.from_rbw {
+        if source.from_file.is_some() || source.from_age.is_some() || source.force_existing {
+            bail!("--from-rbw conflicts with file/age sources and --force-existing");
+        }
+        if source.rbw_field.is_some() && !source.rbw_map.is_empty() {
+            bail!("--rbw-field conflicts with --rbw-map");
+        }
+        let mut json_fields = std::collections::BTreeMap::new();
+        for mapping in &source.rbw_map {
+            let (key, field) = mapping
+                .split_once('=')
+                .ok_or_else(|| anyhow!("--rbw-map requires OUTPUT=FIELD"))?;
+            if json_fields
+                .insert(key.to_owned(), field.to_owned())
+                .is_some()
+            {
+                bail!("duplicate output key in --rbw-map");
+            }
+        }
+        let rbw = crate::rbw::RbwSource {
+            item_id: item_id.clone(),
+            field: source
+                .rbw_field
+                .clone()
+                .unwrap_or_else(|| "password".into()),
+            json_fields,
+            sync: source.rbw_sync,
+            timeout: std::time::Duration::from_secs(source.rbw_timeout_seconds),
+        };
+        rbw.validate()?;
+        return Ok(SourceKind::Rbw {
+            source: rbw,
+            rotate: source.rbw_rotate,
+        });
+    }
+    if source.rbw_field.is_some()
+        || !source.rbw_map.is_empty()
+        || source.rbw_sync
+        || source.rbw_rotate
+    {
+        bail!("rbw field/mapping/sync/rotation options require --from-rbw");
+    }
+    Ok(match &source.from_age {
         Some(path) => SourceKind::FromAge(path.clone()),
         None => SourceKind::Plaintext,
-    }
+    })
 }
 
 fn resolve_slug(
@@ -1184,6 +1262,12 @@ mod tests {
             from_file: None,
             from_age: None,
             force_existing: false,
+            from_rbw: None,
+            rbw_field: None,
+            rbw_map: Vec::new(),
+            rbw_rotate: false,
+            rbw_sync: false,
+            rbw_timeout_seconds: 120,
         }
     }
 
@@ -1192,6 +1276,12 @@ mod tests {
             from_file: None,
             from_age: Some(PathBuf::from(path)),
             force_existing: false,
+            from_rbw: None,
+            rbw_field: None,
+            rbw_map: Vec::new(),
+            rbw_rotate: false,
+            rbw_sync: false,
+            rbw_timeout_seconds: 120,
         }
     }
 
@@ -1309,7 +1399,7 @@ mod tests {
             source,
             exec: ExecutionArgs::default(),
         };
-        let source = file_source_kind(&args.source);
+        let source = file_source_kind(&args.source).unwrap();
         let plan = args.build_plan(&source, &TestEnv).unwrap();
         assert_eq!(plan.slug, "kubeconfig");
         assert_eq!(
@@ -1426,7 +1516,7 @@ mod tests {
             source: file_source_from_stdin(),
             exec: ExecutionArgs::default(),
         };
-        let source = file_source_kind(&file.source);
+        let source = file_source_kind(&file.source).unwrap();
         let file_plan = file.build_plan(&source, &TestEnv).unwrap();
         assert!(file_plan.targets.is_empty());
         assert_eq!(
@@ -1736,7 +1826,7 @@ mod tests {
             source: file_source_from_stdin(),
             exec: ExecutionArgs::default(),
         };
-        let source = file_source_kind(&file.source);
+        let source = file_source_kind(&file.source).unwrap();
         assert!(
             file.build_plan(&source, &TestEnv)
                 .unwrap_err()
@@ -1768,7 +1858,7 @@ mod tests {
             source: file_source_from_stdin(),
             exec: ExecutionArgs::default(),
         };
-        let source = file_source_kind(&file.source);
+        let source = file_source_kind(&file.source).unwrap();
         assert!(
             file.build_plan(&source, &TestEnv)
                 .unwrap_err()
