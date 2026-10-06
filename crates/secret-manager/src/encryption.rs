@@ -21,6 +21,14 @@ pub struct StreamEncryptor {
     timeout: Duration,
 }
 
+/// Serialize source installation and distribution with the same store lock as
+/// generated-secret rotation. Prepare public encryption policy and retrieve
+/// vault data before entering this closure; hold it through staging/rekey.
+pub fn with_store_write_lock<T>(root: &Path, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+    let _guard = crate::rotate::acquire_lock(root)?;
+    operation()
+}
+
 impl StreamEncryptor {
     pub fn new(executable: PathBuf) -> Result<Self> {
         ensure!(

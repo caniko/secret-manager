@@ -81,5 +81,6 @@ restore the old source after distributing a new one to some consumers.
 
 Library adapters can read `RbwSource::read()`, select `RbwItem::field()`, validate
 their own document in memory, then call `StreamEncryptor::encrypt_new()` or
-`encrypt_replace()`. Embedders must serialize replacement and distribution with
-their store's writer lock and constrain destination paths to the intended store.
+`encrypt_replace()`. Use `encryption::with_store_write_lock(root, operation)` to
+serialize installation, staging and rekey with the generic import/rotation path.
+Constrain destination paths to the intended store.
