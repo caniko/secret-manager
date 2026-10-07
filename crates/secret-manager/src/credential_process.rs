@@ -40,6 +40,7 @@ fn capture_inner(
     timeout: Duration,
     group: bool,
 ) -> Result<Zeroizing<Vec<u8>>> {
+    disable_core_dumps()?;
     command
         .env_remove("GH_DEBUG")
         .env_remove("AGEDEBUG")
@@ -181,6 +182,18 @@ fn capture_inner(
 }
 
 pub(crate) fn disable_core_dumps() -> Result<()> {
+    static SETUP: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _setup = SETUP
+        .lock()
+        .map_err(|_| anyhow::anyhow!("credential dump protection setup failed"))?;
+    // Configure procfs before making the process non-dumpable: Linux then makes
+    // its procfs control files root-owned. Subsequent calls verify the filter.
+    let filter = std::fs::read_to_string("/proc/self/coredump_filter")
+        .context("cannot inspect credential helper core mapping filter")?;
+    if filter.trim() != "00000000" {
+        std::fs::write("/proc/self/coredump_filter", "0\n")
+            .context("cannot exclude credential helper memory from core dumps")?;
+    }
     let limit = libc::rlimit {
         rlim_cur: 0,
         rlim_max: 0,
@@ -195,12 +208,21 @@ pub(crate) fn disable_core_dumps() -> Result<()> {
         unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } == 0,
         "cannot protect credential-process memory from dumps"
     );
+    // Dumpability resets across exec, but this filter is inherited. Exclude all
+    // mappings from ordinary child core dumps, including pipe core handlers that
+    // can otherwise ignore RLIMIT_CORE. The value contains no credential data.
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn child_exec_inherits_the_empty_core_mapping_filter() {
+        let output = capture(Command::new("cat").arg("/proc/self/coredump_filter"), None).unwrap();
+        assert_eq!(std::str::from_utf8(&output).unwrap().trim(), "00000000");
+    }
 
     #[test]
     fn descendant_retaining_stdout_cannot_outlive_helper_deadline() {

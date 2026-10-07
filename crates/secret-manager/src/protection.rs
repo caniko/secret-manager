@@ -1,6 +1,7 @@
 //! Protect interactive credential handlers, including their helper subprocesses.
 use anyhow::{Context, Result, ensure};
 use dbus::blocking::Connection;
+use dbus::blocking::stdintf::org_freedesktop_dbus::Properties;
 use std::{
     fs,
     path::Path,
@@ -106,6 +107,12 @@ impl CredentialProtection {
                 ),
             )
             .context("inhibit sleep while handling credentials")?;
+        ensure!(
+            !proxy
+                .get::<bool>("org.freedesktop.login1.Manager", "PreparingForSleep")
+                .context("check credential sleep transition")?,
+            "credential handling cannot start during a sleep transition"
+        );
         Ok(Self { _sleep: sleep })
     }
 }
