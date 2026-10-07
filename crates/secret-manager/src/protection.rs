@@ -4,6 +4,8 @@ use dbus::blocking::Connection;
 use dbus::blocking::stdintf::org_freedesktop_dbus::Properties;
 use std::{
     fs,
+    os::fd::AsRawFd,
+    os::unix::process::CommandExt,
     path::Path,
     process::{Command, ExitStatus},
     time::Duration,
@@ -80,6 +82,56 @@ pub fn enter_scope() -> Result<Option<ExitStatus>> {
 }
 
 impl CredentialProtection {
+    /// Run a trusted foreground helper and keep sleep inhibited in its children
+    /// too. Consume the command so its post-fork descriptor setup cannot outlive
+    /// this guard or be reused after the inhibitor descriptor has been closed.
+    pub fn run(&self, mut command: Command) -> Result<ExitStatus> {
+        let fd = self._sleep.as_raw_fd();
+        let parent = std::process::id();
+        // SAFETY: the guard owns fd throughout spawn/wait. The post-fork closure
+        // uses only libc calls and immutable integers, without Rust allocation
+        // or synchronization. Descriptor flags change only in the child.
+        unsafe {
+            command.pre_exec(move || {
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags < 0
+                    || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0
+                    || libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) != 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::getppid() as u32 != parent {
+                    return Err(std::io::Error::from_raw_os_error(libc::ECANCELED));
+                }
+                Ok(())
+            });
+        }
+        struct Helper {
+            child: std::process::Child,
+            reaped: bool,
+        }
+        impl Drop for Helper {
+            fn drop(&mut self) {
+                if !self.reaped {
+                    let _ = self.child.kill();
+                    let _ = self.child.wait();
+                }
+            }
+        }
+        let mut helper = Helper {
+            child: command
+                .spawn()
+                .context("start protected credential helper")?,
+            reaped: false,
+        };
+        let status = helper
+            .child
+            .wait()
+            .context("wait for protected credential helper")?;
+        helper.reaped = true;
+        Ok(status)
+    }
+
     /// Acquire all protections before credentials enter memory. The caller must
     /// keep this guard until all plaintext buffers and children have been dropped.
     pub fn acquire() -> Result<Self> {
@@ -120,6 +172,25 @@ impl CredentialProtection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn foreground_helpers_inherit_the_inhibitor_without_changing_parent_flags() {
+        use std::os::fd::IntoRawFd;
+        let file = fs::File::open("/dev/null").unwrap();
+        // SAFETY: into_raw_fd transfers this live descriptor's sole ownership.
+        let sleep = unsafe { dbus::arg::OwnedFd::new(file.into_raw_fd()) };
+        let protection = CredentialProtection { _sleep: sleep };
+        let fd = protection._sleep.as_raw_fd();
+        // SAFETY: fd belongs to the live protection guard; F_GETFD only reads flags.
+        let before = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        let mut command = Command::new("python3");
+        command
+            .args(["-c", "import os, sys; os.fstat(int(sys.argv[1]))"])
+            .arg(fd.to_string());
+        assert!(protection.run(command).unwrap().success());
+        // SAFETY: same live descriptor and read-only operation as above.
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, before);
+    }
 
     #[test]
     fn zero_parent_limit_protects_children_but_missing_controls_fail_closed() {
