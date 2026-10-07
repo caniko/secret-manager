@@ -183,9 +183,9 @@ mod tests {
         let fd = protection._sleep.as_raw_fd();
         // SAFETY: fd belongs to the live protection guard; F_GETFD only reads flags.
         let before = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-        let mut command = Command::new("python3");
+        let mut command = Command::new("sh");
         command
-            .args(["-c", "import os, sys; os.fstat(int(sys.argv[1]))"])
+            .args(["-c", "test -e /proc/$$/fd/\"$1\"", "inhibitor-fixture"])
             .arg(fd.to_string());
         assert!(protection.run(command).unwrap().success());
         // SAFETY: same live descriptor and read-only operation as above.
