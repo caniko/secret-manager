@@ -16,16 +16,34 @@ pub(crate) fn capture(command: &mut Command, input: Option<&[u8]>) -> Result<Zer
     capture_with_timeout(command, input, Duration::from_secs(90))
 }
 
-pub(crate) fn capture_with_timeout(
+pub fn capture_with_timeout(
     command: &mut Command,
     input: Option<&[u8]>,
     timeout: Duration,
+) -> Result<Zeroizing<Vec<u8>>> {
+    capture_inner(command, input, timeout, true)
+}
+
+/// Capture a native helper that prompts on the controlling terminal. Keep its
+/// foreground process group so terminal reads cannot stop it with SIGTTIN.
+/// The selected helper must not spawn credential-bearing descendants.
+pub fn capture_prompt_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+) -> Result<Zeroizing<Vec<u8>>> {
+    capture_inner(command, None, timeout, false)
+}
+
+fn capture_inner(
+    command: &mut Command,
+    input: Option<&[u8]>,
+    timeout: Duration,
+    group: bool,
 ) -> Result<Zeroizing<Vec<u8>>> {
     command
         .env_remove("GH_DEBUG")
         .env_remove("AGEDEBUG")
         .env_remove("RUST_LOG")
-        .process_group(0)
         .stdin(if input.is_some() {
             Stdio::piped()
         } else {
@@ -33,21 +51,63 @@ pub(crate) fn capture_with_timeout(
         })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = command.spawn().context("start credential helper")?;
-    struct Cleanup(std::process::Child);
+    if group {
+        command.process_group(0);
+    }
+    let parent = std::process::id();
+    // SAFETY: only async-signal-safe libc calls occur between fork and exec.
+    // No Rust allocation, locking or environment access is performed.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::getppid() as u32 != parent {
+                return Err(std::io::Error::from_raw_os_error(libc::ECANCELED));
+            }
+            Ok(())
+        });
+    }
+    struct Cleanup {
+        child: std::process::Child,
+        group: bool,
+        workers: Vec<thread::JoinHandle<()>>,
+    }
     impl Drop for Cleanup {
         fn drop(&mut self) {
             // The process group remains ours until its pipes settle, including
             // descendants retaining pipes after the direct child exits.
             // SAFETY: kill accepts a negative process-group ID and retains no pointer.
-            unsafe {
-                libc::kill(-(self.0.id() as i32), libc::SIGKILL);
+            if self.group {
+                unsafe {
+                    libc::kill(-(self.child.id() as i32), libc::SIGKILL);
+                }
+            } else {
+                let _ = self.child.kill();
             }
-            let _ = self.0.wait();
+            let _ = self.child.wait();
+            // All plaintext-bearing pipe threads settle before returning to a
+            // GUI that may remain open after failure, timeout or cancellation.
+            for worker in self.workers.drain(..) {
+                let _ = worker.join();
+            }
         }
     }
-    let output = child.stdout.take().context("helper stdout unavailable")?;
-    let errors = child.stderr.take().context("helper stderr unavailable")?;
+    let mut child = Cleanup {
+        child: command.spawn().context("start credential helper")?,
+        group,
+        workers: Vec::new(),
+    };
+    let output = child
+        .child
+        .stdout
+        .take()
+        .context("helper stdout unavailable")?;
+    let errors = child
+        .child
+        .stderr
+        .take()
+        .context("helper stderr unavailable")?;
     let read = |mut stream: Box<dyn Read + Send>| -> Result<Zeroizing<Vec<u8>>> {
         // Reserve the full bound so reallocations do not leave old plaintext
         // allocations behind before the final zeroizing drop.
@@ -63,24 +123,37 @@ pub(crate) fn capture_with_timeout(
     };
     let (output_send, output_recv) = mpsc::channel();
     let (error_send, error_recv) = mpsc::channel();
-    thread::spawn(move || {
-        let _ = output_send.send(read(Box::new(output)));
-    });
-    thread::spawn(move || {
-        let _ = error_send.send(read(Box::new(errors)));
-    });
-    let writer = child.stdin.take().map(|mut stdin| {
+    child.workers.push(
+        thread::Builder::new()
+            .spawn(move || {
+                let _ = output_send.send(read(Box::new(output)));
+            })
+            .context("start credential output reader")?,
+    );
+    child.workers.push(
+        thread::Builder::new()
+            .spawn(move || {
+                let _ = error_send.send(read(Box::new(errors)));
+            })
+            .context("start credential diagnostics reader")?,
+    );
+    let writer = if let Some(mut stdin) = child.child.stdin.take() {
         let bytes = Zeroizing::new(input.unwrap_or_default().to_vec());
         let (send, recv) = mpsc::channel();
-        thread::spawn(move || {
-            let _ = send.send(stdin.write_all(&bytes));
-        });
-        recv
-    });
-    let mut child = Cleanup(child);
+        child.workers.push(
+            thread::Builder::new()
+                .spawn(move || {
+                    let _ = send.send(stdin.write_all(&bytes));
+                })
+                .context("start credential input writer")?,
+        );
+        Some(recv)
+    } else {
+        None
+    };
     let deadline = Instant::now() + timeout;
     let status = loop {
-        if let Some(status) = child.0.try_wait()? {
+        if let Some(status) = child.child.try_wait()? {
             break status;
         }
         if Instant::now() >= deadline {
@@ -116,6 +189,11 @@ pub(crate) fn disable_core_dumps() -> Result<()> {
     ensure!(
         unsafe { libc::setrlimit(libc::RLIMIT_CORE, &limit) } == 0,
         "cannot disable credential-process core dumps"
+    );
+    // SAFETY: prctl consumes integer arguments and retains no pointers.
+    ensure!(
+        unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } == 0,
+        "cannot protect credential-process memory from dumps"
     );
     Ok(())
 }

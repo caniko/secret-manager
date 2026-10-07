@@ -9,6 +9,10 @@
 
 ### Added
 
+- Reusable fail-closed credential-process protection using a no-swap cgroup and
+  a logind sleep inhibitor, plus bounded terminal-prompt pipes. Cancellation and
+  timeout cleanup settles plaintext-bearing pipe workers before returning.
+
 - Import selected Bitwarden fields through `rbw` into new or explicitly rotated
   agenix sources using bounded private pipes and atomic ciphertext installation.
 - Expose in-memory item projection and the consumer-configured agenix master
