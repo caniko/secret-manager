@@ -41,6 +41,7 @@ fn capture_inner(
     group: bool,
 ) -> Result<Zeroizing<Vec<u8>>> {
     disable_core_dumps()?;
+    crate::protection::inherit_active_inhibitors(command)?;
     command
         .env_remove("GH_DEBUG")
         .env_remove("AGEDEBUG")
