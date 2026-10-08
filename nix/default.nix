@@ -25,6 +25,7 @@ nix-manager-core.lib.mkManagerOutputs {
     args;
   srcDir = ../.;
   extraRuntimePackages = pkgs: [
+    pkgs.git
     pkgs.rage
     pkgs.gnupg
     pkgs.gh
