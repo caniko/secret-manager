@@ -33,6 +33,15 @@ only when `sync --prune` is used.
         github   = ["caniko/my-repo"];
       };
 
+      "publisher-token" = {
+        secret = "age/secrets/publisher-token.age";
+        name = "CRATES_IO_API_TOKEN";
+        githubEnvironments = [{
+          repository = "caniko/my-repo";
+          environment = "simit-crates-io";
+        }];
+      };
+
       "org-token" = {
         secret       = "age/secrets/org-token.age";
         name         = "ORG_TOKEN";
@@ -52,6 +61,19 @@ only when `sync --prune` is used.
 ```
 
 ## Target fields
+
+`githubEnvironments` selects environment-scoped GitHub Actions secrets (encrypted
+sources) or variables (plaintext sources). Enroll the environment and its branch
+protection before syncing. Sync verifies the environment exists before writing
+and reads back destination metadata afterward; it never creates an environment or
+falls back to repository scope. Values are passed to `gh` on stdin.
+
+Repository and environment copies have distinct persisted identities. Environment
+names are case-insensitive, so a case-only rename does not schedule a destructive
+prune. Old repository entries remain stale until an explicit authorized `--prune`
+after the replacement environment upload succeeds. Older binaries reject the new
+environment scope in persisted state; they cannot reinterpret it as a repository
+entry. Never reuse such a state file with an older Secret Manager.
 
 | Option         | Type          | Default          | Description                                  |
 | -------------- | ------------- | ---------------- | -------------------------------------------- |

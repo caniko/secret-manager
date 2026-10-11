@@ -28,6 +28,8 @@ pub struct ManagedRecord {
     pub repo: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub org: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
     pub kind: ManagedKind,
     pub name: String,
     pub target: String,
@@ -38,6 +40,7 @@ pub struct ManagedRecord {
 #[serde(rename_all = "lowercase")]
 pub enum Scope {
     Repo,
+    Environment,
     Org,
     User,
 }
@@ -57,6 +60,7 @@ pub struct RecordIdentity {
     owner: Option<String>,
     repo: Option<String>,
     org: Option<String>,
+    environment: Option<String>,
     kind: ManagedKind,
     name: String,
 }
@@ -70,6 +74,7 @@ impl ManagedRecord {
             owner: self.owner.clone(),
             repo: self.repo.clone(),
             org: self.org.clone(),
+            environment: self.environment.clone(),
             kind: self.kind,
             name: self.name.clone(),
         }
@@ -89,6 +94,15 @@ impl ManagedRecord {
                 self.host,
                 self.owner.as_deref().unwrap_or("<missing-owner>"),
                 self.repo.as_deref().unwrap_or("<missing-repo>")
+            ),
+            Scope::Environment => format!(
+                "{provider}/{} environment {}/{} {}",
+                self.host,
+                self.owner.as_deref().unwrap_or("<missing-owner>"),
+                self.repo.as_deref().unwrap_or("<missing-repo>"),
+                self.environment
+                    .as_deref()
+                    .unwrap_or("<missing-environment>")
             ),
             Scope::Org => format!(
                 "{provider}/{} org   {}",
@@ -191,8 +205,30 @@ pub fn desired_records(doc: &SyncDocument) -> Result<Vec<ManagedRecord>> {
                 owner: Some(owner.to_string()),
                 repo: Some(repo_name.to_string()),
                 org: None,
+                environment: None,
                 kind,
                 name: target.name.clone(),
+                target: target_key.to_string(),
+                source: source.clone(),
+            });
+        }
+
+        for destination in &target.github_environments {
+            destination.validate()?;
+            crate::sync_targets::validate_github_environment_value_name(&target.name)?;
+            let (owner, repo) = parse_repo(&destination.repository)?;
+            records.push(ManagedRecord {
+                provider: Provider::Github,
+                host: "github.com".into(),
+                scope: Scope::Environment,
+                owner: Some(owner.to_ascii_lowercase()),
+                repo: Some(repo.to_ascii_lowercase()),
+                org: None,
+                // GitHub environment names are case-insensitive. Case-only
+                // changes must not schedule deletion of the same destination.
+                environment: Some(destination.environment.to_lowercase()),
+                kind,
+                name: target.name.to_ascii_uppercase(),
                 target: target_key.to_string(),
                 source: source.clone(),
             });
@@ -209,6 +245,7 @@ pub fn desired_records(doc: &SyncDocument) -> Result<Vec<ManagedRecord>> {
                 owner: None,
                 repo: None,
                 org: Some(org.clone()),
+                environment: None,
                 kind,
                 name: target.name.clone(),
                 target: target_key.to_string(),
@@ -224,6 +261,7 @@ pub fn desired_records(doc: &SyncDocument) -> Result<Vec<ManagedRecord>> {
                 owner: None,
                 repo: None,
                 org: None,
+                environment: None,
                 kind,
                 name: target.name.clone(),
                 target: target_key.to_string(),
@@ -434,6 +472,7 @@ source = "age/secrets/token.age"
             owner: Some("caniko".to_string()),
             repo: Some("repo".to_string()),
             org: None,
+            environment: None,
             kind: ManagedKind::Secret,
             name: name.to_string(),
             target: target.to_string(),
@@ -453,6 +492,7 @@ source = "age/secrets/token.age"
             } else {
                 None
             },
+            environment: None,
             kind,
             name: name.to_string(),
             target: target.to_string(),
