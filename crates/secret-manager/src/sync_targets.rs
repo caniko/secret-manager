@@ -7,13 +7,13 @@ use serde::{Deserialize, Deserializer, Serialize};
 ///
 /// Each host that has `services.secretSync.enable = true` contributes one
 /// entry in `hosts`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct SyncDocument {
     pub hosts: Vec<HostSyncConfig>,
 }
 
 /// Per-host sync-target configuration.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct HostSyncConfig {
     /// Targets keyed by an arbitrary name meaningful to the store operator.
     pub targets: HashMap<String, SyncTarget>,
@@ -22,9 +22,10 @@ pub struct HostSyncConfig {
 /// A single declarative sync target — push one value to one or more forge
 /// destinations. Encrypted agenix values become Actions secrets; plaintext
 /// source files become Actions variables.
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct SyncTarget {
     /// Source of the value to synchronize.
+    #[serde(flatten)]
     pub value: SyncValue,
 
     /// Name of the Actions secret or variable to set on each target.
@@ -40,12 +41,15 @@ pub struct SyncTarget {
     pub github: Vec<String>,
 
     /// GitHub environment destinations; never falls back to repository scope.
+    #[serde(rename = "githubEnvironments")]
     pub github_environments: Vec<GithubEnvironment>,
 
     /// Codeberg/Forgejo organizations to push to at account scope.
+    #[serde(rename = "codebergOrgs")]
     pub codeberg_orgs: Vec<String>,
 
     /// Whether to push to the authenticated user's account scope.
+    #[serde(rename = "codebergUser")]
     pub codeberg_user: bool,
 
     /// Forge host for Codeberg/Forgejo token resolution.
@@ -63,7 +67,8 @@ pub enum Provider {
 }
 
 /// Where a sync target's value comes from.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum SyncValue {
     /// Path to the agenix-encrypted `.age` file, relative to the store root.
     Secret(String),

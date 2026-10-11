@@ -8,7 +8,9 @@ use serde::{Deserialize, Deserializer};
 use std::{collections::BTreeMap, path::Path, process::Command, time::Duration};
 use zeroize::Zeroizing;
 
-use crate::credential_process::{MAX_BYTES, capture_with_timeout, disable_core_dumps};
+use crate::credential_process::{
+    MAX_BYTES, capture_prompt_with_timeout, capture_with_timeout, disable_core_dumps,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RbwSource {
@@ -56,12 +58,11 @@ impl RbwSource {
         self.validate()?;
         disable_core_dumps()?;
         if self.sync {
-            capture_with_timeout(Command::new(executable).arg("sync"), None, self.timeout)
+            capture_prompt_with_timeout(Command::new(executable).arg("sync"), self.timeout)
                 .context("rbw sync failed; authenticate/unlock the vault before retrying")?;
         }
-        let raw = capture_with_timeout(
+        let raw = capture_prompt_with_timeout(
             Command::new(executable).args(["get", "--raw", "--", &self.item_id]),
-            None,
             self.timeout,
         )
         .context("rbw lookup failed; verify the item UUID and unlock the vault with rbw unlock")?;
@@ -205,7 +206,9 @@ impl RbwItem {
             "totp" => self.data.as_ref().and_then(|data| data.totp.as_deref()),
             "notes" => self.notes.as_deref(),
             name => {
-                let name = name.strip_prefix("custom:").unwrap_or(name);
+                let name = name
+                    .strip_prefix("custom:")
+                    .context("custom rbw fields require the custom: prefix")?;
                 let mut matches = self
                     .fields
                     .iter()
@@ -245,6 +248,120 @@ mod tests {
         );
         assert!(item.field("history").is_err());
         assert!(item.field("missing").is_err());
+    }
+
+    #[test]
+    fn custom_field_typos_require_the_explicit_prefix() {
+        let item = RbwItem::from_json(br#"{"id":"12345678-1234-1234-1234-123456789abc","data":{"password":"correct"},"fields":[{"name":"passwrod","value":"wrong"},{"name":"password","value":"custom"}]}"#, ID).unwrap();
+        assert!(item.field("passwrod").is_err());
+        assert_eq!(item.field("password").unwrap().as_str(), "correct");
+        assert_eq!(item.field("custom:passwrod").unwrap().as_str(), "wrong");
+        assert_eq!(item.field("custom:password").unwrap().as_str(), "custom");
+    }
+
+    #[test]
+    fn locked_vault_lookup_can_read_the_controlling_terminal() {
+        use std::os::{
+            fd::{AsRawFd, FromRawFd},
+            unix::process::CommandExt,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("rbw-prompt");
+        fs_fixture(
+            &executable,
+            &format!(
+                "printf ready >'{}'\nIFS= read -r answer </dev/tty || exit 7\n[ \"$answer\" = unlock ] || exit 8\nprintf '%s' '{}'",
+                root.path().join("ready").display(),
+                std::str::from_utf8(ITEM).unwrap()
+            ),
+        );
+        let (mut master, mut slave) = (-1, -1);
+        // SAFETY: openpty initializes two descriptors with default termios.
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                )
+            },
+            0
+        );
+        // SAFETY: take unique ownership of the descriptors returned by openpty.
+        let mut master = unsafe { std::fs::File::from_raw_fd(master) };
+        let slave = unsafe { std::fs::File::from_raw_fd(slave) };
+        let fd = slave.as_raw_fd();
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "rbw::tests::terminal_lookup_fixture",
+                "--nocapture",
+            ])
+            .env("SECRET_MANAGER_RBW_TERMINAL_FIXTURE", &executable)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        // SAFETY: the child only performs async-signal-safe session/tty setup.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::setsid() < 0 || libc::ioctl(fd, libc::TIOCSCTTY, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !root.path().join("ready").exists() {
+            if std::time::Instant::now() >= deadline || child.try_wait().unwrap().is_some() {
+                let _ = child.kill();
+                let output = child.wait_with_output().unwrap();
+                panic!(
+                    "terminal fixture failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        use std::io::Write;
+        master.write_all(b"unlock\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
+    #[test]
+    fn terminal_lookup_fixture() {
+        let Some(executable) = std::env::var_os("SECRET_MANAGER_RBW_TERMINAL_FIXTURE") else {
+            return;
+        };
+        let source = RbwSource {
+            item_id: ID.into(),
+            field: "password".into(),
+            json_fields: BTreeMap::new(),
+            sync: false,
+            timeout: Duration::from_secs(2),
+        };
+        assert_eq!(
+            source
+                .read_with(Path::new(&executable))
+                .unwrap()
+                .field("password")
+                .unwrap()
+                .as_str(),
+            "fixture-password"
+        );
+    }
+
+    fn fs_fixture(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 
     #[test]

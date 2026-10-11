@@ -7,7 +7,7 @@ use std::{
     os::fd::AsRawFd,
     os::unix::process::CommandExt,
     path::Path,
-    process::{Command, ExitStatus},
+    process::{Command, ExitStatus, Stdio},
     sync::{Arc, Mutex, Weak},
     time::Duration,
 };
@@ -94,6 +94,12 @@ fn swap_disabled_at(root: &Path, relative: &str) -> Result<bool> {
 /// Reexecute the current public command in a no-swap user scope before collecting
 /// credentials. None means the kernel already enforces the required protection.
 pub fn enter_scope() -> Result<Option<ExitStatus>> {
+    enter_scope_with_input(None)
+}
+
+/// Reexecute a public command, replaying only public configuration on stdin.
+/// The child verifies its effective kernel limit before admitting credentials.
+pub(crate) fn enter_scope_with_input(input: Option<&[u8]>) -> Result<Option<ExitStatus>> {
     if swap_disabled()? {
         return Ok(None);
     }
@@ -101,7 +107,8 @@ pub fn enter_scope() -> Result<Option<ExitStatus>> {
         std::env::var_os("SECRET_MANAGER_SCOPE_ATTEMPT").is_none(),
         "no-swap credential scope did not establish its kernel limit"
     );
-    let status = Command::new("systemd-run")
+    let mut scope = Command::new("systemd-run");
+    scope
         .args([
             "--user",
             "--scope",
@@ -113,9 +120,34 @@ pub fn enter_scope() -> Result<Option<ExitStatus>> {
         .arg(std::env::current_exe().context("resolve credential command")?)
         .args(std::env::args_os().skip(1))
         .env("SECRET_MANAGER_SCOPE_ATTEMPT", "1")
-        .status()
-        .context("start no-swap credential scope")?;
-    Ok(Some(status))
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::inherit()
+        });
+    if input.is_some() {
+        scope.env("SECRET_MANAGER_SYNC_REPLAY", "1");
+    }
+    run_scope(&mut scope, input).map(Some)
+}
+
+fn run_scope(command: &mut Command, input: Option<&[u8]>) -> Result<ExitStatus> {
+    struct Child(std::process::Child);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut child = Child(command.spawn().context("start no-swap credential scope")?);
+    if let Some(input) = input {
+        use std::io::Write;
+        let mut stdin = child.0.stdin.take().context("scope stdin unavailable")?;
+        stdin
+            .write_all(input)
+            .context("replay public sync configuration to scope")?;
+    }
+    child.0.wait().context("wait for no-swap credential scope")
 }
 
 impl CredentialProtection {

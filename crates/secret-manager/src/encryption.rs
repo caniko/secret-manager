@@ -109,7 +109,9 @@ pub(crate) fn existing_ciphertext(path: &Path) -> Result<Vec<u8>> {
         .take((MAX_BYTES + 1) as u64)
         .read_to_end(&mut bytes)?;
     ensure!(
-        bytes.len() <= MAX_BYTES && bytes.starts_with(b"age-encryption.org/v1\n"),
+        bytes.len() >= 64
+            && bytes.len() <= MAX_BYTES
+            && bytes.starts_with(b"age-encryption.org/v1\n"),
         "rotation source is not a supported age ciphertext"
     );
     Ok(bytes)
@@ -207,7 +209,7 @@ mod tests {
     fn failed_or_malformed_encryption_preserves_existing_source_and_symlinks() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("credential.age");
-        let previous = b"age-encryption.org/v1\nprevious-ciphertext";
+        let previous = b"age-encryption.org/v1\nprevious-ciphertext-padded-above-minimum-supported-age-file-size";
         fs::write(&path, previous).unwrap();
         for script in ["cat >/dev/null; echo fixture-secret >&2; exit 1", "cat"] {
             let encryptor = backend(root.path(), script);
@@ -235,13 +237,39 @@ mod tests {
     fn concurrent_source_changes_are_not_clobbered() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("credential.age");
-        let previous = b"age-encryption.org/v1\nold-ciphertext";
-        let changed = b"age-encryption.org/v1\nconcurrent-ciphertext";
+        let previous =
+            b"age-encryption.org/v1\nold-ciphertext-padded-above-minimum-supported-age-file-size";
+        let changed = b"age-encryption.org/v1\nconcurrent-ciphertext-padded-above-minimum-supported-age-file-size";
         fs::write(&path, changed).unwrap();
         let output = b"age-encryption.org/v1\nnew-ciphertext";
         assert!(persist(&path, output, Some(previous)).is_err());
         assert!(persist(&path, output, None).is_err());
         assert_eq!(fs::read(&path).unwrap(), changed);
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn truncated_rotation_sources_are_preserved_before_backend_execution() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("credential.age");
+        let called = root.path().join("called");
+        let encryptor = backend(
+            root.path(),
+            &format!(
+                "touch '{}'\ncat >/dev/null\nprintf 'age-encryption.org/v1\\n%080d' 0",
+                called.display()
+            ),
+        );
+        for length in [21, 30, 63] {
+            let mut torn = b"age-encryption.org/v1\n".to_vec();
+            torn.resize(length, b'x');
+            fs::write(&path, &torn).unwrap();
+            assert!(encryptor.encrypt_replace(&path, b"replacement").is_err());
+            assert_eq!(fs::read(&path).unwrap(), torn);
+            assert!(
+                !called.exists(),
+                "damaged source reached the encryption backend"
+            );
+        }
     }
 }

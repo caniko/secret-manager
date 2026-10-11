@@ -69,7 +69,9 @@ and reads back destination metadata afterward; it never creates an environment o
 falls back to repository scope. Values are passed to `gh` on stdin.
 
 Encrypted sync acquires credential protection before resolving identities or
-decrypting: swap must be disabled in the handler's cgroup and an active logind
+decrypting: it reexecutes the current frontend in a no-swap user scope when needed,
+replaying the filtered public configuration on stdin with the frontend's original
+arguments. The child verifies that swap is disabled in its effective cgroup; an active logind
 sleep inhibitor must be held through upload, readback, pruning and state commit.
 Missing protection fails before those effects. Cached plaintext and temporary
 copies are zeroized when the handler exits. GitHub input helpers use bounded,

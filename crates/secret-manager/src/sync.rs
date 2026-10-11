@@ -125,6 +125,12 @@ impl SyncArgs {
 
         with_sync_protection(
             &doc,
+            || {
+                // The original stdin may already be consumed. Replay the exact
+                // filtered public document, preserving CLI policy and state.
+                let input = serde_json::to_vec(&doc)?;
+                crate::protection::enter_scope_with_input(Some(&input))
+            },
             crate::protection::CredentialProtection::acquire,
             || {
                 let decrypt_session = if document_needs_decrypt_session(&doc) {
@@ -183,6 +189,16 @@ impl SyncArgs {
     }
 
     fn load_document(&self) -> Result<SyncDocument> {
+        if std::env::var_os("SECRET_MANAGER_SYNC_REPLAY").is_some_and(|value| value == "1")
+            && std::env::var_os("SECRET_MANAGER_SCOPE_ATTEMPT").is_some_and(|value| value == "1")
+        {
+            // Embedding frontends own their argv. Preserve it unchanged and
+            // replay public configuration instead of rereading a consumed stdin
+            // or mutable file/flake. Kernel protection is still checked below.
+            let mut input = String::new();
+            std::io::stdin().read_to_string(&mut input)?;
+            return Ok(SyncDocument::from_json(&input)?);
+        }
         let doc = match &self.config {
             Some(path) => {
                 ui::step(format!("reading sync targets from {}", path.display()));
@@ -942,15 +958,20 @@ pub(crate) fn run_gh_command_with_input(command: &mut Command, value: &str) -> R
     Ok(())
 }
 
-fn with_sync_protection<G, T>(
+fn with_sync_protection<G>(
     doc: &SyncDocument,
+    enter_scope: impl FnOnce() -> Result<Option<std::process::ExitStatus>>,
     acquire: impl FnOnce() -> Result<G>,
-    apply: impl FnOnce() -> Result<T>,
-) -> Result<T> {
+    apply: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     // Acquire before identity resolution/decryption and retain across upload,
     // verification, pruning and state commit. Planning and public variables
     // do not enter this credential-handler boundary.
     let _guard = if document_needs_decrypt_session(doc) {
+        if let Some(status) = enter_scope()? {
+            anyhow::ensure!(status.success(), "scoped sync failed with {status}");
+            return Ok(());
+        }
         Some(acquire()?)
     } else {
         None
@@ -1127,6 +1148,7 @@ mod tests {
         let effects = Cell::new(0);
         let result = with_sync_protection(
             &doc,
+            || Ok(None),
             || -> Result<()> { bail!("protection unavailable") },
             || {
                 effects.set(effects.get() + 1);
@@ -1150,6 +1172,7 @@ mod tests {
         for fail in [false, true] {
             let result = with_sync_protection(
                 &doc,
+                || Ok(None),
                 || {
                     held.set(true);
                     Ok(Guard(held.clone()))
@@ -1175,10 +1198,86 @@ mod tests {
         assert!(
             with_sync_protection(
                 &public,
+                || -> Result<Option<std::process::ExitStatus>> {
+                    panic!("public variable entered a credential scope")
+                },
                 || -> Result<()> { panic!("public variable acquired a credential inhibitor") },
                 || Ok(())
             )
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn encrypted_sync_enters_scope_before_admitting_plaintext_effects() {
+        use std::{cell::Cell, os::unix::process::ExitStatusExt};
+        let doc = SyncDocument::from_json(r#"{"hosts":[{"targets":{"token":{"secret":"token.age","name":"TOKEN","github":["caniko/demo"]}}}]}"#).unwrap();
+        let scoped = Cell::new(false);
+        let applied = Cell::new(false);
+        with_sync_protection(
+            &doc,
+            || {
+                scoped.set(true);
+                Ok(None)
+            },
+            || -> Result<()> {
+                assert!(
+                    scoped.get(),
+                    "decryption protection was acquired outside the credential scope"
+                );
+                Ok(())
+            },
+            || {
+                applied.set(true);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(applied.get());
+        for code in [0, 1] {
+            let result = with_sync_protection(
+                &doc,
+                || Ok(Some(std::process::ExitStatus::from_raw(code << 8))),
+                || -> Result<()> { panic!("parent decrypted after child scope execution") },
+                || {
+                    panic!("parent duplicated scoped upload");
+                },
+            );
+            assert_eq!(result.is_ok(), code == 0);
+        }
+        assert!(
+            with_sync_protection(
+                &doc,
+                || bail!("scope unavailable"),
+                || -> Result<()> { panic!("scope failure admitted decryption") },
+                || Ok(())
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn scoped_sync_replays_filtered_destinations() {
+        let doc = SyncDocument::from_json(FIXTURE).unwrap();
+        let mut doc = filter_document_targets(doc, &["my-app-token".into()]).unwrap();
+        doc.hosts[0]
+            .targets
+            .get_mut("my-app-token")
+            .unwrap()
+            .github_environments
+            .push(crate::sync_targets::GithubEnvironment {
+                repository: "caniko/demo".into(),
+                environment: "production".into(),
+            });
+        let records = desired_records(&doc).unwrap();
+        let input = serde_json::to_string(&doc).unwrap();
+        assert_eq!(
+            desired_records(&SyncDocument::from_json(&input).unwrap()).unwrap(),
+            records
+        );
+        assert!(
+            !input.contains("deploy-key"),
+            "scoped child regained a filtered target"
         );
     }
 

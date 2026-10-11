@@ -342,6 +342,15 @@ pub fn stage_and_rekey(
 /// position of any non-local entries (e.g. `../../shared/foo.nix`).
 pub fn splice_import(default_nix: &Path, slug: &str) -> Result<()> {
     let content = fs::read_to_string(default_nix)?;
+    let out = spliced_import(&content, default_nix, slug)?;
+    if out != content {
+        fs::write(default_nix, out)?;
+    }
+    Ok(())
+}
+
+/// Prepare exactly the edit that installation will perform, without effects.
+pub(crate) fn spliced_import(content: &str, default_nix: &Path, slug: &str) -> Result<String> {
     let new_entry = format!("./{slug}.nix");
 
     let open_idx = content
@@ -372,7 +381,7 @@ pub fn splice_import(default_nix: &Path, slug: &str) -> Result<()> {
         .collect();
 
     if entries.iter().any(|e| e == &new_entry) {
-        return Ok(());
+        return Ok(content.to_owned());
     }
     entries.push(new_entry.clone());
 
@@ -398,8 +407,7 @@ pub fn splice_import(default_nix: &Path, slug: &str) -> Result<()> {
     out.push_str(&content[..inner_start]);
     out.push_str(&rebuilt);
     out.push_str(&content[close_idx..]);
-    fs::write(default_nix, out)?;
-    Ok(())
+    Ok(out)
 }
 
 pub struct TempDir {

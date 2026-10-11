@@ -539,6 +539,17 @@ fn validate_module_destinations(repo_root: &Path, modules: &[RenderedModule]) ->
                 default_nix.display()
             );
         }
+        let slug = module
+            .path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .ok_or_else(|| {
+                anyhow!(
+                    "generated module path has no UTF-8 stem: {}",
+                    module.path.display()
+                )
+            })?;
+        crate::io::spliced_import(&fs::read_to_string(&default_nix)?, &default_nix, slug)?;
     }
     Ok(())
 }

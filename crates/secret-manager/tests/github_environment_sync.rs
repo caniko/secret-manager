@@ -1,6 +1,43 @@
 use secret_manager::sync_state::{SyncState, desired_records, stale_records};
 use secret_manager::sync_targets::SyncDocument;
 
+#[test]
+fn scoped_sync_replay_preserves_configuration_and_target_selection() {
+    use std::{
+        io::Write,
+        process::{Command, Stdio},
+    };
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("flake.nix"), "{}\n").unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_secret-manager"))
+        .args([
+            "sync",
+            "--config",
+            "already-consumed",
+            "--target",
+            "publisher",
+            "--check",
+        ])
+        .env("SECRET_MANAGER_SYNC_REPLAY", "1")
+        .env("SECRET_MANAGER_SCOPE_ATTEMPT", "1")
+        .current_dir(root.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(br#"{"hosts":[{"targets":{"publisher":{"secret":"publisher.age","name":"TOKEN","githubEnvironments":[{"repository":"caniko/demo","environment":"simit-crates-io"}]},"other":{"secret":"other.age","name":"OTHER","github":["caniko/demo"]}}}]}"#).unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let plan = String::from_utf8(output.stdout).unwrap();
+    assert!(plan.contains("simit-crates-io"));
+    assert!(!plan.contains("other.age"));
+}
+
 fn document(target: serde_json::Value) -> SyncDocument {
     SyncDocument::from_json(
         &serde_json::json!({"hosts":[{"targets":{"publisher":target}}]}).to_string(),

@@ -14,6 +14,65 @@ fn executable(path: &Path, text: &str) {
 }
 
 #[test]
+fn invalid_module_splice_cannot_open_vault_or_install_ciphertext() {
+    let root = tempfile::tempdir().unwrap();
+    let bin = root.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let module_dir = root.path().join("home/user/can/repositories");
+    fs::create_dir_all(&module_dir).unwrap();
+    let default = module_dir.join("default.nix");
+    let called = root.path().join("vault-opened");
+    executable(
+        &bin.join("rbw"),
+        &format!("touch '{}'\nprintf '%s' '{ITEM}'", called.display()),
+    );
+    executable(
+        &bin.join("encryptor"),
+        "cat >/dev/null; printf 'age-encryption.org/v1\\n%080d' 0",
+    );
+    for content in ["{ ... }: {}\n", "{ imports = [\n"] {
+        fs::write(&default, content).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_secret-manager"))
+            .args([
+                "hm",
+                "file",
+                "--user",
+                "can",
+                "--name",
+                "account",
+                "--file",
+                ".config/account",
+                "--from-rbw",
+                ID,
+                "--no-stage",
+                "--no-rekey",
+            ])
+            .current_dir(root.path())
+            .stdin(Stdio::null())
+            .env("SECRET_MANAGER_AGE_ENCRYPTOR", bin.join("encryptor"))
+            .env(
+                "PATH",
+                format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+            )
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "malformed module wiring was accepted"
+        );
+        assert!(!called.exists(), "invalid module wiring opened the vault");
+        assert!(
+            !root
+                .path()
+                .join("age/secrets/users/can/account.age")
+                .exists()
+        );
+        assert!(!module_dir.join("account.nix").exists());
+        assert_eq!(fs::read_to_string(&default).unwrap(), content);
+    }
+}
+
+#[test]
 fn cli_import_rotation_and_failure_preservation_use_only_encrypted_sources() {
     let root = tempfile::tempdir().unwrap();
     let bin = root.path().join("bin");
