@@ -37,14 +37,25 @@ pub(super) struct State {
 pub(super) struct Transaction {
     pub directory: PathBuf,
     pub state: State,
-    _lock: File,
+    _lock: ExclusiveLock,
 }
 
-impl Drop for Transaction {
+/// Explicitly release the owner's shared open file description before close.
+/// Concurrent helper forks may retain that description until their next exec.
+pub(super) struct ExclusiveLock(File);
+
+impl ExclusiveLock {
+    pub(super) fn acquire(file: File) -> std::io::Result<Self> {
+        try_lock_exclusive(&file)?;
+        Ok(Self(file))
+    }
+}
+
+impl Drop for ExclusiveLock {
     fn drop(&mut self) {
         // Close alone leaves a flock held by a helper's inherited open file
         // description until exec. Release this owner's lock before closing it.
-        let _ = flock(&self._lock, libc::LOCK_UN);
+        let _ = flock(&self.0, libc::LOCK_UN);
     }
 }
 
@@ -90,7 +101,7 @@ impl Transaction {
             .custom_flags(libc::O_NOFOLLOW)
             .open(directory.join("lock"))?;
         private_metadata(&directory.join("lock"), false)?;
-        try_lock_exclusive(&lock).context("GitHub App transaction is busy")?;
+        let lock = ExclusiveLock::acquire(lock).context("GitHub App transaction is busy")?;
         let policy_sha256 = sha256(&serde_json::to_vec(config)?);
         let path = directory.join("state.json");
         let state = if path.exists() {
@@ -262,7 +273,7 @@ mod tests {
         let transaction = Transaction::open(&directory, root.path(), &config).unwrap();
         // A concurrent helper can inherit the open file description between
         // fork and exec, even though Rust opens the descriptor CLOEXEC.
-        let inherited = transaction._lock.try_clone().unwrap();
+        let inherited = transaction._lock.0.try_clone().unwrap();
         assert!(Transaction::open(&directory, root.path(), &config).is_err());
         drop(transaction);
         let reopened = Transaction::open(&directory, root.path(), &config).unwrap();
