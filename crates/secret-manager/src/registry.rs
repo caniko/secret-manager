@@ -131,6 +131,12 @@ pub struct SyncTarget {
     pub github: Vec<String>,
     #[serde(
         default,
+        deserialize_with = "null_to_empty_environments",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub github_environments: Vec<crate::sync_targets::GithubEnvironment>,
+    #[serde(
+        default,
         deserialize_with = "null_to_empty_vec",
         skip_serializing_if = "Vec::is_empty"
     )]
@@ -517,6 +523,21 @@ fn render_sync(out: &mut String, sync: &SyncTarget, level: usize) {
     if !sync.github.is_empty() {
         render_string_list_field(out, "github", &sync.github, level + 1);
     }
+    if !sync.github_environments.is_empty() {
+        render_field(out, "githubEnvironments", level + 1, |out| {
+            out.push_str("[\n");
+            for destination in &sync.github_environments {
+                indent(out, level + 2);
+                out.push_str("{\n");
+                render_string_field(out, "repository", &destination.repository, level + 3);
+                render_string_field(out, "environment", &destination.environment, level + 3);
+                indent(out, level + 2);
+                out.push_str("}\n");
+            }
+            indent(out, level + 1);
+            out.push(']');
+        });
+    }
     if !sync.codeberg_orgs.is_empty() {
         render_string_list_field(out, "codebergOrgs", &sync.codeberg_orgs, level + 1);
     }
@@ -621,6 +642,18 @@ where
     Ok(Option::<Vec<String>>::deserialize(deserializer)?.unwrap_or_default())
 }
 
+fn null_to_empty_environments<'de, D>(
+    deserializer: D,
+) -> Result<Vec<crate::sync_targets::GithubEnvironment>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(
+        Option::<Vec<crate::sync_targets::GithubEnvironment>>::deserialize(deserializer)?
+            .unwrap_or_default(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -672,6 +705,28 @@ mod tests {
     }
 
     #[test]
+    fn environment_registry_bindings_round_trip_and_render_without_loss() {
+        let sync: SyncTarget = serde_json::from_value(serde_json::json!({
+            "target":"publisher", "name":"TOKEN", "githubEnvironments":[{"repository":"caniko/demo", "environment":"prod/quoted\"name"}]
+        })).unwrap();
+        let encoded = serde_json::to_value(&sync).unwrap();
+        assert_eq!(
+            encoded["githubEnvironments"][0]["environment"],
+            "prod/quoted\"name"
+        );
+        let mut nix = String::new();
+        render_sync(&mut nix, &sync, 0);
+        assert!(nix.contains("githubEnvironments = ["));
+        assert!(nix.contains("repository = \"caniko/demo\";"));
+        assert!(nix.contains("environment = \"prod/quoted\\\"name\";"));
+        let omitted: SyncTarget = serde_json::from_value(
+            serde_json::json!({"target":"legacy", "name":"TOKEN", "githubEnvironments":null}),
+        )
+        .unwrap();
+        assert!(omitted.github_environments.is_empty());
+    }
+
+    #[test]
     fn render_sync_includes_codefloe_and_github() {
         let sync = SyncTarget {
             target: "ci-token".to_string(),
@@ -680,6 +735,7 @@ mod tests {
             codeberg: Vec::new(),
             codefloe: vec!["caniko/codefloe-repo".to_string()],
             github: vec!["caniko/github-repo".to_string()],
+            github_environments: Vec::new(),
             codeberg_orgs: Vec::new(),
             host: default_host(),
         };

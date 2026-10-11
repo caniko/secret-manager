@@ -39,6 +39,9 @@ pub struct SyncTarget {
     /// GitHub repositories (owner/repo) to push to.
     pub github: Vec<String>,
 
+    /// GitHub environment destinations; never falls back to repository scope.
+    pub github_environments: Vec<GithubEnvironment>,
+
     /// Codeberg/Forgejo organizations to push to at account scope.
     pub codeberg_orgs: Vec<String>,
 
@@ -83,6 +86,58 @@ impl SyncValue {
     }
 }
 
+/// An existing GitHub Actions environment in one repository.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GithubEnvironment {
+    pub repository: String,
+    pub environment: String,
+}
+
+impl GithubEnvironment {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let (owner, repo) = self.repository.split_once('/').ok_or_else(|| {
+            anyhow::anyhow!("GitHub environment repository must be in owner/repo form")
+        })?;
+        if [owner, repo].iter().any(|part| {
+            part.is_empty()
+                || *part == "."
+                || *part == ".."
+                || part.starts_with('-')
+                || !part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        }) {
+            anyhow::bail!("GitHub environment repository must be in owner/repo form");
+        }
+        if self.environment.trim().is_empty()
+            || matches!(self.environment.as_str(), "." | "..")
+            || self.environment.chars().count() > 255
+            || self.environment.chars().any(char::is_control)
+        {
+            anyhow::bail!(
+                "GitHub environment name must be nonblank, at most 255 characters, and contain no control characters"
+            );
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn validate_github_environment_value_name(name: &str) -> anyhow::Result<()> {
+    if name.is_empty()
+        || name.as_bytes()[0].is_ascii_digit()
+        || name.to_ascii_uppercase().starts_with("GITHUB_")
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        anyhow::bail!(
+            "GitHub environment secret or variable name must be an identifier without the reserved GITHUB_ prefix"
+        );
+    }
+    Ok(())
+}
+
 impl SyncTarget {
     /// Repository destinations, normalized to the API and host that serve them.
     pub fn repo_destinations(&self) -> impl Iterator<Item = (Provider, &str, &str)> {
@@ -122,6 +177,8 @@ impl<'de> Deserialize<'de> for SyncTarget {
             codefloe: Vec<String>,
             #[serde(default)]
             github: Vec<String>,
+            #[serde(default, rename = "githubEnvironments")]
+            github_environments: Vec<GithubEnvironment>,
             #[serde(default, rename = "codebergOrgs")]
             codeberg_orgs: Vec<String>,
             #[serde(default, rename = "codebergUser")]
@@ -152,6 +209,7 @@ impl<'de> Deserialize<'de> for SyncTarget {
             codeberg: raw.codeberg,
             codefloe: raw.codefloe,
             github: raw.github,
+            github_environments: raw.github_environments,
             codeberg_orgs: raw.codeberg_orgs,
             codeberg_user: raw.codeberg_user,
             host: raw.host,

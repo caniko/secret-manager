@@ -74,6 +74,33 @@
         example = ["caniko/my-repo"];
       };
 
+      githubEnvironments = lib.mkOption {
+        type = lib.types.listOf (lib.types.submodule {
+          options = {
+            repository = lib.mkOption {
+              type = lib.types.str;
+              description = "GitHub repository in owner/repo form.";
+            };
+            environment = lib.mkOption {
+              type = lib.types.str;
+              description = "Existing GitHub Actions environment name.";
+            };
+          };
+        });
+        default = [];
+        description = ''
+          GitHub environment-scoped secret or variable destinations. Environment
+          creation and protection policy are operator-owned. Sync requires the
+          environment to exist and never falls back to repository scope.
+        '';
+        example = [
+          {
+            repository = "caniko/my-repo";
+            environment = "production";
+          }
+        ];
+      };
+
       codebergOrgs = lib.mkOption {
         type = lib.types.listOf lib.types.str;
         default = [];

@@ -65,7 +65,7 @@ pub struct SyncArgs {
     pub verbose: bool,
 
     /// Path to the sync state TOML file.
-    /// Defaults to <secret-store>/.secret-manager/sync-state.toml.
+    /// Defaults to `<secret-store>/.secret-manager/sync-state.toml`.
     #[arg(long, value_name = "PATH")]
     pub state: Option<PathBuf>,
 }
@@ -564,6 +564,7 @@ fn push_managed_record(record: &ManagedRecord, value: &str) -> Result<()> {
 
 fn push_forgejo_record(record: &ManagedRecord, value: &str) -> Result<()> {
     match record.scope {
+        Scope::Environment => bail!("Forgejo environment sync is not supported"),
         Scope::Repo => {
             let repo = record_repo(record)?;
             match record.kind {
@@ -611,14 +612,111 @@ fn push_forgejo_record(record: &ManagedRecord, value: &str) -> Result<()> {
 }
 
 fn push_github_record(record: &ManagedRecord, value: &str) -> Result<()> {
-    if record.scope != Scope::Repo {
-        bail!("GitHub supports repository sync targets only");
+    let args = github_record_args(record, "set")?;
+    if record.scope == Scope::Environment {
+        // Never implicitly create an unprotected environment during secret
+        // synchronization. Enrollment and branch policy precede this data sync.
+        check_github_resource(
+            &github_environment_endpoint(record, None)?,
+            required_field(record.environment.as_deref(), record, "environment")?,
+        )?;
+        run_gh_with_input(&args.iter().map(String::as_str).collect::<Vec<_>>(), value)?;
+        check_github_resource(
+            &github_environment_endpoint(record, Some(record.kind))?,
+            &record.name,
+        )?;
+        return Ok(());
     }
     let repo = record_repo(record)?;
     match record.kind {
         ManagedKind::Secret => forge::push_github_secret(&repo, &record.name, value),
         ManagedKind::Variable => push_github_variable(&repo, &record.name, value),
     }
+}
+
+fn github_record_args(record: &ManagedRecord, action: &str) -> Result<Vec<String>> {
+    if record.provider != Provider::Github || record.host != "github.com" {
+        bail!("GitHub sync record has a foreign provider or host");
+    }
+    let repo = record_repo(record)?;
+    let kind = match record.kind {
+        ManagedKind::Secret => "secret",
+        ManagedKind::Variable => "variable",
+    };
+    let mut args = vec![
+        kind.into(),
+        action.into(),
+        record.name.clone(),
+        "--repo".into(),
+        format!("github.com/{repo}"),
+    ];
+    match record.scope {
+        Scope::Repo if record.environment.is_none() => {}
+        Scope::Environment => {
+            let environment = required_field(record.environment.as_deref(), record, "environment")?;
+            crate::sync_targets::GithubEnvironment {
+                repository: repo,
+                environment: environment.into(),
+            }
+            .validate()?;
+            crate::sync_targets::validate_github_environment_value_name(&record.name)?;
+            args.push(format!("--env={environment}"));
+        }
+        _ => bail!("GitHub sync supports repository or environment scope only"),
+    }
+    Ok(args)
+}
+
+fn github_environment_endpoint(
+    record: &ManagedRecord,
+    kind: Option<ManagedKind>,
+) -> Result<String> {
+    // REST path segments need encoding even when gh's --env argument safely
+    // accepts spaces, slashes, quotes or other punctuation.
+    let mut url = url::Url::parse("https://api.github.com/")?;
+    let mut segments = url
+        .path_segments_mut()
+        .map_err(|_| anyhow!("invalid GitHub API URL"))?;
+    segments.extend([
+        "repos",
+        required_field(record.owner.as_deref(), record, "owner")?,
+        required_field(record.repo.as_deref(), record, "repo")?,
+        "environments",
+        required_field(record.environment.as_deref(), record, "environment")?,
+    ]);
+    if let Some(kind) = kind {
+        segments
+            .push(match kind {
+                ManagedKind::Secret => "secrets",
+                ManagedKind::Variable => "variables",
+            })
+            .push(&record.name);
+    }
+    drop(segments);
+    Ok(url.path().trim_start_matches('/').to_owned())
+}
+
+fn check_github_resource(endpoint: &str, expected_name: &str) -> Result<()> {
+    let output = Command::new("gh")
+        .args(["api", endpoint, "--hostname", "github.com"])
+        .output()
+        .map_err(|e| anyhow!("failed to spawn gh: {e}"))?;
+    if !output.status.success() {
+        bail!(
+            "GitHub environment resource verification failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let resource: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .context("GitHub environment resource has no valid JSON metadata")?;
+    if resource
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .is_none_or(|name| name.to_lowercase() != expected_name.to_lowercase())
+    {
+        bail!("GitHub environment resource name does not match the selected destination");
+    }
+    Ok(())
 }
 
 fn push_crow_record(record: &ManagedRecord, value: &str) -> Result<()> {
@@ -933,23 +1031,17 @@ fn delete_forgejo_record(record: &ManagedRecord) -> Result<()> {
 }
 
 fn delete_github_record(record: &ManagedRecord) -> Result<()> {
-    if record.scope != Scope::Repo {
-        bail!("GitHub supports repository sync targets only");
-    }
-    let repo = record_repo(record)?;
-    let kind = match record.kind {
-        ManagedKind::Secret => "secret",
-        ManagedKind::Variable => "variable",
-    };
+    let args = github_record_args(record, "delete")?;
     let output = Command::new("gh")
-        .args([kind, "delete", &record.name, "--repo", &repo])
+        .args(&args)
         .output()
         .map_err(|e| anyhow!("failed to spawn gh: {e}"))?;
     if output.status.success() || github_not_found(&output.stderr) {
         return Ok(());
     }
     bail!(
-        "gh {kind} delete --repo {repo} exited with status {}: {}",
+        "gh {} exited with status {}: {}",
+        args.join(" "),
         output.status,
         String::from_utf8_lossy(&output.stderr).trim()
     )
@@ -971,6 +1063,7 @@ enum DeleteAction<'a> {
 
 fn delete_action_for(record: &ManagedRecord) -> Result<DeleteAction<'_>> {
     match (record.scope, record.kind) {
+        (Scope::Environment, _) => bail!("Forgejo environment sync is not supported"),
         (Scope::Repo, ManagedKind::Secret) => Ok(DeleteAction::RepoSecret {
             owner: required_field(record.owner.as_deref(), record, "owner")?,
             repo: required_field(record.repo.as_deref(), record, "repo")?,
@@ -1534,6 +1627,50 @@ mod tests {
         assert!(!args.iter().any(|arg| arg.contains("secret-value")));
     }
 
+    #[test]
+    fn environment_secret_arguments_never_fall_back_to_repository_or_foreign_host() {
+        let record = ManagedRecord {
+            provider: Provider::Github,
+            host: "github.com".into(),
+            scope: Scope::Environment,
+            environment: Some("--prod / '${not-shell}'".into()),
+            ..repo_record(ManagedKind::Secret)
+        };
+        let args = github_record_args(&record, "set").unwrap();
+        assert_eq!(
+            args,
+            [
+                "secret",
+                "set",
+                "TOKEN",
+                "--repo",
+                "github.com/caniko/repo",
+                "--env=--prod / '${not-shell}'"
+            ]
+        );
+        assert!(
+            github_environment_endpoint(&record, Some(ManagedKind::Secret))
+                .unwrap()
+                .ends_with("/secrets/TOKEN")
+        );
+        let missing = ManagedRecord {
+            environment: None,
+            ..record.clone()
+        };
+        assert!(github_record_args(&missing, "delete").is_err());
+        let wrong = ManagedRecord {
+            provider: Provider::Forgejo,
+            ..record.clone()
+        };
+        assert!(github_record_args(&wrong, "set").is_err());
+        assert!(delete_action_for(&record).is_err());
+        let mixed = ManagedRecord {
+            scope: Scope::Repo,
+            ..record
+        };
+        assert!(github_record_args(&mixed, "delete").is_err());
+    }
+
     fn repo_record(kind: ManagedKind) -> ManagedRecord {
         ManagedRecord {
             provider: Provider::Forgejo,
@@ -1542,6 +1679,7 @@ mod tests {
             owner: Some("caniko".to_string()),
             repo: Some("repo".to_string()),
             org: None,
+            environment: None,
             kind,
             name: "TOKEN".to_string(),
             target: "token".to_string(),
@@ -1557,6 +1695,7 @@ mod tests {
             owner: None,
             repo: None,
             org: Some("infra".to_string()),
+            environment: None,
             kind,
             name: "TOKEN".to_string(),
             target: "token".to_string(),
@@ -1572,6 +1711,7 @@ mod tests {
             owner: None,
             repo: None,
             org: None,
+            environment: None,
             kind,
             name: "TOKEN".to_string(),
             target: "token".to_string(),
