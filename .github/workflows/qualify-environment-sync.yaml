@@ -41,7 +41,27 @@ jobs:
           mkdir -p "$EVIDENCE"
           git rev-parse HEAD > "$EVIDENCE/revision"
           git rev-parse 'HEAD^{tree}' > "$EVIDENCE/tree"
-          git ls-files -z | sort -z | xargs -0 sha256sum -- > "$EVIDENCE/source.sha256"
+          EVIDENCE="$EVIDENCE" python3 - <<'PY'
+          import hashlib, os, pathlib, subprocess
+          root = pathlib.Path.cwd()
+          rows = []
+          for entry in subprocess.check_output(['git', 'ls-tree', '-r', '-z', 'HEAD']).split(b'\0'):
+              if not entry:
+                  continue
+              metadata, name = entry.split(b'\t', 1)
+              mode, kind, identity = metadata.split()
+              assert kind == b'blob'
+              path = root / os.fsdecode(name)
+              if mode == b'120000':
+                  data = os.fsencode(os.readlink(path))
+              else:
+                  assert mode in (b'100644', b'100755') and not path.is_symlink()
+                  data = path.read_bytes()
+              assert data == subprocess.check_output(['git', 'cat-file', 'blob', identity.decode()])
+              rows.append((name, hashlib.sha256(data).hexdigest()))
+          pathlib.Path(os.environ['EVIDENCE'], 'source.sha256').write_text(''.join(
+              checksum + '  ' + os.fsdecode(name) + '\n' for name, checksum in sorted(rows)))
+          PY
           git config --global --add url.https://github.com/.insteadOf ssh://git@github.com/
           git config --global --add url.https://github.com/.insteadOf git@github.com:
           nix develop -c cargo test --workspace --locked --jobs 2 2>&1 | tee "$EVIDENCE/tests.log"
