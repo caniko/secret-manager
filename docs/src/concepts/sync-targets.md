@@ -68,6 +68,17 @@ protection before syncing. Sync verifies the environment exists before writing
 and reads back destination metadata afterward; it never creates an environment or
 falls back to repository scope. Values are passed to `gh` on stdin.
 
+Encrypted sync acquires credential protection before resolving identities or
+decrypting: it reexecutes the current frontend in a no-swap user scope when needed,
+replaying the filtered public configuration on stdin with the frontend's original
+arguments. The child verifies that swap is disabled in its effective cgroup; an active logind
+sleep inhibitor must be held through upload, readback, pruning and state commit.
+Missing protection fails before those effects. Cached plaintext and temporary
+copies are zeroized when the handler exits. GitHub input helpers use bounded,
+redacted pipes, scrub credential-debug settings, inherit active inhibitors across
+exec and terminate/reap their process group on pipe or timeout failure. Public
+variables and read-only planning do not require a credential inhibitor.
+
 Repository and environment copies have distinct persisted identities. Environment
 names are case-insensitive, so a case-only rename does not schedule a destructive
 prune. Old repository entries remain stale until an explicit authorized `--prune`
@@ -75,20 +86,22 @@ after the replacement environment upload succeeds. Older binaries reject the new
 environment scope in persisted state; they cannot reinterpret it as a repository
 entry. Never reuse such a state file with an older Secret Manager.
 
-| Option         | Type          | Default          | Description                                  |
-| -------------- | ------------- | ---------------- | -------------------------------------------- |
-| `secret`       | `null or str` | `null`           | `.age` path pushed as an Actions secret      |
-| `source`       | `null or str` | `null`           | plaintext path pushed as an Actions variable |
-| `name`         | `str`         | required         | Actions secret/variable name                 |
-| `codeberg`     | `list of str` | `[]`             | `owner/repo` Forgejo repository targets      |
-| `codefloe`     | `list of str` | `[]`             | `owner/repo` Codefloe repository targets     |
-| `github`       | `list of str` | `[]`             | `owner/repo` GitHub repository targets       |
-| `codebergOrgs` | `list of str` | `[]`             | Forgejo organization/account-scope targets   |
-| `codebergUser` | `bool`        | `false`          | Forgejo authenticated-user account target    |
-| `host`         | `str`         | `"codeberg.org"` | Forge host for `codeberg*` token lookup      |
+| Option               | Type                                | Default          | Description                                  |
+| -------------------- | ----------------------------------- | ---------------- | -------------------------------------------- |
+| `secret`             | `null or str`                       | `null`           | `.age` path pushed as an Actions secret      |
+| `source`             | `null or str`                       | `null`           | plaintext path pushed as an Actions variable |
+| `name`               | `str`                               | required         | Actions secret/variable name                 |
+| `codeberg`           | `list of str`                       | `[]`             | `owner/repo` Forgejo repository targets      |
+| `codefloe`           | `list of str`                       | `[]`             | `owner/repo` Codefloe repository targets     |
+| `github`             | `list of str`                       | `[]`             | `owner/repo` GitHub repository targets       |
+| `githubEnvironments` | `list of {repository, environment}` | `[]`             | GitHub environment targets                   |
+| `codebergOrgs`       | `list of str`                       | `[]`             | Forgejo organization/account-scope targets   |
+| `codebergUser`       | `bool`                              | `false`          | Forgejo authenticated-user account target    |
+| `host`               | `str`                               | `"codeberg.org"` | Forge host for `codeberg*` token lookup      |
 
 Each target must set exactly one of `secret` or `source`.
-Codefloe and GitHub targets are repository-scoped; authenticate Codefloe with
+Codefloe targets are repository-scoped; GitHub supports repository and environment
+destinations. Authenticate Codefloe with
 `fj -H codefloe.com` and GitHub with `gh auth login`.
 
 ## Relation to mkSecret

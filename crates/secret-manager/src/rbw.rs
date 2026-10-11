@@ -1,0 +1,532 @@
+//! Read one Bitwarden item through rbw's private pipes, without a vault export.
+//!
+//! The raw JSON schema is rbw 1.15's DecryptedCipher. It includes password
+//! history and notes; typed deserialization intentionally ignores unselected
+//! fields and never forwards JSON/parser diagnostics containing secret values.
+use anyhow::{Context, Result, bail, ensure};
+use serde::{Deserialize, Deserializer};
+use std::{collections::BTreeMap, path::Path, process::Command, time::Duration};
+use zeroize::Zeroizing;
+
+use crate::credential_process::{
+    MAX_BYTES, capture_prompt_with_timeout, capture_with_timeout, disable_core_dumps,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RbwSource {
+    pub item_id: String,
+    pub field: String,
+    pub json_fields: BTreeMap<String, String>,
+    pub sync: bool,
+    pub timeout: Duration,
+}
+
+impl RbwSource {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            valid_uuid(&self.item_id),
+            "--from-rbw requires an exact Bitwarden item UUID"
+        );
+        ensure!(
+            !self.field.is_empty() && !self.field.chars().any(char::is_control),
+            "rbw field must be a nonempty field name"
+        );
+        ensure!(
+            self.json_fields.iter().all(|(key, field)| !key.is_empty()
+                && !field.is_empty()
+                && !key.chars().chain(field.chars()).any(char::is_control)),
+            "rbw JSON mappings require nonempty output and source field names"
+        );
+        ensure!(
+            self.json_fields.len() <= 64,
+            "rbw JSON documents support at most 64 selected fields"
+        );
+        ensure!(
+            !self.timeout.is_zero() && self.timeout <= Duration::from_secs(300),
+            "rbw timeout must be 1–300 seconds"
+        );
+        Ok(())
+    }
+
+    /// Read one consistent item snapshot. rbw handles unlocking through pinentry.
+    /// Sync is explicit: otherwise rbw reads its encrypted local cache.
+    pub fn read(&self) -> Result<RbwItem> {
+        self.read_with(Path::new("rbw"))
+    }
+
+    pub fn read_with(&self, executable: &Path) -> Result<RbwItem> {
+        self.validate()?;
+        disable_core_dumps()?;
+        if self.sync {
+            capture_prompt_with_timeout(Command::new(executable).arg("sync"), self.timeout)
+                .context("rbw sync failed; authenticate/unlock the vault before retrying")?;
+        }
+        let raw = capture_prompt_with_timeout(
+            Command::new(executable).args(["get", "--raw", "--", &self.item_id]),
+            self.timeout,
+        )
+        .context("rbw lookup failed; verify the item UUID and unlock the vault with rbw unlock")?;
+        RbwItem::from_json(&raw, &self.item_id)
+    }
+
+    pub fn payload(&self) -> Result<Zeroizing<Vec<u8>>> {
+        let item = self.read()?;
+        self.project(&item)
+    }
+
+    /// Project selected fields from one snapshot; applications can validate or
+    /// normalize their own schema before handing the bytes to StreamEncryptor.
+    pub fn project(&self, item: &RbwItem) -> Result<Zeroizing<Vec<u8>>> {
+        self.validate()?;
+        if self.json_fields.is_empty() {
+            let value = item.field(&self.field)?;
+            return Ok(Zeroizing::new(value.as_bytes().to_vec()));
+        }
+        let fields = self
+            .json_fields
+            .iter()
+            .map(|(name, field)| Ok((name, item.field(field)?)))
+            .collect::<Result<Vec<_>>>()?;
+        let borrowed = fields
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect::<BTreeMap<_, _>>();
+        let mut bytes = Zeroizing::new(vec![0; MAX_BYTES / 2]);
+        let length = {
+            let mut writer = std::io::Cursor::new(bytes.as_mut_slice());
+            serde_json::to_writer(&mut writer, &borrowed).map_err(|_| {
+                anyhow::anyhow!("selected rbw document exceeds size limit or cannot be encoded")
+            })?;
+            writer.position() as usize
+        };
+        bytes.truncate(length);
+        Ok(bytes)
+    }
+
+    /// Let an application-owned helper validate/normalize a projection from the
+    /// same snapshot, using private bounded pipes and redacted child diagnostics.
+    /// Arguments describe the helper protocol; never put credentials in them.
+    pub fn project_with_validator(
+        &self,
+        item: &RbwItem,
+        executable: &Path,
+        arguments: &[&str],
+    ) -> Result<Zeroizing<Vec<u8>>> {
+        ensure!(
+            executable.is_absolute() && executable.is_file(),
+            "credential validator must be an existing absolute executable path"
+        );
+        disable_core_dumps()?;
+        let projected = self.project(item)?;
+        let validated = capture_with_timeout(
+            Command::new(executable).args(arguments),
+            Some(&projected),
+            self.timeout,
+        )
+        .context("application credential validation failed; encrypted sources were not replaced")?;
+        ensure!(
+            !validated.is_empty() && validated.len() <= MAX_BYTES / 2,
+            "validated credential document must be nonempty and at most 512 KiB"
+        );
+        Ok(validated)
+    }
+}
+
+fn valid_uuid(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| {
+            if [8, 13, 18, 23].contains(&index) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
+}
+
+fn secret<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<Zeroizing<String>>, D::Error> {
+    Ok(Option::<String>::deserialize(deserializer)?.map(Zeroizing::new))
+}
+
+#[derive(Deserialize)]
+struct Login {
+    #[serde(default, deserialize_with = "secret")]
+    username: Option<Zeroizing<String>>,
+    #[serde(default, deserialize_with = "secret")]
+    password: Option<Zeroizing<String>>,
+    #[serde(default, deserialize_with = "secret")]
+    totp: Option<Zeroizing<String>>,
+}
+
+#[derive(Deserialize)]
+struct CustomField {
+    #[serde(default, deserialize_with = "secret")]
+    name: Option<Zeroizing<String>>,
+    #[serde(default, deserialize_with = "secret")]
+    value: Option<Zeroizing<String>>,
+}
+
+/// Secret-bearing snapshot: deliberately neither Debug nor Serialize.
+#[derive(Deserialize)]
+pub struct RbwItem {
+    id: String,
+    data: Option<Login>,
+    #[serde(default)]
+    fields: Vec<CustomField>,
+    #[serde(default, deserialize_with = "secret")]
+    notes: Option<Zeroizing<String>>,
+}
+
+impl RbwItem {
+    /// Validate rbw's response against the requested UUID, never accepting a
+    /// fuzzy name match. Only the selected item is decoded, never the full vault.
+    pub fn from_json(bytes: &[u8], expected_id: &str) -> Result<Self> {
+        ensure!(
+            valid_uuid(expected_id),
+            "expected Bitwarden item UUID is invalid"
+        );
+        ensure!(bytes.len() <= MAX_BYTES, "rbw item exceeds size limit");
+        let item: Self = serde_json::from_slice(bytes).map_err(|_| {
+            anyhow::anyhow!("invalid rbw item JSON; credential diagnostics suppressed")
+        })?;
+        ensure!(
+            item.id.eq_ignore_ascii_case(expected_id),
+            "rbw returned a different item UUID"
+        );
+        Ok(item)
+    }
+
+    /// `totp` selects the stored seed/URI, never a generated one-time code.
+    /// Prefix custom names with `custom:` to disambiguate built-in field names.
+    pub fn field(&self, name: &str) -> Result<Zeroizing<String>> {
+        let value = match name {
+            "username" => self.data.as_ref().and_then(|data| data.username.as_deref()),
+            "password" => self.data.as_ref().and_then(|data| data.password.as_deref()),
+            "totp" => self.data.as_ref().and_then(|data| data.totp.as_deref()),
+            "notes" => self.notes.as_deref(),
+            name => {
+                let name = name
+                    .strip_prefix("custom:")
+                    .context("custom rbw fields require the custom: prefix")?;
+                let mut matches = self
+                    .fields
+                    .iter()
+                    .filter(|field| field.name.as_deref().is_some_and(|value| value == name));
+                let value = matches.next().and_then(|field| field.value.as_deref());
+                if matches.next().is_some() {
+                    bail!("rbw custom field is ambiguous");
+                }
+                value
+            }
+        }
+        .context("selected rbw field is missing")?;
+        ensure!(!value.is_empty(), "selected rbw field is empty");
+        ensure!(
+            value.len() <= MAX_BYTES / 2,
+            "selected rbw field exceeds size limit"
+        );
+        Ok(Zeroizing::new(value.to_owned()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    const ID: &str = "12345678-1234-1234-1234-123456789abc";
+    const ITEM: &[u8] = br#"{"id":"12345678-1234-1234-1234-123456789abc","data":{"username":"fixture-user","password":"fixture-password","totp":"otpauth://totp/fixture?secret=GEZDGNBVGY3TQOJQ"},"fields":[{"name":"token","value":"fixture-token"}],"history":[{"password":"old-secret"}]}"#;
+
+    #[test]
+    fn raw_item_selects_exact_fields_and_stored_totp_seed() {
+        let item = RbwItem::from_json(ITEM, ID).unwrap();
+        assert_eq!(item.field("password").unwrap().as_str(), "fixture-password");
+        assert_eq!(item.field("username").unwrap().as_str(), "fixture-user");
+        assert!(item.field("totp").unwrap().starts_with("otpauth://totp/"));
+        assert_eq!(
+            item.field("custom:token").unwrap().as_str(),
+            "fixture-token"
+        );
+        assert!(item.field("history").is_err());
+        assert!(item.field("missing").is_err());
+    }
+
+    #[test]
+    fn custom_field_typos_require_the_explicit_prefix() {
+        let item = RbwItem::from_json(br#"{"id":"12345678-1234-1234-1234-123456789abc","data":{"password":"correct"},"fields":[{"name":"passwrod","value":"wrong"},{"name":"password","value":"custom"}]}"#, ID).unwrap();
+        assert!(item.field("passwrod").is_err());
+        assert_eq!(item.field("password").unwrap().as_str(), "correct");
+        assert_eq!(item.field("custom:passwrod").unwrap().as_str(), "wrong");
+        assert_eq!(item.field("custom:password").unwrap().as_str(), "custom");
+    }
+
+    #[test]
+    fn nonempty_whitespace_credentials_are_preserved_exactly() {
+        let item = RbwItem::from_json(br#"{"id":"11111111-1111-1111-1111-111111111111","data":{"username":"\t","password":" "},"notes":"\n","fields":[{"name":"token","value":" \t\n"}]}"#,
+            "11111111-1111-1111-1111-111111111111").unwrap();
+        for (name, value) in [
+            ("username", "\t"),
+            ("password", " "),
+            ("notes", "\n"),
+            ("custom:token", " \t\n"),
+        ] {
+            assert_eq!(item.field(name).unwrap().as_str(), value);
+        }
+        let empty = RbwItem::from_json(
+            br#"{"id":"11111111-1111-1111-1111-111111111111","data":{"password":""}}"#,
+            "11111111-1111-1111-1111-111111111111",
+        )
+        .unwrap();
+        assert!(empty.field("password").is_err());
+    }
+
+    #[test]
+    fn locked_vault_lookup_can_read_the_controlling_terminal() {
+        use std::os::{
+            fd::{AsRawFd, FromRawFd},
+            unix::process::CommandExt,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let executable = root.path().join("rbw-prompt");
+        fs_fixture(
+            &executable,
+            &format!(
+                "printf ready >'{}'\nIFS= read -r answer </dev/tty || exit 7\n[ \"$answer\" = unlock ] || exit 8\nprintf '%s' '{}'",
+                root.path().join("ready").display(),
+                std::str::from_utf8(ITEM).unwrap()
+            ),
+        );
+        let (mut master, mut slave) = (-1, -1);
+        // SAFETY: openpty initializes two descriptors with default termios.
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                )
+            },
+            0
+        );
+        // SAFETY: take unique ownership of the descriptors returned by openpty.
+        let mut master = unsafe { std::fs::File::from_raw_fd(master) };
+        let slave = unsafe { std::fs::File::from_raw_fd(slave) };
+        let fd = slave.as_raw_fd();
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "rbw::tests::terminal_lookup_fixture",
+                "--nocapture",
+            ])
+            .env("SECRET_MANAGER_RBW_TERMINAL_FIXTURE", &executable)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        // SAFETY: the child only performs async-signal-safe session/tty setup.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::setsid() < 0 || libc::ioctl(fd, libc::TIOCSCTTY, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !root.path().join("ready").exists() {
+            if std::time::Instant::now() >= deadline || child.try_wait().unwrap().is_some() {
+                let _ = child.kill();
+                let output = child.wait_with_output().unwrap();
+                panic!(
+                    "terminal fixture failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        use std::io::Write;
+        master.write_all(b"unlock\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
+    #[test]
+    fn terminal_lookup_fixture() {
+        let Some(executable) = std::env::var_os("SECRET_MANAGER_RBW_TERMINAL_FIXTURE") else {
+            return;
+        };
+        let source = RbwSource {
+            item_id: ID.into(),
+            field: "password".into(),
+            json_fields: BTreeMap::new(),
+            sync: false,
+            timeout: Duration::from_secs(2),
+        };
+        assert_eq!(
+            source
+                .read_with(Path::new(&executable))
+                .unwrap()
+                .field("password")
+                .unwrap()
+                .as_str(),
+            "fixture-password"
+        );
+    }
+
+    fn fs_fixture(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[test]
+    fn wrong_ids_invalid_json_missing_and_duplicate_fields_fail_closed() {
+        assert!(RbwItem::from_json(ITEM, "abcdefab-1234-1234-1234-123456789abc").is_err());
+        assert!(RbwItem::from_json(ITEM, "item name").is_err());
+        let error = RbwItem::from_json(b"{fixture-secret", ID).err().unwrap();
+        assert!(!format!("{error:#}").contains("fixture-secret"));
+        let item = RbwItem::from_json(br#"{"id":"12345678-1234-1234-1234-123456789abc","data":{"password":""},"fields":[{"name":"token","value":"one"},{"name":"token","value":"two"}]}"#, ID).unwrap();
+        assert!(item.field("password").is_err());
+        assert!(item.field("username").is_err());
+        assert!(item.field("custom:token").is_err());
+    }
+
+    #[test]
+    fn projection_is_one_selected_document_and_notes_support_secure_notes() {
+        let source = RbwSource {
+            item_id: ID.into(),
+            field: "password".into(),
+            json_fields: BTreeMap::from([
+                ("username".into(), "username".into()),
+                ("password".into(), "password".into()),
+                ("totpSecret".into(), "totp".into()),
+            ]),
+            sync: false,
+            timeout: Duration::from_secs(120),
+        };
+        let document = source
+            .project(&RbwItem::from_json(ITEM, ID).unwrap())
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&document).unwrap();
+        assert_eq!(value.as_object().unwrap().len(), 3);
+        assert_eq!(value["password"], "fixture-password");
+        assert!(
+            !std::str::from_utf8(&document)
+                .unwrap()
+                .contains("old-secret")
+        );
+        let note = RbwItem::from_json(
+            br#"{"id":"12345678-1234-1234-1234-123456789abc","data":null,"notes":"fixture-note"}"#,
+            ID,
+        )
+        .unwrap();
+        assert_eq!(note.field("notes").unwrap().as_str(), "fixture-note");
+        assert!(note.field("password").is_err());
+    }
+
+    #[test]
+    fn rbw_subprocess_uses_raw_uuid_lookup_and_redacts_failures() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("rbw-fixture");
+        let source = RbwSource {
+            item_id: ID.into(),
+            field: "password".into(),
+            json_fields: BTreeMap::new(),
+            sync: false,
+            timeout: Duration::from_secs(1),
+        };
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\n[ \"$*\" = 'get --raw -- {ID}' ] || exit 2\nprintf '%s' '{}'\n",
+                std::str::from_utf8(ITEM).unwrap()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            source
+                .read_with(&executable)
+                .unwrap()
+                .field("password")
+                .unwrap()
+                .as_str(),
+            "fixture-password"
+        );
+        std::fs::write(&executable, "#!/bin/sh\necho fixture-secret >&2\nexit 1\n").unwrap();
+        let error = source.read_with(&executable).err().unwrap();
+        assert!(!format!("{error:#}").contains("fixture-secret"));
+        std::fs::write(&executable, "#!/bin/sh\nsleep 10\n").unwrap();
+        assert!(source.read_with(&executable).is_err());
+    }
+
+    #[test]
+    fn application_validator_receives_only_projected_fields_over_stdin() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("validator");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\n[ \"$*\" = 'enroll --stdin --stdout' ] || exit 2\ncat\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let source = RbwSource {
+            item_id: ID.into(),
+            field: "password".into(),
+            json_fields: BTreeMap::from([
+                ("username".into(), "username".into()),
+                ("password".into(), "password".into()),
+            ]),
+            sync: false,
+            timeout: Duration::from_secs(1),
+        };
+        let item = RbwItem::from_json(ITEM, ID).unwrap();
+        let result = source
+            .project_with_validator(&item, &executable, &["enroll", "--stdin", "--stdout"])
+            .unwrap();
+        let document: serde_json::Value = serde_json::from_slice(&result).unwrap();
+        assert_eq!(document.as_object().unwrap().len(), 2);
+        assert_eq!(document["password"], "fixture-password");
+        assert!(!std::str::from_utf8(&result).unwrap().contains("old-secret"));
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn application_validator_rejects_unqualified_paths_and_redacts_failures() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("validator");
+        let source = RbwSource {
+            item_id: ID.into(),
+            field: "password".into(),
+            json_fields: BTreeMap::new(),
+            sync: false,
+            timeout: Duration::from_millis(150),
+        };
+        let item = RbwItem::from_json(ITEM, ID).unwrap();
+        assert!(
+            source
+                .project_with_validator(&item, Path::new("validator"), &[])
+                .is_err()
+        );
+        for script in [
+            "cat >/dev/null; echo fixture-password >&2; exit 1",
+            "cat >/dev/null; head -c 1100000 /dev/zero",
+            "cat >/dev/null; sleep 10",
+        ] {
+            std::fs::write(&executable, format!("#!/bin/sh\n{script}\n")).unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let error = source
+                .project_with_validator(&item, &executable, &[])
+                .unwrap_err();
+            assert!(!format!("{error:#}").contains("fixture-password"));
+        }
+    }
+}

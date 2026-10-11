@@ -438,6 +438,7 @@ fn interrupted_publication_resumes_from_real_age_ciphertext_without_replacing_so
         .unwrap();
     settle(&config, &mut transaction, &issued).unwrap();
     let mut calls = 0;
+    let mut inherited_publication_lock = None;
     let partial = Publication {
         common: &common,
         config: &config,
@@ -449,10 +450,37 @@ fn interrupted_publication_resumes_from_real_age_ciphertext_without_replacing_so
     .run(&FixtureApi::new(), |_, _, repo, _| {
         assert_eq!(repo, "caniko/paperclip");
         calls += 1;
+        if calls == 1 {
+            // A fork shares the open file description until exec, even though
+            // Rust opens the parent's lock with CLOEXEC. Retain that description
+            // deterministically while this publication returns through error.
+            use std::os::fd::FromRawFd;
+            let lock = store
+                .root
+                .join(&config.source)
+                .with_extension("publication-lock");
+            let descriptor = fs::read_dir("/proc/self/fd")
+                .unwrap()
+                .filter_map(|entry| {
+                    let entry = entry.ok()?;
+                    (fs::read_link(entry.path()).ok()? == lock)
+                        .then(|| entry.file_name().to_string_lossy().parse::<i32>().unwrap())
+                })
+                .next()
+                .expect("active publication lock descriptor");
+            // SAFETY: this publication owns the live descriptor; dup creates a
+            // new owned descriptor sharing its kernel open file description.
+            let duplicate = unsafe { libc::dup(descriptor) };
+            assert!(duplicate >= 0);
+            // SAFETY: take sole ownership of the successful dup result.
+            inherited_publication_lock = Some(unsafe { fs::File::from_raw_fd(duplicate) });
+            assert!(state::try_lock_exclusive(&fs::File::open(lock).unwrap()).is_err());
+        }
         ensure!(calls != 2, "simulated variable publication failure");
         Ok(())
     });
     assert!(partial.is_err());
+    assert!(inherited_publication_lock.is_some());
     assert_eq!(transaction.state.published_slots, ["COMMITPERCLIP_KEY"]);
     assert!(!transaction.directory.join("receipt.json").exists());
     let source = store.root.join(&config.source);

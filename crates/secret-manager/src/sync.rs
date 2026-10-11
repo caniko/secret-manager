@@ -123,59 +123,83 @@ impl SyncArgs {
             return Ok(());
         }
 
-        let decrypt_session = if document_needs_decrypt_session(&doc) {
-            let identities = store.resolve_identities(&self.identities)?;
-            Some(age::DecryptSession::from_identities(&identities)?)
-        } else {
-            None
-        };
-        let mut value_cache = SyncValueCache::default();
+        let needs_decrypt = records_need_decrypt_session(&desired_state);
+        with_sync_protection(
+            needs_decrypt,
+            || {
+                // The original stdin may already be consumed. Replay the exact
+                // filtered public document, preserving CLI policy and state.
+                let input = serde_json::to_vec(&doc)?;
+                crate::protection::enter_scope_with_input(Some(&input))
+            },
+            crate::protection::CredentialProtection::acquire,
+            || {
+                let decrypt_session = if needs_decrypt {
+                    let identities = store.resolve_identities(&self.identities)?;
+                    Some(age::DecryptSession::from_identities(&identities)?)
+                } else {
+                    None
+                };
+                let mut value_cache = SyncValueCache::default();
 
-        for record in &desired_state {
-            ui::step(format!(
-                "sync: `{}` {} from {}",
-                record.target,
-                kind_label(record.kind),
-                record.source
-            ));
-            if self.verbose {
-                ui::info(format!("destination: {}", record.destination_label()));
-            }
+                for record in &desired_state {
+                    ui::step(format!(
+                        "sync: `{}` {} from {}",
+                        record.target,
+                        kind_label(record.kind),
+                        record.source
+                    ));
+                    if self.verbose {
+                        ui::info(format!("destination: {}", record.destination_label()));
+                    }
 
-            let value = value_cache.get(&store, &record_value(record), decrypt_session.as_ref())?;
-            push_managed_record(record, &value)?;
-        }
+                    let value =
+                        value_cache.get(&store, &record_value(record), decrypt_session.as_ref())?;
+                    push_managed_record(record, &value)?;
+                }
 
-        if self.prune {
-            ui::step(format!(
-                "pruning {} stale managed entr{}",
-                stale.len(),
-                plural_y(stale.len())
-            ));
-            for record in &stale {
-                delete_managed_record(record)?;
-            }
-        } else {
-            ui::step("reporting stale managed entries");
-            report_stale_records(&stale);
-        }
+                if self.prune {
+                    ui::step(format!(
+                        "pruning {} stale managed entr{}",
+                        stale.len(),
+                        plural_y(stale.len())
+                    ));
+                    for record in &stale {
+                        delete_managed_record(record)?;
+                    }
+                } else {
+                    ui::step("reporting stale managed entries");
+                    report_stale_records(&stale);
+                }
 
-        let next_records = if self.prune {
-            desired_state
-        } else {
-            retained_without_prune(&previous_state.managed, &desired_state)
-        };
-        ui::step("writing sync state");
-        if self.verbose {
-            ui::info(format!("sync state path: {}", state_path.display()));
-        }
-        SyncState::new(next_records).write_atomic(&state_path)?;
+                let next_records = if self.prune {
+                    desired_state
+                } else {
+                    retained_without_prune(&previous_state.managed, &desired_state)
+                };
+                ui::step("writing sync state");
+                if self.verbose {
+                    ui::info(format!("sync state path: {}", state_path.display()));
+                }
+                SyncState::new(next_records).write_atomic(&state_path)?;
 
-        ui::success(format!("synced {total} target(s)"));
-        Ok(())
+                ui::success(format!("synced {total} target(s)"));
+                Ok(())
+            },
+        )
     }
 
     fn load_document(&self) -> Result<SyncDocument> {
+        if std::env::var_os("SECRET_MANAGER_SYNC_REPLAY").is_some_and(|value| value == "1")
+            && std::env::var_os("SECRET_MANAGER_SCOPE_ATTEMPT").is_some_and(|value| value == "1")
+        {
+            // Embedding frontends own their argv. Preserve it unchanged and
+            // replay public configuration instead of rereading a consumed stdin
+            // or mutable file/flake. Kernel protection is still checked below.
+            let mut input = String::new();
+            std::io::stdin().read_to_string(&mut input)?;
+            return Ok(SyncDocument::from_json(&input)?);
+        }
         let doc = match &self.config {
             Some(path) => {
                 ui::step(format!("reading sync targets from {}", path.display()));
@@ -537,9 +561,10 @@ fn report_stale_records(stale: &[ManagedRecord]) {
     }
 }
 
-fn document_needs_decrypt_session(doc: &SyncDocument) -> bool {
-    doc.iter_targets()
-        .any(|(_, _, target)| matches!(target.value, SyncValue::Secret(_)))
+fn records_need_decrypt_session(records: &[ManagedRecord]) -> bool {
+    records
+        .iter()
+        .any(|record| record.kind == ManagedKind::Secret)
 }
 
 fn record_value(record: &ManagedRecord) -> SyncValue {
@@ -627,11 +652,7 @@ fn push_github_record(record: &ManagedRecord, value: &str) -> Result<()> {
         )?;
         return Ok(());
     }
-    let repo = record_repo(record)?;
-    match record.kind {
-        ManagedKind::Secret => forge::push_github_secret(&repo, &record.name, value),
-        ManagedKind::Variable => push_github_variable(&repo, &record.name, value),
-    }
+    run_gh_with_input(&args.iter().map(String::as_str).collect::<Vec<_>>(), value)
 }
 
 fn github_record_args(record: &ManagedRecord, action: &str) -> Result<Vec<String>> {
@@ -697,17 +718,12 @@ fn github_environment_endpoint(
 }
 
 fn check_github_resource(endpoint: &str, expected_name: &str) -> Result<()> {
-    let output = Command::new("gh")
-        .args(["api", endpoint, "--hostname", "github.com"])
-        .output()
-        .map_err(|e| anyhow!("failed to spawn gh: {e}"))?;
-    if !output.status.success() {
-        bail!(
-            "GitHub environment resource verification failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    let resource: serde_json::Value = serde_json::from_slice(&output.stdout)
+    let output = crate::credential_process::capture(
+        Command::new("gh").args(["api", endpoint, "--hostname", "github.com"]),
+        None,
+    )
+    .context("GitHub environment resource verification failed")?;
+    let resource: serde_json::Value = serde_json::from_slice(&output)
         .context("GitHub environment resource has no valid JSON metadata")?;
     if resource
         .get("name")
@@ -800,7 +816,7 @@ fn crow_secret_args(action: &str, repo: &str, name: &str, with_value: bool) -> V
 
 #[derive(Default)]
 struct SyncValueCache {
-    values: HashMap<SyncValueCacheKey, String>,
+    values: HashMap<SyncValueCacheKey, zeroize::Zeroizing<String>>,
 }
 
 impl SyncValueCache {
@@ -809,7 +825,7 @@ impl SyncValueCache {
         store: &Store,
         value: &SyncValue,
         decrypt_session: Option<&age::DecryptSession>,
-    ) -> Result<String> {
+    ) -> Result<zeroize::Zeroizing<String>> {
         match value {
             SyncValue::Secret(secret) => {
                 let path = validated_secret_path(store, secret)?;
@@ -836,12 +852,12 @@ impl SyncValueCache {
         &mut self,
         key: SyncValueCacheKey,
         load: impl FnOnce() -> Result<String>,
-    ) -> Result<String> {
+    ) -> Result<zeroize::Zeroizing<String>> {
         if let Some(value) = self.values.get(&key) {
             return Ok(value.clone());
         }
 
-        let value = load()?;
+        let value = zeroize::Zeroizing::new(load()?);
         self.values.insert(key, value.clone());
         Ok(value)
     }
@@ -933,31 +949,30 @@ fn record_repo(record: &ManagedRecord) -> Result<String> {
     ))
 }
 
-fn push_github_variable(repo: &str, name: &str, value: &str) -> Result<()> {
-    run_gh_with_input(&["variable", "set", name, "--repo", repo], value)
+fn run_gh_with_input(args: &[&str], value: &str) -> Result<()> {
+    run_gh_command_with_input(Command::new("gh").args(args), value)
 }
 
-fn run_gh_with_input(args: &[&str], value: &str) -> Result<()> {
-    let mut child = Command::new("gh")
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .map_err(|e| anyhow!("failed to spawn gh: {e}"))?;
-    {
-        let stdin = child
-            .stdin
-            .as_mut()
-            .ok_or_else(|| anyhow!("gh stdin was not captured"))?;
-        stdin.write_all(value.as_bytes())?;
-    }
-    drop(child.stdin.take());
-    let status = child.wait().map_err(|e| anyhow!("wait on gh: {e}"))?;
-    if status.success() {
-        Ok(())
+pub(crate) fn run_gh_command_with_input(command: &mut Command, value: &str) -> Result<()> {
+    // Bound/redact diagnostics, scrub debug flags, retain active inhibitor
+    // descriptors, and terminate/reap the helper group on pipe/timeout failure.
+    let _ = crate::credential_process::capture(command, Some(value.as_bytes()))?;
+    Ok(())
+}
+
+fn with_sync_protection<G>(
+    needs_decrypt: bool,
+    enter_scope: impl FnOnce() -> Result<Option<std::process::ExitStatus>>,
+    acquire: impl FnOnce() -> Result<G>,
+    apply: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    // Acquire before identity resolution/decryption and retain across upload,
+    // verification, pruning and state commit. Planning and public variables
+    // do not enter this credential-handler boundary.
+    if needs_decrypt {
+        crate::protection::with_protection(enter_scope, acquire, apply)
     } else {
-        bail!("gh {} exited with status {}", args.join(" "), status)
+        apply()
     }
 }
 
@@ -1114,6 +1129,154 @@ fn is_not_found(err: &forgejo_api::ForgejoError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn github_upload_helpers_scrub_debug_and_suppress_credential_diagnostics() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "test -z \"${GH_DEBUG+x}${AGEDEBUG+x}${RUST_LOG+x}\" || { printf 'fake-secret-diagnostic' >&2; exit 17; }; cat >/dev/null"])
+            .env("GH_DEBUG", "api").env("AGEDEBUG", "1").env("RUST_LOG", "trace");
+        assert!(run_gh_command_with_input(&mut command, "fake-secret-diagnostic").is_ok());
+    }
+
+    #[test]
+    fn encrypted_sync_fails_before_effects_and_holds_protection_until_completion() {
+        use std::{cell::Cell, rc::Rc};
+        let doc = SyncDocument::from_json(r#"{"hosts":[{"targets":{"publisher":{"secret":"token.age","name":"TOKEN","githubEnvironments":[{"repository":"caniko/demo","environment":"production"}]}}}]}"#).unwrap();
+        let effects = Cell::new(0);
+        let result = with_sync_protection(
+            records_need_decrypt_session(&desired_records(&doc).unwrap()),
+            || Ok(None),
+            || -> Result<()> { bail!("protection unavailable") },
+            || {
+                effects.set(effects.get() + 1);
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            effects.get(),
+            0,
+            "failed protection admitted decryption or upload"
+        );
+
+        struct Guard(Rc<Cell<bool>>);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                self.0.set(false);
+            }
+        }
+        let held = Rc::new(Cell::new(false));
+        for fail in [false, true] {
+            let result = with_sync_protection(
+                records_need_decrypt_session(&desired_records(&doc).unwrap()),
+                || Ok(None),
+                || {
+                    held.set(true);
+                    Ok(Guard(held.clone()))
+                },
+                || {
+                    assert!(
+                        held.get(),
+                        "protection was released before upload/readback/state commit"
+                    );
+                    if fail {
+                        bail!("upload failed");
+                    }
+                    Ok(())
+                },
+            );
+            assert_eq!(result.is_err(), fail);
+            assert!(
+                !held.get(),
+                "completed credential handler retained its inhibitor"
+            );
+        }
+        let public = SyncDocument::from_json(r#"{"hosts":[{"targets":{"revision":{"source":"revision","name":"REVISION","githubEnvironments":[{"repository":"caniko/demo","environment":"production"}]}}}]}"#).unwrap();
+        assert!(
+            with_sync_protection(
+                records_need_decrypt_session(&desired_records(&public).unwrap()),
+                || -> Result<Option<std::process::ExitStatus>> {
+                    panic!("public variable entered a credential scope")
+                },
+                || -> Result<()> { panic!("public variable acquired a credential inhibitor") },
+                || Ok(())
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn encrypted_sync_enters_scope_before_admitting_plaintext_effects() {
+        use std::{cell::Cell, os::unix::process::ExitStatusExt};
+        let doc = SyncDocument::from_json(r#"{"hosts":[{"targets":{"token":{"secret":"token.age","name":"TOKEN","github":["caniko/demo"]}}}]}"#).unwrap();
+        let scoped = Cell::new(false);
+        let applied = Cell::new(false);
+        with_sync_protection(
+            records_need_decrypt_session(&desired_records(&doc).unwrap()),
+            || {
+                scoped.set(true);
+                Ok(None)
+            },
+            || -> Result<()> {
+                assert!(
+                    scoped.get(),
+                    "decryption protection was acquired outside the credential scope"
+                );
+                Ok(())
+            },
+            || {
+                applied.set(true);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(applied.get());
+        for code in [0, 1] {
+            let result = with_sync_protection(
+                records_need_decrypt_session(&desired_records(&doc).unwrap()),
+                || Ok(Some(std::process::ExitStatus::from_raw(code << 8))),
+                || -> Result<()> { panic!("parent decrypted after child scope execution") },
+                || {
+                    panic!("parent duplicated scoped upload");
+                },
+            );
+            assert_eq!(result.is_ok(), code == 0);
+        }
+        assert!(
+            with_sync_protection(
+                records_need_decrypt_session(&desired_records(&doc).unwrap()),
+                || bail!("scope unavailable"),
+                || -> Result<()> { panic!("scope failure admitted decryption") },
+                || Ok(())
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn scoped_sync_replays_filtered_destinations() {
+        let doc = SyncDocument::from_json(FIXTURE).unwrap();
+        let mut doc = filter_document_targets(doc, &["my-app-token".into()]).unwrap();
+        doc.hosts[0]
+            .targets
+            .get_mut("my-app-token")
+            .unwrap()
+            .github_environments
+            .push(crate::sync_targets::GithubEnvironment {
+                repository: "caniko/demo".into(),
+                environment: "production".into(),
+            });
+        let records = desired_records(&doc).unwrap();
+        let input = serde_json::to_string(&doc).unwrap();
+        assert_eq!(
+            desired_records(&SyncDocument::from_json(&input).unwrap()).unwrap(),
+            records
+        );
+        assert!(
+            !input.contains("deploy-key"),
+            "scoped child regained a filtered target"
+        );
+    }
 
     /// Contract fixture matching the shape nix/collect.nix produces.
     const FIXTURE: &str = r#"{
@@ -1415,13 +1578,17 @@ mod tests {
     }
 
     #[test]
-    fn document_needs_decrypt_session_when_any_target_is_encrypted() {
+    fn records_need_decrypt_session_when_an_upload_is_encrypted() {
         let doc: SyncDocument = serde_json::from_str(FIXTURE).unwrap();
-        assert!(document_needs_decrypt_session(&doc));
+        assert!(records_need_decrypt_session(
+            &desired_records(&doc).unwrap()
+        ));
 
         let plaintext_only = r#"{"hosts":[{"targets":{"public-key":{"source":"public.asc","name":"PUBLIC","codeberg":[],"codebergOrgs":[],"codebergUser":false,"host":"codeberg.org"}}}]}"#;
         let doc: SyncDocument = serde_json::from_str(plaintext_only).unwrap();
-        assert!(!document_needs_decrypt_session(&doc));
+        assert!(!records_need_decrypt_session(
+            &desired_records(&doc).unwrap()
+        ));
     }
 
     #[test]
@@ -1446,8 +1613,8 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(first, "secret-value");
-        assert_eq!(second, "secret-value");
+        assert_eq!(first.as_str(), "secret-value");
+        assert_eq!(second.as_str(), "secret-value");
         assert_eq!(loads, 1);
     }
 
@@ -1469,8 +1636,8 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(secret, "secret");
-        assert_eq!(source, "source");
+        assert_eq!(secret.as_str(), "secret");
+        assert_eq!(source.as_str(), "source");
     }
 
     #[test]
@@ -1522,7 +1689,7 @@ mod tests {
 
         let got = read_plaintext_source_path(&validated_source_path(&store, "public.asc").unwrap())
             .unwrap();
-        assert_eq!(got, content);
+        assert_eq!(got.as_str(), content);
     }
 
     #[test]
@@ -1539,7 +1706,7 @@ mod tests {
             .get(&store, &SyncValue::Source("public.asc".to_string()), None)
             .unwrap();
 
-        assert_eq!(got, content);
+        assert_eq!(got.as_str(), content);
     }
 
     #[test]

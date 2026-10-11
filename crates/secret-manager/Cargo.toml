@@ -20,6 +20,7 @@ nix-manager-core.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 clap.workspace = true
+dbus = { version = "0.9", features = ["vendored"] }
 forgejo-api.workspace = true
 libc.workspace = true
 pklx.workspace = true

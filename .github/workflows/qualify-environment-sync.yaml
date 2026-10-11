@@ -3,7 +3,7 @@ name: Qualify environment sync
 
 on:
   push:
-    branches: [feat/github-environment-sync]
+    branches: [feat/github-environment-sync, feat/rbw-environment-integration, trunk]
   pull_request:
 
 permissions:
@@ -16,7 +16,7 @@ concurrency:
 jobs:
   qualify-environment-sync:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       NIX_CONFIG: |
         experimental-features = nix-command flakes
@@ -68,6 +68,7 @@ jobs:
           nix develop -c cargo clippy --workspace --all-targets --locked --jobs 2 -- -D warnings 2>&1 | tee "$EVIDENCE/clippy.log"
           nix develop -c cargo doc --workspace --no-deps --locked --jobs 2 2>&1 | tee "$EVIDENCE/docs.log"
           nix eval --raw .#checks.x86_64-linux.catalog-renderers.drvPath 2>&1 | tee "$EVIDENCE/catalog-renderer.log"
+          nix build --no-link --json .#checks.x86_64-linux.nextest > "$EVIDENCE/sandbox-nextest-result.json" 2> >(tee "$EVIDENCE/sandbox-nextest.log" >&2)
           nix build --no-link --json .#secret-manager > "$EVIDENCE/production-result.json" 2> >(tee "$EVIDENCE/production-build.log" >&2)
           OUTPUT=$(nix eval --raw .#packages.x86_64-linux.secret-manager.outPath)
           "$OUTPUT/bin/secret-manager" --version > "$EVIDENCE/production-version"

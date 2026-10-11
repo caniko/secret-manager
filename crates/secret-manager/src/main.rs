@@ -107,6 +107,52 @@ mod tests {
     use clap::CommandFactory;
 
     #[test]
+    fn rbw_source_cli_rejects_conflicting_sources_and_missing_uuid() {
+        let base = [
+            "secret-manager",
+            "hm",
+            "file",
+            "--shared",
+            "--name",
+            "fixture",
+        ];
+        for flags in [
+            vec!["--rbw-field", "password"],
+            vec!["--rbw-rotate"],
+            vec![
+                "--from-rbw",
+                "12345678-1234-1234-1234-123456789abc",
+                "--from-file",
+                "plaintext",
+            ],
+            vec![
+                "--from-rbw",
+                "12345678-1234-1234-1234-123456789abc",
+                "--rbw-field",
+                "password",
+                "--rbw-map",
+                "password=password",
+            ],
+            vec![
+                "--from-rbw",
+                "12345678-1234-1234-1234-123456789abc",
+                "--rbw-timeout-seconds",
+                "301",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(base.into_iter().chain(flags)).is_err());
+        }
+        assert!(
+            Cli::try_parse_from(base.into_iter().chain([
+                "--from-rbw",
+                "12345678-1234-1234-1234-123456789abc",
+                "--rbw-rotate"
+            ]))
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn gpg_publish_cli_accepts_all_platforms_and_read_only_checks() {
         Cli::command().debug_assert();
         let cli = Cli::try_parse_from([

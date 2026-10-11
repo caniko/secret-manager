@@ -9,7 +9,10 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
-    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+    os::{
+        fd::AsRawFd,
+        unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+    },
     path::{Path, PathBuf},
 };
 use zeroize::Zeroizing;
@@ -34,14 +37,46 @@ pub(super) struct State {
 pub(super) struct Transaction {
     pub directory: PathBuf,
     pub state: State,
-    _lock: File,
+    _lock: ExclusiveLock,
 }
 
-impl Drop for Transaction {
+/// Explicitly release the owner's shared open file description before close.
+/// Concurrent helper forks may retain that description until their next exec.
+pub(super) struct ExclusiveLock(File);
+
+impl ExclusiveLock {
+    pub(super) fn acquire(file: File) -> std::io::Result<Self> {
+        try_lock_exclusive(&file)?;
+        Ok(Self(file))
+    }
+}
+
+impl Drop for ExclusiveLock {
     fn drop(&mut self) {
         // Close alone leaves a flock held by a helper's inherited open file
         // description until exec. Release this owner's lock before closing it.
-        let _ = self._lock.unlock();
+        let _ = flock(&self.0, libc::LOCK_UN);
+    }
+}
+
+// These locks must also work for consumers using Rust 1.88, before std's
+// File locking API was stabilized. Keep the nonblocking flock semantics and
+// explicit unlock of the shared open file description.
+pub(super) fn try_lock_exclusive(file: &File) -> std::io::Result<()> {
+    flock(file, libc::LOCK_EX | libc::LOCK_NB)
+}
+
+fn flock(file: &File, operation: libc::c_int) -> std::io::Result<()> {
+    loop {
+        // SAFETY: file owns a live descriptor throughout this call. flock
+        // borrows that descriptor and does not consume or access Rust memory.
+        if unsafe { libc::flock(file.as_raw_fd(), operation) } == 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
     }
 }
 
@@ -66,7 +101,7 @@ impl Transaction {
             .custom_flags(libc::O_NOFOLLOW)
             .open(directory.join("lock"))?;
         private_metadata(&directory.join("lock"), false)?;
-        lock.try_lock().context("GitHub App transaction is busy")?;
+        let lock = ExclusiveLock::acquire(lock).context("GitHub App transaction is busy")?;
         let policy_sha256 = sha256(&serde_json::to_vec(config)?);
         let path = directory.join("state.json");
         let state = if path.exists() {
@@ -238,7 +273,7 @@ mod tests {
         let transaction = Transaction::open(&directory, root.path(), &config).unwrap();
         // A concurrent helper can inherit the open file description between
         // fork and exec, even though Rust opens the descriptor CLOEXEC.
-        let inherited = transaction._lock.try_clone().unwrap();
+        let inherited = transaction._lock.0.try_clone().unwrap();
         assert!(Transaction::open(&directory, root.path(), &config).is_err());
         drop(transaction);
         let reopened = Transaction::open(&directory, root.path(), &config).unwrap();

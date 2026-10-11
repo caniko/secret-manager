@@ -12,6 +12,7 @@
 - [Adding a Home-Manager Secret](./guides/adding-home-secret.md)
 - [Adding a NixOS Host Secret](./guides/adding-nixos-secret.md)
 - [Adding a Forgejo Secret](./guides/adding-forgejo-secret.md)
+- [Importing from Bitwarden](./guides/bitwarden-import.md)
 - [Pushing Secrets to CI](./guides/pushing-secrets.md)
 - [WireGuard Key Generation](./guides/wg-keygen.md)
 

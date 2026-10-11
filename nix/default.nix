@@ -200,6 +200,11 @@ nix-manager-core.lib.mkManagerOutputs {
           postPatch = ''
             substituteInPlace crates/secret-manager/tests/rotate.rs \
               --replace-fail '#!/usr/bin/env bash' '#!${pkgs.bash}/bin/bash'
+            substituteInPlace crates/secret-manager/src/encryption.rs \
+              crates/secret-manager/src/rbw.rs \
+              crates/secret-manager/tests/rbw_import.rs \
+              crates/secret-manager/tests/github_environment_sync.rs \
+              --replace-fail '#!/bin/sh' '#!${pkgs.runtimeShell}'
           '';
           # Crane's Cargo filter omits the public signing-key test fixture.
           src = lib.cleanSourceWith {
