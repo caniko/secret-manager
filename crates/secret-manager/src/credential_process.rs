@@ -1,10 +1,14 @@
 //! Private, bounded subprocess pipes shared by credential integrations.
 use anyhow::{Context, Result, ensure};
 use std::{
-    io::{Read, Write},
-    os::unix::process::CommandExt,
+    io::{ErrorKind, Read, Write},
+    os::{fd::AsRawFd, unix::process::CommandExt},
     process::{Command, Stdio},
-    sync::mpsc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -74,9 +78,14 @@ fn capture_inner(
         child: std::process::Child,
         group: bool,
         workers: Vec<thread::JoinHandle<()>>,
+        cancel_readers: Arc<AtomicBool>,
     }
     impl Drop for Cleanup {
         fn drop(&mut self) {
+            // Foreground helpers share the operator's process group. Cancel
+            // our private readers instead of killing that group or waiting for
+            // an independently owned daemon to close an inherited write end.
+            self.cancel_readers.store(true, Ordering::Release);
             // The process group remains ours until its pipes settle, including
             // descendants retaining pipes after the direct child exits.
             // SAFETY: kill accepts a negative process-group ID and retains no pointer.
@@ -99,6 +108,7 @@ fn capture_inner(
         child: command.spawn().context("start credential helper")?,
         group,
         workers: Vec::new(),
+        cancel_readers: Arc::new(AtomicBool::new(false)),
     };
     let output = child
         .child
@@ -110,32 +120,23 @@ fn capture_inner(
         .stderr
         .take()
         .context("helper stderr unavailable")?;
-    let read = |mut stream: Box<dyn Read + Send>| -> Result<Zeroizing<Vec<u8>>> {
-        // Reserve the full bound so reallocations do not leave old plaintext
-        // allocations behind before the final zeroizing drop.
-        let mut bytes = Zeroizing::new(Vec::with_capacity(MAX_BYTES + 1));
-        (&mut stream)
-            .take((MAX_BYTES + 1) as u64)
-            .read_to_end(&mut bytes)?;
-        ensure!(
-            bytes.len() <= MAX_BYTES,
-            "credential helper output exceeds size limit"
-        );
-        Ok(bytes)
-    };
+    nonblocking(&output)?;
+    nonblocking(&errors)?;
     let (output_send, output_recv) = mpsc::channel();
     let (error_send, error_recv) = mpsc::channel();
+    let output_cancel = Arc::clone(&child.cancel_readers);
+    let error_cancel = Arc::clone(&child.cancel_readers);
     child.workers.push(
         thread::Builder::new()
             .spawn(move || {
-                let _ = output_send.send(read(Box::new(output)));
+                let _ = output_send.send(read_pipe(Box::new(output), &output_cancel));
             })
             .context("start credential output reader")?,
     );
     child.workers.push(
         thread::Builder::new()
             .spawn(move || {
-                let _ = error_send.send(read(Box::new(errors)));
+                let _ = error_send.send(read_pipe(Box::new(errors), &error_cancel));
             })
             .context("start credential diagnostics reader")?,
     );
@@ -180,6 +181,52 @@ fn capture_inner(
         })??;
     }
     Ok(bytes)
+}
+
+fn nonblocking(stream: &impl AsRawFd) -> Result<()> {
+    // SAFETY: stream owns this live pipe descriptor; fcntl only reads/sets its
+    // open-file status flags and retains no pointer.
+    let flags = unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error()).context("inspect credential pipe flags");
+    }
+    // SAFETY: same live descriptor, preserving every existing status flag.
+    if unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(std::io::Error::last_os_error()).context("make credential pipe cancellable");
+    }
+    Ok(())
+}
+
+fn read_pipe(
+    mut stream: Box<dyn Read + Send>,
+    cancelled: &AtomicBool,
+) -> Result<Zeroizing<Vec<u8>>> {
+    // Reserve the full bound so reallocations do not leave old plaintext
+    // allocations behind. The temporary read buffer is also zeroized on drop.
+    let mut bytes = Zeroizing::new(Vec::with_capacity(MAX_BYTES + 1));
+    let mut buffer = Zeroizing::new([0u8; 8192]);
+    loop {
+        ensure!(
+            !cancelled.load(Ordering::Acquire),
+            "credential pipe capture cancelled"
+        );
+        let count = buffer.len().min(MAX_BYTES + 1 - bytes.len());
+        match stream.read(&mut buffer[..count]) {
+            Ok(0) => return Ok(bytes),
+            Ok(count) => {
+                bytes.extend_from_slice(&buffer[..count]);
+                ensure!(
+                    bytes.len() <= MAX_BYTES,
+                    "credential helper output exceeds size limit"
+                );
+            }
+            Err(error) if error.kind() == ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(20))
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
 }
 
 pub(crate) fn disable_core_dumps() -> Result<()> {
@@ -235,6 +282,37 @@ mod tests {
         );
         assert!(result.is_err());
         assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn foreground_descendant_pipes_cannot_hold_cleanup_past_the_deadline() {
+        for script in ["sleep 2 & exit 0", "sleep 2 & wait"] {
+            let start = Instant::now();
+            let result = capture_prompt_with_timeout(
+                Command::new("sh").args(["-c", script]),
+                Duration::from_millis(150),
+            );
+            assert!(result.is_err());
+            assert!(start.elapsed() < Duration::from_secs(1));
+        }
+    }
+
+    #[test]
+    fn foreground_capture_preserves_the_callers_process_group() {
+        let output = capture_prompt_with_timeout(
+            Command::new("cat").arg("/proc/self/stat"),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let group = std::str::from_utf8(&output)
+            .unwrap()
+            .split_whitespace()
+            .nth(4)
+            .unwrap()
+            .parse::<i32>()
+            .unwrap();
+        // SAFETY: getpgrp has no arguments and only reads this process's group.
+        assert_eq!(group, unsafe { libc::getpgrp() });
     }
 
     #[test]
