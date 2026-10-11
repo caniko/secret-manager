@@ -38,6 +38,41 @@ fn scoped_sync_replay_preserves_configuration_and_target_selection() {
     assert!(!plan.contains("other.age"));
 }
 
+#[test]
+fn destination_free_secret_sync_needs_no_identities_or_protected_scope() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("flake.nix"), "{}\n").unwrap();
+    let config = root.path().join("sync.json");
+    std::fs::write(
+        &config,
+        br#"{"hosts":[{"targets":{"unused":{"secret":"missing.age","name":"TOKEN"}}}]}"#,
+    )
+    .unwrap();
+    let state = root.path().join("state.toml");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_secret-manager"))
+        .args(["sync", "--no-flake", "--config"])
+        .arg(config)
+        .arg("--state")
+        .arg(&state)
+        .arg("--identity")
+        .arg(root.path().join("missing-identity"))
+        // A credential scope attempt may never recurse. This fixture must not
+        // need protection or touch its nonexistent source/identity in any cgroup.
+        .env("SECRET_MANAGER_SCOPE_ATTEMPT", "1")
+        .env_remove("SECRET_MANAGER_SYNC_REPLAY")
+        .current_dir(root.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(SyncState::load(&state).unwrap().unwrap().managed.is_empty());
+    assert!(!root.path().join("missing.age").exists());
+    assert!(!root.path().join("missing-identity").exists());
+}
+
 fn document(target: serde_json::Value) -> SyncDocument {
     SyncDocument::from_json(
         &serde_json::json!({"hosts":[{"targets":{"publisher":target}}]}).to_string(),

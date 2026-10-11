@@ -115,6 +115,7 @@ pub(crate) fn enter_scope_with_input(input: Option<&[u8]>) -> Result<Option<Exit
             "--collect",
             "--quiet",
             "--property=MemorySwapMax=0",
+            "--expand-environment=no",
             "--",
         ])
         .arg(std::env::current_exe().context("resolve credential command")?)

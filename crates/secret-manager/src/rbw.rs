@@ -221,7 +221,7 @@ impl RbwItem {
             }
         }
         .context("selected rbw field is missing")?;
-        ensure!(!value.trim().is_empty(), "selected rbw field is empty");
+        ensure!(!value.is_empty(), "selected rbw field is empty");
         ensure!(
             value.len() <= MAX_BYTES / 2,
             "selected rbw field exceeds size limit"
@@ -257,6 +257,26 @@ mod tests {
         assert_eq!(item.field("password").unwrap().as_str(), "correct");
         assert_eq!(item.field("custom:passwrod").unwrap().as_str(), "wrong");
         assert_eq!(item.field("custom:password").unwrap().as_str(), "custom");
+    }
+
+    #[test]
+    fn nonempty_whitespace_credentials_are_preserved_exactly() {
+        let item = RbwItem::from_json(br#"{"id":"11111111-1111-1111-1111-111111111111","data":{"username":"\t","password":" "},"notes":"\n","fields":[{"name":"token","value":" \t\n"}]}"#,
+            "11111111-1111-1111-1111-111111111111").unwrap();
+        for (name, value) in [
+            ("username", "\t"),
+            ("password", " "),
+            ("notes", "\n"),
+            ("custom:token", " \t\n"),
+        ] {
+            assert_eq!(item.field(name).unwrap().as_str(), value);
+        }
+        let empty = RbwItem::from_json(
+            br#"{"id":"11111111-1111-1111-1111-111111111111","data":{"password":""}}"#,
+            "11111111-1111-1111-1111-111111111111",
+        )
+        .unwrap();
+        assert!(empty.field("password").is_err());
     }
 
     #[test]

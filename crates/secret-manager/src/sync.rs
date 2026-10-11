@@ -123,8 +123,9 @@ impl SyncArgs {
             return Ok(());
         }
 
+        let needs_decrypt = records_need_decrypt_session(&desired_state);
         with_sync_protection(
-            &doc,
+            needs_decrypt,
             || {
                 // The original stdin may already be consumed. Replay the exact
                 // filtered public document, preserving CLI policy and state.
@@ -133,7 +134,7 @@ impl SyncArgs {
             },
             crate::protection::CredentialProtection::acquire,
             || {
-                let decrypt_session = if document_needs_decrypt_session(&doc) {
+                let decrypt_session = if needs_decrypt {
                     let identities = store.resolve_identities(&self.identities)?;
                     Some(age::DecryptSession::from_identities(&identities)?)
                 } else {
@@ -560,9 +561,10 @@ fn report_stale_records(stale: &[ManagedRecord]) {
     }
 }
 
-fn document_needs_decrypt_session(doc: &SyncDocument) -> bool {
-    doc.iter_targets()
-        .any(|(_, _, target)| matches!(target.value, SyncValue::Secret(_)))
+fn records_need_decrypt_session(records: &[ManagedRecord]) -> bool {
+    records
+        .iter()
+        .any(|record| record.kind == ManagedKind::Secret)
 }
 
 fn record_value(record: &ManagedRecord) -> SyncValue {
@@ -959,7 +961,7 @@ pub(crate) fn run_gh_command_with_input(command: &mut Command, value: &str) -> R
 }
 
 fn with_sync_protection<G>(
-    doc: &SyncDocument,
+    needs_decrypt: bool,
     enter_scope: impl FnOnce() -> Result<Option<std::process::ExitStatus>>,
     acquire: impl FnOnce() -> Result<G>,
     apply: impl FnOnce() -> Result<()>,
@@ -967,7 +969,7 @@ fn with_sync_protection<G>(
     // Acquire before identity resolution/decryption and retain across upload,
     // verification, pruning and state commit. Planning and public variables
     // do not enter this credential-handler boundary.
-    let _guard = if document_needs_decrypt_session(doc) {
+    let _guard = if needs_decrypt {
         if let Some(status) = enter_scope()? {
             anyhow::ensure!(status.success(), "scoped sync failed with {status}");
             return Ok(());
@@ -1147,7 +1149,7 @@ mod tests {
         let doc = SyncDocument::from_json(r#"{"hosts":[{"targets":{"publisher":{"secret":"token.age","name":"TOKEN","githubEnvironments":[{"repository":"caniko/demo","environment":"production"}]}}}]}"#).unwrap();
         let effects = Cell::new(0);
         let result = with_sync_protection(
-            &doc,
+            records_need_decrypt_session(&desired_records(&doc).unwrap()),
             || Ok(None),
             || -> Result<()> { bail!("protection unavailable") },
             || {
@@ -1171,7 +1173,7 @@ mod tests {
         let held = Rc::new(Cell::new(false));
         for fail in [false, true] {
             let result = with_sync_protection(
-                &doc,
+                records_need_decrypt_session(&desired_records(&doc).unwrap()),
                 || Ok(None),
                 || {
                     held.set(true);
@@ -1197,7 +1199,7 @@ mod tests {
         let public = SyncDocument::from_json(r#"{"hosts":[{"targets":{"revision":{"source":"revision","name":"REVISION","githubEnvironments":[{"repository":"caniko/demo","environment":"production"}]}}}]}"#).unwrap();
         assert!(
             with_sync_protection(
-                &public,
+                records_need_decrypt_session(&desired_records(&public).unwrap()),
                 || -> Result<Option<std::process::ExitStatus>> {
                     panic!("public variable entered a credential scope")
                 },
@@ -1215,7 +1217,7 @@ mod tests {
         let scoped = Cell::new(false);
         let applied = Cell::new(false);
         with_sync_protection(
-            &doc,
+            records_need_decrypt_session(&desired_records(&doc).unwrap()),
             || {
                 scoped.set(true);
                 Ok(None)
@@ -1236,7 +1238,7 @@ mod tests {
         assert!(applied.get());
         for code in [0, 1] {
             let result = with_sync_protection(
-                &doc,
+                records_need_decrypt_session(&desired_records(&doc).unwrap()),
                 || Ok(Some(std::process::ExitStatus::from_raw(code << 8))),
                 || -> Result<()> { panic!("parent decrypted after child scope execution") },
                 || {
@@ -1247,7 +1249,7 @@ mod tests {
         }
         assert!(
             with_sync_protection(
-                &doc,
+                records_need_decrypt_session(&desired_records(&doc).unwrap()),
                 || bail!("scope unavailable"),
                 || -> Result<()> { panic!("scope failure admitted decryption") },
                 || Ok(())
@@ -1581,13 +1583,17 @@ mod tests {
     }
 
     #[test]
-    fn document_needs_decrypt_session_when_any_target_is_encrypted() {
+    fn records_need_decrypt_session_when_an_upload_is_encrypted() {
         let doc: SyncDocument = serde_json::from_str(FIXTURE).unwrap();
-        assert!(document_needs_decrypt_session(&doc));
+        assert!(records_need_decrypt_session(
+            &desired_records(&doc).unwrap()
+        ));
 
         let plaintext_only = r#"{"hosts":[{"targets":{"public-key":{"source":"public.asc","name":"PUBLIC","codeberg":[],"codebergOrgs":[],"codebergUser":false,"host":"codeberg.org"}}}]}"#;
         let doc: SyncDocument = serde_json::from_str(plaintext_only).unwrap();
-        assert!(!document_needs_decrypt_session(&doc));
+        assert!(!records_need_decrypt_session(
+            &desired_records(&doc).unwrap()
+        ));
     }
 
     #[test]
