@@ -394,4 +394,22 @@ mv "$3/outcome.tmp" "$3/outcome"
         assert!(swap_disabled_at(root.path(), "/slice/worker").is_err());
         assert!(swap_disabled_at(root.path(), "/../foreign").is_err());
     }
+
+    #[test]
+    fn sync_upload_helper_retains_active_inhibitor_snapshot_through_exec() {
+        use std::os::fd::IntoRawFd;
+        let file = fs::File::open("/dev/null").unwrap();
+        // SAFETY: transfer the live file descriptor to the synthetic inhibitor.
+        let sleep = unsafe { dbus::arg::OwnedFd::new(file.into_raw_fd()) };
+        let protection = CredentialProtection::from_inhibitor(sleep).unwrap();
+        let mut command = Command::new("sh");
+        command
+            .args([
+                "-c",
+                "test -e /proc/self/fd/\"$1\" && cat >/dev/null",
+                "sync-fixture",
+            ])
+            .arg(protection._sleep.as_raw_fd().to_string());
+        assert!(crate::sync::run_gh_command_with_input(&mut command, "fake-secret").is_ok());
+    }
 }

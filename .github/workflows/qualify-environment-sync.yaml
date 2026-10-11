@@ -1,0 +1,83 @@
+# Project-owned provider-free qualification of protected environment sync.
+name: Qualify environment sync
+
+on:
+  push:
+    branches: [feat/github-environment-sync, feat/rbw-environment-integration, trunk]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: environment-sync-${{ github.event_name }}-${{ github.event.pull_request.head.sha || github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  qualify-environment-sync:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      NIX_CONFIG: |
+        experimental-features = nix-command flakes
+        max-jobs = 1
+        cores = 2
+      CARGO_BUILD_JOBS: "2"
+      RUSTDOCFLAGS: "-D warnings"
+      SOURCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31
+      - name: Qualify exact source without provider credentials
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$(git rev-parse HEAD)" = "$SOURCE_HEAD"
+          EVIDENCE="$RUNNER_TEMP/environment-sync"
+          mkdir -p "$EVIDENCE"
+          git rev-parse HEAD > "$EVIDENCE/revision"
+          git rev-parse 'HEAD^{tree}' > "$EVIDENCE/tree"
+          EVIDENCE="$EVIDENCE" python3 - <<'PY'
+          import hashlib, os, pathlib, subprocess
+          root = pathlib.Path.cwd()
+          rows = []
+          for entry in subprocess.check_output(['git', 'ls-tree', '-r', '-z', 'HEAD']).split(b'\0'):
+              if not entry:
+                  continue
+              metadata, name = entry.split(b'\t', 1)
+              mode, kind, identity = metadata.split()
+              assert kind == b'blob'
+              path = root / os.fsdecode(name)
+              if mode == b'120000':
+                  data = os.fsencode(os.readlink(path))
+              else:
+                  assert mode in (b'100644', b'100755') and not path.is_symlink()
+                  data = path.read_bytes()
+              assert data == subprocess.check_output(['git', 'cat-file', 'blob', identity.decode()])
+              rows.append((name, hashlib.sha256(data).hexdigest()))
+          pathlib.Path(os.environ['EVIDENCE'], 'source.sha256').write_text(''.join(
+              checksum + '  ' + os.fsdecode(name) + '\n' for name, checksum in sorted(rows)))
+          PY
+          git config --global --add url.https://github.com/.insteadOf ssh://git@github.com/
+          git config --global --add url.https://github.com/.insteadOf git@github.com:
+          nix develop -c cargo test --workspace --locked --jobs 2 2>&1 | tee "$EVIDENCE/tests.log"
+          nix develop -c cargo clippy --workspace --all-targets --locked --jobs 2 -- -D warnings 2>&1 | tee "$EVIDENCE/clippy.log"
+          nix develop -c cargo doc --workspace --no-deps --locked --jobs 2 2>&1 | tee "$EVIDENCE/docs.log"
+          nix eval --raw .#checks.x86_64-linux.catalog-renderers.drvPath 2>&1 | tee "$EVIDENCE/catalog-renderer.log"
+          nix build --no-link --json .#checks.x86_64-linux.nextest > "$EVIDENCE/sandbox-nextest-result.json" 2> >(tee "$EVIDENCE/sandbox-nextest.log" >&2)
+          nix build --no-link --json .#secret-manager > "$EVIDENCE/production-result.json" 2> >(tee "$EVIDENCE/production-build.log" >&2)
+          OUTPUT=$(nix eval --raw .#packages.x86_64-linux.secret-manager.outPath)
+          "$OUTPUT/bin/secret-manager" --version > "$EVIDENCE/production-version"
+          sha256sum "$OUTPUT/bin/secret-manager" > "$EVIDENCE/production-binary.sha256"
+          sha256sum "$EVIDENCE"/*.log > "$EVIDENCE/logs.sha256"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: environment-sync-${{ github.event_name }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/environment-sync/
+          retention-days: 32
+          if-no-files-found: error

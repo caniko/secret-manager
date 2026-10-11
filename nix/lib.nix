@@ -291,6 +291,9 @@
       name = entry.sync.target or (throw "secret-manager.lib.mkSecretSyncTargets: ${name} is missing sync.target");
       value =
         lib.filterAttrs (_: value: value != null) (builtins.removeAttrs entry.sync ["target" "__pkl_class"])
+        // lib.optionalAttrs ((entry.sync.githubEnvironments or null) != null) {
+          githubEnvironments = map (destination: builtins.removeAttrs destination ["__pkl_class"]) entry.sync.githubEnvironments;
+        }
         // {
           ${sourceAttr} =
             if sourceAttr == "secret"

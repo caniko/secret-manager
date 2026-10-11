@@ -65,7 +65,7 @@ pub struct SyncArgs {
     pub verbose: bool,
 
     /// Path to the sync state TOML file.
-    /// Defaults to <secret-store>/.secret-manager/sync-state.toml.
+    /// Defaults to `<secret-store>/.secret-manager/sync-state.toml`.
     #[arg(long, value_name = "PATH")]
     pub state: Option<PathBuf>,
 }
@@ -123,56 +123,63 @@ impl SyncArgs {
             return Ok(());
         }
 
-        let decrypt_session = if document_needs_decrypt_session(&doc) {
-            let identities = store.resolve_identities(&self.identities)?;
-            Some(age::DecryptSession::from_identities(&identities)?)
-        } else {
-            None
-        };
-        let mut value_cache = SyncValueCache::default();
+        with_sync_protection(
+            &doc,
+            crate::protection::CredentialProtection::acquire,
+            || {
+                let decrypt_session = if document_needs_decrypt_session(&doc) {
+                    let identities = store.resolve_identities(&self.identities)?;
+                    Some(age::DecryptSession::from_identities(&identities)?)
+                } else {
+                    None
+                };
+                let mut value_cache = SyncValueCache::default();
 
-        for record in &desired_state {
-            ui::step(format!(
-                "sync: `{}` {} from {}",
-                record.target,
-                kind_label(record.kind),
-                record.source
-            ));
-            if self.verbose {
-                ui::info(format!("destination: {}", record.destination_label()));
-            }
+                for record in &desired_state {
+                    ui::step(format!(
+                        "sync: `{}` {} from {}",
+                        record.target,
+                        kind_label(record.kind),
+                        record.source
+                    ));
+                    if self.verbose {
+                        ui::info(format!("destination: {}", record.destination_label()));
+                    }
 
-            let value = value_cache.get(&store, &record_value(record), decrypt_session.as_ref())?;
-            push_managed_record(record, &value)?;
-        }
+                    let value =
+                        value_cache.get(&store, &record_value(record), decrypt_session.as_ref())?;
+                    push_managed_record(record, &value)?;
+                }
 
-        if self.prune {
-            ui::step(format!(
-                "pruning {} stale managed entr{}",
-                stale.len(),
-                plural_y(stale.len())
-            ));
-            for record in &stale {
-                delete_managed_record(record)?;
-            }
-        } else {
-            ui::step("reporting stale managed entries");
-            report_stale_records(&stale);
-        }
+                if self.prune {
+                    ui::step(format!(
+                        "pruning {} stale managed entr{}",
+                        stale.len(),
+                        plural_y(stale.len())
+                    ));
+                    for record in &stale {
+                        delete_managed_record(record)?;
+                    }
+                } else {
+                    ui::step("reporting stale managed entries");
+                    report_stale_records(&stale);
+                }
 
-        let next_records = if self.prune {
-            desired_state
-        } else {
-            retained_without_prune(&previous_state.managed, &desired_state)
-        };
-        ui::step("writing sync state");
-        if self.verbose {
-            ui::info(format!("sync state path: {}", state_path.display()));
-        }
-        SyncState::new(next_records).write_atomic(&state_path)?;
+                let next_records = if self.prune {
+                    desired_state
+                } else {
+                    retained_without_prune(&previous_state.managed, &desired_state)
+                };
+                ui::step("writing sync state");
+                if self.verbose {
+                    ui::info(format!("sync state path: {}", state_path.display()));
+                }
+                SyncState::new(next_records).write_atomic(&state_path)?;
 
-        ui::success(format!("synced {total} target(s)"));
-        Ok(())
+                ui::success(format!("synced {total} target(s)"));
+                Ok(())
+            },
+        )
     }
 
     fn load_document(&self) -> Result<SyncDocument> {
@@ -564,6 +571,7 @@ fn push_managed_record(record: &ManagedRecord, value: &str) -> Result<()> {
 
 fn push_forgejo_record(record: &ManagedRecord, value: &str) -> Result<()> {
     match record.scope {
+        Scope::Environment => bail!("Forgejo environment sync is not supported"),
         Scope::Repo => {
             let repo = record_repo(record)?;
             match record.kind {
@@ -611,14 +619,102 @@ fn push_forgejo_record(record: &ManagedRecord, value: &str) -> Result<()> {
 }
 
 fn push_github_record(record: &ManagedRecord, value: &str) -> Result<()> {
-    if record.scope != Scope::Repo {
-        bail!("GitHub supports repository sync targets only");
+    let args = github_record_args(record, "set")?;
+    if record.scope == Scope::Environment {
+        // Never implicitly create an unprotected environment during secret
+        // synchronization. Enrollment and branch policy precede this data sync.
+        check_github_resource(
+            &github_environment_endpoint(record, None)?,
+            required_field(record.environment.as_deref(), record, "environment")?,
+        )?;
+        run_gh_with_input(&args.iter().map(String::as_str).collect::<Vec<_>>(), value)?;
+        check_github_resource(
+            &github_environment_endpoint(record, Some(record.kind))?,
+            &record.name,
+        )?;
+        return Ok(());
+    }
+    run_gh_with_input(&args.iter().map(String::as_str).collect::<Vec<_>>(), value)
+}
+
+fn github_record_args(record: &ManagedRecord, action: &str) -> Result<Vec<String>> {
+    if record.provider != Provider::Github || record.host != "github.com" {
+        bail!("GitHub sync record has a foreign provider or host");
     }
     let repo = record_repo(record)?;
-    match record.kind {
-        ManagedKind::Secret => forge::push_github_secret(&repo, &record.name, value),
-        ManagedKind::Variable => push_github_variable(&repo, &record.name, value),
+    let kind = match record.kind {
+        ManagedKind::Secret => "secret",
+        ManagedKind::Variable => "variable",
+    };
+    let mut args = vec![
+        kind.into(),
+        action.into(),
+        record.name.clone(),
+        "--repo".into(),
+        format!("github.com/{repo}"),
+    ];
+    match record.scope {
+        Scope::Repo if record.environment.is_none() => {}
+        Scope::Environment => {
+            let environment = required_field(record.environment.as_deref(), record, "environment")?;
+            crate::sync_targets::GithubEnvironment {
+                repository: repo,
+                environment: environment.into(),
+            }
+            .validate()?;
+            crate::sync_targets::validate_github_environment_value_name(&record.name)?;
+            args.push(format!("--env={environment}"));
+        }
+        _ => bail!("GitHub sync supports repository or environment scope only"),
     }
+    Ok(args)
+}
+
+fn github_environment_endpoint(
+    record: &ManagedRecord,
+    kind: Option<ManagedKind>,
+) -> Result<String> {
+    // REST path segments need encoding even when gh's --env argument safely
+    // accepts spaces, slashes, quotes or other punctuation.
+    let mut url = url::Url::parse("https://api.github.com/")?;
+    let mut segments = url
+        .path_segments_mut()
+        .map_err(|_| anyhow!("invalid GitHub API URL"))?;
+    segments.extend([
+        "repos",
+        required_field(record.owner.as_deref(), record, "owner")?,
+        required_field(record.repo.as_deref(), record, "repo")?,
+        "environments",
+        required_field(record.environment.as_deref(), record, "environment")?,
+    ]);
+    if let Some(kind) = kind {
+        segments
+            .push(match kind {
+                ManagedKind::Secret => "secrets",
+                ManagedKind::Variable => "variables",
+            })
+            .push(&record.name);
+    }
+    drop(segments);
+    Ok(url.path().trim_start_matches('/').to_owned())
+}
+
+fn check_github_resource(endpoint: &str, expected_name: &str) -> Result<()> {
+    let output = crate::credential_process::capture(
+        Command::new("gh").args(["api", endpoint, "--hostname", "github.com"]),
+        None,
+    )
+    .context("GitHub environment resource verification failed")?;
+    let resource: serde_json::Value = serde_json::from_slice(&output)
+        .context("GitHub environment resource has no valid JSON metadata")?;
+    if resource
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .is_none_or(|name| name.to_lowercase() != expected_name.to_lowercase())
+    {
+        bail!("GitHub environment resource name does not match the selected destination");
+    }
+    Ok(())
 }
 
 fn push_crow_record(record: &ManagedRecord, value: &str) -> Result<()> {
@@ -702,7 +798,7 @@ fn crow_secret_args(action: &str, repo: &str, name: &str, with_value: bool) -> V
 
 #[derive(Default)]
 struct SyncValueCache {
-    values: HashMap<SyncValueCacheKey, String>,
+    values: HashMap<SyncValueCacheKey, zeroize::Zeroizing<String>>,
 }
 
 impl SyncValueCache {
@@ -711,7 +807,7 @@ impl SyncValueCache {
         store: &Store,
         value: &SyncValue,
         decrypt_session: Option<&age::DecryptSession>,
-    ) -> Result<String> {
+    ) -> Result<zeroize::Zeroizing<String>> {
         match value {
             SyncValue::Secret(secret) => {
                 let path = validated_secret_path(store, secret)?;
@@ -738,12 +834,12 @@ impl SyncValueCache {
         &mut self,
         key: SyncValueCacheKey,
         load: impl FnOnce() -> Result<String>,
-    ) -> Result<String> {
+    ) -> Result<zeroize::Zeroizing<String>> {
         if let Some(value) = self.values.get(&key) {
             return Ok(value.clone());
         }
 
-        let value = load()?;
+        let value = zeroize::Zeroizing::new(load()?);
         self.values.insert(key, value.clone());
         Ok(value)
     }
@@ -835,32 +931,31 @@ fn record_repo(record: &ManagedRecord) -> Result<String> {
     ))
 }
 
-fn push_github_variable(repo: &str, name: &str, value: &str) -> Result<()> {
-    run_gh_with_input(&["variable", "set", name, "--repo", repo], value)
+fn run_gh_with_input(args: &[&str], value: &str) -> Result<()> {
+    run_gh_command_with_input(Command::new("gh").args(args), value)
 }
 
-fn run_gh_with_input(args: &[&str], value: &str) -> Result<()> {
-    let mut child = Command::new("gh")
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .map_err(|e| anyhow!("failed to spawn gh: {e}"))?;
-    {
-        let stdin = child
-            .stdin
-            .as_mut()
-            .ok_or_else(|| anyhow!("gh stdin was not captured"))?;
-        stdin.write_all(value.as_bytes())?;
-    }
-    drop(child.stdin.take());
-    let status = child.wait().map_err(|e| anyhow!("wait on gh: {e}"))?;
-    if status.success() {
-        Ok(())
+pub(crate) fn run_gh_command_with_input(command: &mut Command, value: &str) -> Result<()> {
+    // Bound/redact diagnostics, scrub debug flags, retain active inhibitor
+    // descriptors, and terminate/reap the helper group on pipe/timeout failure.
+    let _ = crate::credential_process::capture(command, Some(value.as_bytes()))?;
+    Ok(())
+}
+
+fn with_sync_protection<G, T>(
+    doc: &SyncDocument,
+    acquire: impl FnOnce() -> Result<G>,
+    apply: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    // Acquire before identity resolution/decryption and retain across upload,
+    // verification, pruning and state commit. Planning and public variables
+    // do not enter this credential-handler boundary.
+    let _guard = if document_needs_decrypt_session(doc) {
+        Some(acquire()?)
     } else {
-        bail!("gh {} exited with status {}", args.join(" "), status)
-    }
+        None
+    };
+    apply()
 }
 
 fn codeberg_client(host: &str, auth: &forge::CodebergAuth) -> Result<forgejo_api::sync::Forgejo> {
@@ -933,23 +1028,17 @@ fn delete_forgejo_record(record: &ManagedRecord) -> Result<()> {
 }
 
 fn delete_github_record(record: &ManagedRecord) -> Result<()> {
-    if record.scope != Scope::Repo {
-        bail!("GitHub supports repository sync targets only");
-    }
-    let repo = record_repo(record)?;
-    let kind = match record.kind {
-        ManagedKind::Secret => "secret",
-        ManagedKind::Variable => "variable",
-    };
+    let args = github_record_args(record, "delete")?;
     let output = Command::new("gh")
-        .args([kind, "delete", &record.name, "--repo", &repo])
+        .args(&args)
         .output()
         .map_err(|e| anyhow!("failed to spawn gh: {e}"))?;
     if output.status.success() || github_not_found(&output.stderr) {
         return Ok(());
     }
     bail!(
-        "gh {kind} delete --repo {repo} exited with status {}: {}",
+        "gh {} exited with status {}: {}",
+        args.join(" "),
         output.status,
         String::from_utf8_lossy(&output.stderr).trim()
     )
@@ -971,6 +1060,7 @@ enum DeleteAction<'a> {
 
 fn delete_action_for(record: &ManagedRecord) -> Result<DeleteAction<'_>> {
     match (record.scope, record.kind) {
+        (Scope::Environment, _) => bail!("Forgejo environment sync is not supported"),
         (Scope::Repo, ManagedKind::Secret) => Ok(DeleteAction::RepoSecret {
             owner: required_field(record.owner.as_deref(), record, "owner")?,
             repo: required_field(record.repo.as_deref(), record, "repo")?,
@@ -1021,6 +1111,76 @@ fn is_not_found(err: &forgejo_api::ForgejoError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn github_upload_helpers_scrub_debug_and_suppress_credential_diagnostics() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "test -z \"${GH_DEBUG+x}${AGEDEBUG+x}${RUST_LOG+x}\" || { printf 'fake-secret-diagnostic' >&2; exit 17; }; cat >/dev/null"])
+            .env("GH_DEBUG", "api").env("AGEDEBUG", "1").env("RUST_LOG", "trace");
+        assert!(run_gh_command_with_input(&mut command, "fake-secret-diagnostic").is_ok());
+    }
+
+    #[test]
+    fn encrypted_sync_fails_before_effects_and_holds_protection_until_completion() {
+        use std::{cell::Cell, rc::Rc};
+        let doc = SyncDocument::from_json(r#"{"hosts":[{"targets":{"publisher":{"secret":"token.age","name":"TOKEN","githubEnvironments":[{"repository":"caniko/demo","environment":"production"}]}}}]}"#).unwrap();
+        let effects = Cell::new(0);
+        let result = with_sync_protection(
+            &doc,
+            || -> Result<()> { bail!("protection unavailable") },
+            || {
+                effects.set(effects.get() + 1);
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            effects.get(),
+            0,
+            "failed protection admitted decryption or upload"
+        );
+
+        struct Guard(Rc<Cell<bool>>);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                self.0.set(false);
+            }
+        }
+        let held = Rc::new(Cell::new(false));
+        for fail in [false, true] {
+            let result = with_sync_protection(
+                &doc,
+                || {
+                    held.set(true);
+                    Ok(Guard(held.clone()))
+                },
+                || {
+                    assert!(
+                        held.get(),
+                        "protection was released before upload/readback/state commit"
+                    );
+                    if fail {
+                        bail!("upload failed");
+                    }
+                    Ok(())
+                },
+            );
+            assert_eq!(result.is_err(), fail);
+            assert!(
+                !held.get(),
+                "completed credential handler retained its inhibitor"
+            );
+        }
+        let public = SyncDocument::from_json(r#"{"hosts":[{"targets":{"revision":{"source":"revision","name":"REVISION","githubEnvironments":[{"repository":"caniko/demo","environment":"production"}]}}}]}"#).unwrap();
+        assert!(
+            with_sync_protection(
+                &public,
+                || -> Result<()> { panic!("public variable acquired a credential inhibitor") },
+                || Ok(())
+            )
+            .is_ok()
+        );
+    }
 
     /// Contract fixture matching the shape nix/collect.nix produces.
     const FIXTURE: &str = r#"{
@@ -1353,8 +1513,8 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(first, "secret-value");
-        assert_eq!(second, "secret-value");
+        assert_eq!(first.as_str(), "secret-value");
+        assert_eq!(second.as_str(), "secret-value");
         assert_eq!(loads, 1);
     }
 
@@ -1376,8 +1536,8 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(secret, "secret");
-        assert_eq!(source, "source");
+        assert_eq!(secret.as_str(), "secret");
+        assert_eq!(source.as_str(), "source");
     }
 
     #[test]
@@ -1429,7 +1589,7 @@ mod tests {
 
         let got = read_plaintext_source_path(&validated_source_path(&store, "public.asc").unwrap())
             .unwrap();
-        assert_eq!(got, content);
+        assert_eq!(got.as_str(), content);
     }
 
     #[test]
@@ -1446,7 +1606,7 @@ mod tests {
             .get(&store, &SyncValue::Source("public.asc".to_string()), None)
             .unwrap();
 
-        assert_eq!(got, content);
+        assert_eq!(got.as_str(), content);
     }
 
     #[test]
@@ -1534,6 +1694,50 @@ mod tests {
         assert!(!args.iter().any(|arg| arg.contains("secret-value")));
     }
 
+    #[test]
+    fn environment_secret_arguments_never_fall_back_to_repository_or_foreign_host() {
+        let record = ManagedRecord {
+            provider: Provider::Github,
+            host: "github.com".into(),
+            scope: Scope::Environment,
+            environment: Some("--prod / '${not-shell}'".into()),
+            ..repo_record(ManagedKind::Secret)
+        };
+        let args = github_record_args(&record, "set").unwrap();
+        assert_eq!(
+            args,
+            [
+                "secret",
+                "set",
+                "TOKEN",
+                "--repo",
+                "github.com/caniko/repo",
+                "--env=--prod / '${not-shell}'"
+            ]
+        );
+        assert!(
+            github_environment_endpoint(&record, Some(ManagedKind::Secret))
+                .unwrap()
+                .ends_with("/secrets/TOKEN")
+        );
+        let missing = ManagedRecord {
+            environment: None,
+            ..record.clone()
+        };
+        assert!(github_record_args(&missing, "delete").is_err());
+        let wrong = ManagedRecord {
+            provider: Provider::Forgejo,
+            ..record.clone()
+        };
+        assert!(github_record_args(&wrong, "set").is_err());
+        assert!(delete_action_for(&record).is_err());
+        let mixed = ManagedRecord {
+            scope: Scope::Repo,
+            ..record
+        };
+        assert!(github_record_args(&mixed, "delete").is_err());
+    }
+
     fn repo_record(kind: ManagedKind) -> ManagedRecord {
         ManagedRecord {
             provider: Provider::Forgejo,
@@ -1542,6 +1746,7 @@ mod tests {
             owner: Some("caniko".to_string()),
             repo: Some("repo".to_string()),
             org: None,
+            environment: None,
             kind,
             name: "TOKEN".to_string(),
             target: "token".to_string(),
@@ -1557,6 +1762,7 @@ mod tests {
             owner: None,
             repo: None,
             org: Some("infra".to_string()),
+            environment: None,
             kind,
             name: "TOKEN".to_string(),
             target: "token".to_string(),
@@ -1572,6 +1778,7 @@ mod tests {
             owner: None,
             repo: None,
             org: None,
+            environment: None,
             kind,
             name: "TOKEN".to_string(),
             target: "token".to_string(),
