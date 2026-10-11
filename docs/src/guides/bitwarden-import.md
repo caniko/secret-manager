@@ -67,19 +67,31 @@ follow encryption; `--no-stage` and `--no-rekey` retain their existing meaning.
 Inherited agenix auto-staging is disabled; only newly distributed copies are
 staged, and existing work in the distribution directory is preserved.
 
+Standalone RBW imports reexecute the original command in a no-swap user scope
+when needed, then verify the effective kernel limit and acquire a logind sleep
+inhibitor before vault lookup. The guard remains held through field projection,
+encryption, installation and rekey; unavailable protection fails before vault
+effects. Public encryption-policy preparation precedes this boundary.
+
 ## Rotation and recovery
 
 Repeat the same import with `--rbw-rotate` to replace an existing source. Rotation
 requires an existing binary age v1 file and preserves module wiring. It cannot
-add a new home/system/runner target. Store imports and rotations share the
-existing secret-manager kernel lock.
+add a new home/system/runner target. RBW imports, generated rotations and adapters
+using `with_store_write_lock` share the existing secret-manager kernel lock.
 
-Missing fields, lookup failure, encryption failure and a concurrently changed
-source leave existing ciphertext intact. A failed rekey retains the newly
+Missing fields, lookup failure and encryption failure leave existing ciphertext
+intact. Source changes observed before vault lookup, after acquiring the lock,
+or before installation abort replacement. Direct editors and raw `agenix` calls
+do not automatically acquire this lock; concurrent writes through those paths
+are outside the cooperative preservation guarantee. Installation is an atomic
+rename, not filesystem compare-and-swap. A failed rekey retains the newly
 encrypted source: retry staging and `agenix rekey -a` before deploying. Never
 restore the old source after distributing a new one to some consumers.
 
-Library adapters can read `RbwSource::read()`, select `RbwItem::field()`, validate
+Library adapters must establish no-swap protection and acquire
+`protection::CredentialProtection` before `RbwSource::read()`, retain the guard
+until plaintext and credential helpers have been dropped, select `RbwItem::field()`, validate
 their own document in memory, then call `StreamEncryptor::encrypt_new()` or
 `encrypt_replace()`. Use `encryption::with_store_write_lock(root, operation)` to
 serialize installation, staging and rekey with the generic import/rotation path.

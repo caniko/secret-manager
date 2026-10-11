@@ -127,7 +127,7 @@ pub struct FileSourceArgs {
     pub rbw_sync: bool,
 
     /// Maximum duration of each rbw invocation, including pinentry interaction.
-    #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u64).range(1..=300))]
+    #[arg(long, requires = "from_rbw", default_value_t = 120, value_parser = clap::value_parser!(u64).range(1..=300))]
     pub rbw_timeout_seconds: u64,
 }
 
@@ -1086,8 +1086,9 @@ fn file_source_kind(source: &FileSourceArgs) -> Result<SourceKind> {
         || !source.rbw_map.is_empty()
         || source.rbw_sync
         || source.rbw_rotate
+        || source.rbw_timeout_seconds != 120
     {
-        bail!("rbw field/mapping/sync/rotation options require --from-rbw");
+        bail!("rbw field/mapping/sync/rotation/timeout options require --from-rbw");
     }
     Ok(match &source.from_age {
         Some(path) => SourceKind::FromAge(path.clone()),
@@ -1236,6 +1237,52 @@ mod tests {
     use super::*;
     use crate::env::TestEnv;
     use crate::render::{Stack, default_forgejo_ssh_key_age_name};
+
+    #[test]
+    fn explicit_rbw_timeout_requires_a_vault_source_while_default_stdin_remains_valid() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct SourceOptions {
+            #[command(flatten)]
+            source: FileSourceArgs,
+        }
+        let default = SourceOptions::try_parse_from(["source"]).unwrap();
+        assert_eq!(default.source.rbw_timeout_seconds, 120);
+        assert_eq!(
+            file_source_kind(&default.source).unwrap(),
+            SourceKind::Plaintext
+        );
+        for timeout in ["5", "120"] {
+            let result =
+                SourceOptions::try_parse_from(["source", "--rbw-timeout-seconds", timeout]);
+            assert!(
+                result.is_err(),
+                "explicit timeout without --from-rbw admitted stdin"
+            );
+            assert_eq!(
+                result.err().unwrap().kind(),
+                clap::error::ErrorKind::MissingRequiredArgument
+            );
+        }
+        let rbw = SourceOptions::try_parse_from([
+            "source",
+            "--from-rbw",
+            "12345678-1234-1234-1234-123456789abc",
+            "--rbw-timeout-seconds",
+            "5",
+        ])
+        .unwrap();
+        assert!(matches!(
+            file_source_kind(&rbw.source).unwrap(),
+            SourceKind::Rbw { .. }
+        ));
+        let mut direct = default.source;
+        direct.rbw_timeout_seconds = 5;
+        assert!(
+            file_source_kind(&direct).is_err(),
+            "programmatic nondefault timeout admitted stdin"
+        );
+    }
 
     fn hm_base() -> HmBaseArgs {
         HmBaseArgs {

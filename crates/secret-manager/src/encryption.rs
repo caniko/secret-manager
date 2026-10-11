@@ -77,7 +77,9 @@ impl StreamEncryptor {
     }
 
     /// Explicit rotation. Callers serialize source/rekey operations with the
-    /// store lock. The old ciphertext stays in place until encryption succeeds.
+    /// store lock, held through installation and distribution. Observed source
+    /// changes abort replacement; the final rename is not filesystem CAS against
+    /// writers bypassing that lock. The old ciphertext remains until encryption succeeds.
     pub fn encrypt_replace(&self, path: &Path, plaintext: &[u8]) -> Result<()> {
         let previous = existing_ciphertext(path)?;
         let ciphertext = self.encrypt(plaintext)?;

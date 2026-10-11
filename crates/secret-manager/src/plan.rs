@@ -124,6 +124,32 @@ fn run_rbw_plan(
     (source, rotate): (&crate::rbw::RbwSource, bool),
     env: &dyn StoreEnv,
 ) -> Result<()> {
+    run_rbw_plan_with(
+        root,
+        args,
+        plan,
+        modules,
+        (source, rotate),
+        env,
+        (
+            crate::protection::enter_scope,
+            crate::protection::CredentialProtection::acquire,
+        ),
+    )
+}
+
+fn run_rbw_plan_with<G>(
+    root: &Path,
+    args: &CommonSourceArgs,
+    plan: &AddPlan,
+    modules: &[RenderedModule],
+    (source, rotate): (&crate::rbw::RbwSource, bool),
+    env: &dyn StoreEnv,
+    (enter_scope, acquire): (
+        impl FnOnce() -> Result<Option<std::process::ExitStatus>>,
+        impl FnOnce() -> Result<G>,
+    ),
+) -> Result<()> {
     let paths = planned_secret_paths(modules, &plan.source_only_paths);
     if paths.len() != 1 {
         bail!("rbw import requires exactly one encrypted source destination");
@@ -151,38 +177,44 @@ fn run_rbw_plan(
     // Resolve public policy before opening the vault; embedders release their
     // evaluation/build capacity before returning this backend.
     let encryptor = env.stream_encryptor(root)?;
-    let payload = source.payload()?;
-    let _guard = crate::rotate::acquire_lock(root)?;
-    if validate()? != previous {
-        bail!("encrypted source changed during vault lookup; refusing replacement");
-    }
-    if rotate {
-        encryptor.encrypt_replace(&destination, &payload)?;
-    } else {
-        encryptor.encrypt_new(&destination, &payload)?;
-    }
-    drop(payload);
-    if !rotate {
-        write_modules(root, modules)?;
-    }
-    let touched = if rotate {
-        vec![destination]
-    } else {
-        touched_paths(root, modules, &plan.source_only_paths, true)
-    };
-    let finish = || -> Result<()> {
-        stage_paths(root, &touched, args.no_stage)?;
-        if !args.no_rekey {
-            crate::rotate::distribute(root, &rel, args.no_stage)?;
-        } else {
-            eprintln!("skipped rekey — run `agenix rekey -a` before deploying.");
+    crate::protection::with_protection(enter_scope, acquire, || {
+        let payload = source.payload()?;
+        let _guard = crate::rotate::acquire_lock(root)?;
+        if validate()? != previous {
+            bail!("encrypted source changed during vault lookup; refusing replacement");
         }
+        if rotate {
+            encryptor.encrypt_replace(&destination, &payload)?;
+        } else {
+            encryptor.encrypt_new(&destination, &payload)?;
+        }
+        drop(payload);
+        if !rotate {
+            write_modules(root, modules)?;
+        }
+        let touched = if rotate {
+            vec![destination.clone()]
+        } else {
+            touched_paths(root, modules, &plan.source_only_paths, true)
+        };
+        let finish = || -> Result<()> {
+            stage_paths(root, &touched, args.no_stage)?;
+            if !args.no_rekey {
+                crate::rotate::distribute(root, &rel, args.no_stage)?;
+            } else {
+                eprintln!("skipped rekey — run `agenix rekey -a` before deploying.");
+            }
+            Ok(())
+        };
+        finish().map_err(|error| anyhow!("encrypted rbw source is saved; distribution is incomplete. Retry staging/rekeying: {error}"))?;
+        print_written_summary(root, modules, &plan.source_only_paths);
         Ok(())
-    };
-    finish().map_err(|error| anyhow!("encrypted rbw source is saved; distribution is incomplete. Retry staging/rekeying: {error}"))?;
-    print_written_summary(root, modules, &plan.source_only_paths);
-    Ok(())
+    })
 }
+
+#[cfg(test)]
+#[path = "plan/rbw_tests.rs"]
+mod rbw_tests;
 
 pub fn build_forgejo_gpg_key_pair_plan(
     name: &str,

@@ -151,6 +151,22 @@ fn run_scope(command: &mut Command, input: Option<&[u8]>) -> Result<ExitStatus> 
     child.0.wait().context("wait for no-swap credential scope")
 }
 
+pub(crate) fn with_protection<G>(
+    enter_scope: impl FnOnce() -> Result<Option<ExitStatus>>,
+    acquire: impl FnOnce() -> Result<G>,
+    operation: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    if let Some(status) = enter_scope()? {
+        ensure!(
+            status.success(),
+            "scoped credential command failed with {status}"
+        );
+        return Ok(());
+    }
+    let _guard = acquire()?;
+    operation()
+}
+
 impl CredentialProtection {
     fn from_inhibitor(sleep: dbus::arg::OwnedFd) -> Result<Self> {
         let sleep = Arc::new(sleep);

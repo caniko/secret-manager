@@ -969,16 +969,11 @@ fn with_sync_protection<G>(
     // Acquire before identity resolution/decryption and retain across upload,
     // verification, pruning and state commit. Planning and public variables
     // do not enter this credential-handler boundary.
-    let _guard = if needs_decrypt {
-        if let Some(status) = enter_scope()? {
-            anyhow::ensure!(status.success(), "scoped sync failed with {status}");
-            return Ok(());
-        }
-        Some(acquire()?)
+    if needs_decrypt {
+        crate::protection::with_protection(enter_scope, acquire, apply)
     } else {
-        None
-    };
-    apply()
+        apply()
+    }
 }
 
 fn codeberg_client(host: &str, auth: &forge::CodebergAuth) -> Result<forgejo_api::sync::Forgejo> {
