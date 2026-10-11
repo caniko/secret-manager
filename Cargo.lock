@@ -1100,8 +1100,9 @@ dependencies = [
 
 [[package]]
 name = "nix-manager-core"
-version = "0.3.0"
-source = "git+https://github.com/caniko/nix-manager-core.git?rev=1e93309793e52347c62e42d85085f53912484f0f#1e93309793e52347c62e42d85085f53912484f0f"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "50f645576a65abbfebf671df0e701a8ebef1fec7cedd3e14dcd3990df6483d54"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1110,8 +1111,10 @@ dependencies = [
  "forgejo-api",
  "hostname",
  "indicatif",
+ "libc",
  "serde",
  "serde_json",
+ "tempfile",
  "url",
  "walkdir",
 ]
@@ -1186,7 +1189,8 @@ dependencies = [
 [[package]]
 name = "pklx"
 version = "0.1.0"
-source = "git+https://github.com/caniko/nix-pklx.git#19179a0a6446c544b8333ce21b16f019acfb4f0e"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "078900f0f360565b4a07856a40dd98394223c5bdade0cf35200afbf33acc6db5"
 dependencies = [
  "clap",
  "indexmap",
