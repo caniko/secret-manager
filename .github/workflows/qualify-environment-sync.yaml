@@ -48,6 +48,10 @@ jobs:
           nix develop -c cargo clippy --workspace --all-targets --locked --jobs 2 -- -D warnings 2>&1 | tee "$EVIDENCE/clippy.log"
           nix develop -c cargo doc --workspace --no-deps --locked --jobs 2 2>&1 | tee "$EVIDENCE/docs.log"
           nix eval --raw .#checks.x86_64-linux.catalog-renderers.drvPath 2>&1 | tee "$EVIDENCE/catalog-renderer.log"
+          nix build --no-link --json .#secret-manager > "$EVIDENCE/production-result.json" 2> >(tee "$EVIDENCE/production-build.log" >&2)
+          OUTPUT=$(nix eval --raw .#packages.x86_64-linux.secret-manager.outPath)
+          "$OUTPUT/bin/secret-manager" --version > "$EVIDENCE/production-version"
+          sha256sum "$OUTPUT/bin/secret-manager" > "$EVIDENCE/production-binary.sha256"
           sha256sum "$EVIDENCE"/*.log > "$EVIDENCE/logs.sha256"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
