@@ -1,7 +1,7 @@
 {
   self,
   nixpkgs,
-  harbor-rs,
+  harbor,
   rust-overlay,
   treefmt-nix,
   git-hooks,
@@ -11,13 +11,13 @@
   ...
 }:
 nix-manager-core.lib.mkManagerOutputs {
-  inherit self nixpkgs harbor-rs rust-overlay treefmt-nix git-hooks;
+  inherit self nixpkgs harbor rust-overlay treefmt-nix git-hooks;
   crateName = "secret-manager";
   rustEdition = "2024";
   treefmtModule = {pkgs, ...} @ args:
     (import ./treefmt.nix {
       rustfmtPackage =
-        (harbor-rs.lib.mkToolchain {
+        (harbor.lib.rust.mkToolchain {
           inherit pkgs;
           toolchainProfile = "nightly";
         }).rustToolchain;
@@ -237,7 +237,6 @@ nix-manager-core.lib.mkManagerOutputs {
 
     packages = forAllSystems (system: let
       pkgs = pkgsFor system;
-      pklx = nix-pklx.packages.${system}.pklx;
       docs = pkgs.stdenv.mkDerivation {
         pname = "secret-manager-docs";
         version = "0.1.0";
@@ -253,15 +252,19 @@ nix-manager-core.lib.mkManagerOutputs {
           cp -r docs/book "$out"
         '';
       };
-    in {
-      inherit docs;
-      inherit pklx;
-      site = pkgs.runCommand "secret-manager-site" {} ''
-        mkdir -p $out
-        cp -rL --no-preserve=mode ${docs}/. $out/
-        printf '%s\n' "secret-manager.tartanoglu.com" > $out/.domains
-      '';
-    });
+    in
+      {
+        inherit docs;
+        site = pkgs.runCommand "secret-manager-site" {} ''
+          mkdir -p $out
+          cp -rL --no-preserve=mode ${docs}/. $out/
+          printf '%s\n' "secret-manager.tartanoglu.com" > $out/.domains
+        '';
+      }
+      // lib.optionalAttrs (builtins.hasAttr system nix-pklx.packages) {
+        # Re-export only the platforms admitted by the Pkl engine's producer.
+        pklx = nix-pklx.packages.${system}.pklx;
+      });
 
     # Crossbow consumers need the runtime decryptor on the target host. Keep
     # the native package surface above unchanged and publish an explicit
@@ -271,14 +274,14 @@ nix-manager-core.lib.mkManagerOutputs {
       then {}
       else let
         pkgs = pkgsFor system;
-        toolchain = harbor-rs.lib.mkToolchain {
+        toolchain = harbor.lib.rust.mkToolchain {
           inherit pkgs;
           toolchainProfile = "nightly";
         };
-        cross = harbor-rs.lib.mkCross {inherit pkgs system;};
+        cross = harbor.lib.rust.mkCross {inherit pkgs system;};
         cargo = cargoFor system;
         targetPkgs = cross.linuxAarch64.pkgsCross;
-        packages = harbor-rs.lib.mkCrossPackages {
+        packages = harbor.lib.rust.mkCrossPackages {
           inherit pkgs cross;
           inherit (toolchain) craneLib;
           pname = "secret-manager";
@@ -313,13 +316,13 @@ nix-manager-core.lib.mkManagerOutputs {
 
     devShells = forAllSystems (system: let
       pkgs = pkgsFor system;
-      toolchain = harbor-rs.lib.mkToolchain {
+      toolchain = harbor.lib.rust.mkToolchain {
         inherit pkgs;
         toolchainProfile = "nightly";
       };
-      cross = harbor-rs.lib.mkCross {inherit pkgs system;};
+      cross = harbor.lib.rust.mkCross {inherit pkgs system;};
     in {
-      docs = harbor-rs.lib.mkDocsShell {
+      docs = harbor.lib.rust.mkDocsShell {
         inherit pkgs cross;
         inherit (toolchain) craneLib;
         packages = [pkgs.mdbook];
