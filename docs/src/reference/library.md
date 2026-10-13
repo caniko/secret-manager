@@ -2,6 +2,21 @@
 
 The `secret_manager` library provides the building blocks used by the CLI.
 
+The registry package is `caniko-secret-manager`. Use a Cargo package alias to
+retain the existing library imports:
+
+```toml
+[dependencies]
+secret-manager = { package = "caniko-secret-manager", version = "0.3.0" }
+```
+
+The minimum supported Rust compiler is 1.88. Public Forgejo authentication
+types now use Forgejo API 0.11; callers exchanging those types must use the
+same generation. The Reqwest 0.13 blocking client retains JSON, Rustls,
+HTTP/2, charset decoding and system proxy discovery. Persisted version-1
+sync-state records retain their destination identities across the TOML 1.1
+migration, including GitHub environment ownership.
+
 ## Modules
 
 | Module   | Description                                                                                                   |

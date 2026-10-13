@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-12
+
+### Changed
+
+- Publish the Rust package as `caniko-secret-manager`, distinguishing this
+  project from the unrelated `secret-manager` crate. The executable remains
+  `secret-manager` and the library remains `secret_manager`.
+- Consume nix-manager-core 0.4.1 and forgejo-api 0.11 with reqwest 0.13.5 and
+  base64 0.23, preserving the synchronous client and Rustls TLS backend while
+  converging on one base64 dependency generation.
+- Declare and verify Rust 1.88 as the minimum supported toolchain.
+- Use the maintained TOML 1.1 generation so persisted sync-state serialization
+  shares the same datetime dependency generation as current Cargo metadata tools.
+
+### Migration
+
+- Registry consumers use
+  `secret-manager = { package = "caniko-secret-manager", version = "0.3.0" }`.
+  Existing `secret_manager` imports, CLI commands and Nix output names remain
+  valid. Consumers using the public Forgejo authentication type must also
+  upgrade forgejo-api to 0.11.
+
 ### Fixed
 
 - Resume interrupted GitHub App imports after encrypted checkpoint persistence,

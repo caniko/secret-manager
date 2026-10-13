@@ -464,6 +464,55 @@ source = "age/secrets/token.age"
         assert_eq!(state.managed[0].provider, Provider::Forgejo);
     }
 
+    #[test]
+    fn persisted_state_upgrade_does_not_schedule_remote_pruning() {
+        // Pin the version-1 wire shape rather than generating the fixture with
+        // the serializer under test. Environment ownership must survive too.
+        let original = r#"version = 1
+
+[[managed]]
+host = "codeberg.org"
+scope = "repo"
+owner = "caniko"
+repo = "repo"
+kind = "secret"
+name = "TOKEN"
+target = "token"
+source = "age/secrets/token.age"
+
+[[managed]]
+provider = "github"
+host = "github.com"
+scope = "environment"
+owner = "caniko"
+repo = "repo"
+environment = "production"
+kind = "variable"
+name = "PUBLIC_VALUE"
+target = "public"
+source = 'age/public/quote" and ü.txt'
+"#;
+        let dir = crate::io::TempDir::new().unwrap();
+        let path = dir.path.join("sync-state.toml");
+        fs::write(&path, original).unwrap();
+        let before = SyncState::load(&path).unwrap().unwrap();
+        assert_eq!(before.managed.len(), 2);
+        assert!(before.managed.iter().any(|entry| {
+            entry.provider == Provider::Github
+                && entry.source == "age/public/quote\" and ü.txt"
+                && entry.environment.as_deref() == Some("production")
+                && entry.kind == ManagedKind::Variable
+        }));
+        before.write_atomic(&path).unwrap();
+        let after = SyncState::load(&path).unwrap().unwrap();
+        assert_eq!(after.version, STATE_VERSION);
+        assert_eq!(after.managed, before.managed);
+        assert!(stale_records(&before.managed, &after.managed).is_empty());
+        let once = fs::read(&path).unwrap();
+        after.write_atomic(&path).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), once);
+    }
+
     fn repo_record(target: &str, name: &str) -> ManagedRecord {
         ManagedRecord {
             provider: Provider::Forgejo,

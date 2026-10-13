@@ -14,12 +14,19 @@ inputs.secret-manager.url = "git+https://github.com/caniko/secret-manager";
 
 ## From source (Rust)
 
-Requires Rust 2024 edition toolchain.
+Requires Rust 1.88 or newer.
 
 ```sh
 git clone https://github.com/caniko/secret-manager.git
 cd secret-manager
 cargo build --release
+```
+
+The registry package is `caniko-secret-manager`; installing it provides the
+same `secret-manager` executable:
+
+```sh
+cargo install caniko-secret-manager --version 0.3.0 --locked
 ```
 
 ## Prerequisites

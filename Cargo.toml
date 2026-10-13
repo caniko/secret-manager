@@ -3,35 +3,40 @@ resolver = "2"
 members = ["crates/secret-manager"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
+rust-version = "1.88"
 license = "MIT"
 repository = "https://github.com/caniko/secret-manager"
 authors = ["caniko"]
+readme = "README.md"
 
 [workspace.dependencies]
-nix-manager-core = "0.3.2"
+nix-manager-core = "0.4.1"
 anyhow = "1"
-base64 = "0.22"
+base64 = "0.23"
 clap = { version = "4", features = ["derive"] }
-forgejo-api = { version = "0.10", default-features = false, features = [
+forgejo-api = { version = "0.11.1", default-features = false, features = [
   "sync",
   "rustls-tls",
 ] }
 libc = "0.2"
 pklx = "0.1.0"
 rand = "0.8"
-reqwest = { version = "0.12", default-features = false, features = [
+reqwest = { version = "0.13.5", default-features = false, features = [
   "blocking",
   "json",
-  "rustls-tls",
+  "rustls",
+  "charset",
+  "http2",
+  "system-proxy",
 ] }
 ring = "0.17"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["rt"] }
-toml = "0.9"
+toml = "1.1"
 url = "2"
 walkdir = "2"
 zeroize = "1"
