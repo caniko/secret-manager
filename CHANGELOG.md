@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-20
+
+### Security
+
+- Consume pklx 0.2 (pklr 5, zip 9), removing zip 8.6.0 and its advisories RUSTSEC-2026-0367, RUSTSEC-2026-0368 and RUSTSEC-2026-0369 from the dependency graph. The public API is unchanged.
+- Update rustls-webpki to 0.103.16 and webpki-root-certs to 1.0.10 for RUSTSEC-2026-0382 and RUSTSEC-2026-0383.
+
 ## [0.3.0] - 2026-10-12
 
 ### Changed
@@ -83,3 +90,6 @@ runner-env add`), and Pkl evaluation via nix-pklx.
   helper from the expected module surface.
 - Corrected "foregejo" typos to "forgejo" in Nix module paths and source
   references.
+
+[Unreleased]: https://github.com/caniko/secret-manager/compare/0.3.1...HEAD
+[0.3.1]: https://github.com/caniko/secret-manager/compare/0.3.0...0.3.1
