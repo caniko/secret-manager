@@ -11,6 +11,7 @@ pub mod credential_process;
 pub mod encryption;
 pub mod env;
 pub mod github_app;
+pub mod github_token;
 pub mod gpg;
 pub mod io;
 pub mod legacy;

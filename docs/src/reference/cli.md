@@ -110,6 +110,42 @@ existing `--identity` / `SECRET_MANAGER_AGE_IDENTITIES` contract. Canix hardware
 identity stubs under `age/master_identities/` should be passed explicitly.
 Declaration of `services.secretSync.targets` does not schedule execution.
 
+### `github token` — Account tokens through the device flow
+
+Mint a GitHub OAuth token for an account (for example a bot user) and store it
+as agenix sources without plaintext touching the store:
+
+```sh
+SECRET_MANAGER_AGE_ENCRYPTOR=$(nix build --no-link --print-out-paths .#agenix-stream-encryptor)/bin/agenix-stream-encryptor \
+secret-manager github token --login canikroid \
+  --scope repo --scope write:gpg_key --scope admin:public_key \
+  --out age/secrets/users/can/canikroid_github_token.age \
+  --env-out age/secrets/users/can/canikroid_github_env.age
+```
+
+The command prints a one-time code; authorize it at
+<https://github.com/login/device> in a browser signed in as `--login`. It then
+verifies the token authenticates as that login with every requested scope
+(`admin:x` implies `write:x`/`read:x`), encrypts the bare token to `--out` and
+`<ENV_NAME>=<token>` to `--env-out`, and exits. Nothing is stored on a login or
+scope mismatch.
+
+`gh` runs in a private temporary config directory under `$XDG_RUNTIME_DIR`,
+removed on exit, so the token never reaches your own `gh` login or keyring.
+Existing sources are refused unless `--rotate` is given. Stage the sources and
+run `agenix rekey` afterwards.
+
+| Flag                  | Description                                                                       |
+| --------------------- | --------------------------------------------------------------------------------- |
+| `--login LOGIN`       | Account the token must belong to                                                  |
+| `--scope SCOPE`       | Requested and required OAuth scope; repeatable                                    |
+| `--out PATH`          | Encrypted source for the bare token                                               |
+| `--env-out PATH`      | Optional encrypted `ENV_NAME=token` source for EnvironmentFile consumers          |
+| `--env-name NAME`     | Variable name for `--env-out` (default `GH_TOKEN`)                                |
+| `--rotate`            | Replace existing sources                                                          |
+| `--encryptor PATH`    | `lib.mkAgenixStreamEncryptor` executable (default `SECRET_MANAGER_AGE_ENCRYPTOR`) |
+| `--timeout-seconds N` | Authorization wait, 30–3600 (default 900)                                         |
+
 ### `gpg publish` — Account signing keys
 
 Register an existing armored public key on authenticated forge accounts:

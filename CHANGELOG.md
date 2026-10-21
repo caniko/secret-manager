@@ -2,7 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- `secret-manager github token` mints an account token through `gh`'s device
+  flow, verifies its login and scopes, and encrypts it (bare and/or as an
+  `ENV=token` file) with the store's agenix master policy. `gh` state lives in
+  a private temporary directory, so the token never reaches the caller's login.
+
 ### Fixed
+
+- `mkAgenixStreamEncryptor` kept only a dangling symlink to agenix-rekey's age
+  wrapper because `builtins.match` dropped its string context; the wrapper is
+  now a runtime dependency of the encryptor package.
 
 - `mkSecret` now forwards `userId` to `age.secrets.<name>.settings.userId` for
   the `gpg-key-pair` generator; it was previously accepted and silently

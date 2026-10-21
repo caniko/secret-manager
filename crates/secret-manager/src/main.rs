@@ -31,7 +31,7 @@ enum Command {
     #[command(subcommand, arg_required_else_help = true)]
     Gpg(gpg::GpgCmd),
 
-    /// Enroll and publish GitHub-issued App credentials.
+    /// Enroll GitHub App credentials or mint account tokens into the store.
     #[command(subcommand, arg_required_else_help = true)]
     Github(github_app::GithubCmd),
 
