@@ -27,6 +27,8 @@ pub enum GithubCmd {
     /// Enroll, adopt and publish GitHub-issued App credentials.
     #[command(subcommand)]
     App(AppCmd),
+    /// Mint an account token through gh's device flow and encrypt it into the store.
+    Token(crate::github_token::TokenArgs),
 }
 
 #[derive(Subcommand)]
@@ -136,8 +138,10 @@ fn random_nonce() -> String {
 
 impl GithubCmd {
     pub fn run(self) -> Result<()> {
-        let Self::App(command) = self;
-        command.run()
+        match self {
+            Self::App(command) => command.run(),
+            Self::Token(args) => args.run(),
+        }
     }
 }
 
