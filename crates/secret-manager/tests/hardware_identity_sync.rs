@@ -46,17 +46,35 @@ fn executable(path: &Path, script: &str) {
 
 #[test]
 fn sync_unlocks_a_hardware_identity_once_for_every_secret() {
-    let scope = Command::new("systemd-run")
-        .args([
+    let protected = [
+        &[
+            "systemd-run",
             "--user",
             "--scope",
             "--quiet",
             "--property=MemorySwapMax=0",
             "true",
-        ])
-        .output();
-    if !scope.is_ok_and(|output| output.status.success()) {
-        eprintln!("SKIPPED: credential sync needs a systemd user session for its no-swap scope");
+        ][..],
+        &[
+            "systemd-inhibit",
+            "--what=sleep",
+            "--mode=block",
+            "--who=test",
+            "--why=probe",
+            "true",
+        ],
+    ]
+    .iter()
+    .all(|probe| {
+        Command::new(probe[0])
+            .args(&probe[1..])
+            .output()
+            .is_ok_and(|output| output.status.success())
+    });
+    if !protected {
+        eprintln!(
+            "SKIPPED: credential sync needs a no-swap systemd user scope and a logind sleep inhibitor"
+        );
         return;
     }
     let temp = tempfile::tempdir().unwrap();
