@@ -136,7 +136,14 @@ impl SyncArgs {
             || {
                 let decrypt_session = if needs_decrypt {
                     let identities = store.resolve_identities(&self.identities)?;
-                    Some(age::DecryptSession::from_identities(&identities)?)
+                    let session = age::DecryptSession::from_identities(&identities)?;
+                    let secrets: Vec<PathBuf> = desired_state
+                        .iter()
+                        .filter(|record| record.kind == ManagedKind::Secret)
+                        .filter_map(|record| validated_secret_path(&store, &record.source).ok())
+                        .collect();
+                    session.prefetch(&secrets)?;
+                    Some(session)
                 } else {
                     None
                 };
