@@ -49,6 +49,11 @@ secret-manager forgejo gpg-key-pair \
 New keys are generated when neither `--from-age` nor `--from-file` is passed.
 Use `--rotate` to replace an existing private-key source.
 
+A Nix `mkSecret { generator = "gpg-key-pair"; userId = "Name <email>"; … }`
+passes `userId` to the generator as `age.secrets.<name>.settings.userId`. Forges
+mark a signature verified only when the key UID carries the committer's
+verified email, so set it for signing identities.
+
 ## Passphrase credential
 
 ```sh
