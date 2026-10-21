@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `mkSecret` now forwards `userId` to `age.secrets.<name>.settings.userId` for
+  the `gpg-key-pair` generator; it was previously accepted and silently
+  dropped. The default is `null`, leaving the generator's own UID in place.
+
 ## [0.3.1] - 2026-10-20
 
 ### Security

@@ -7,7 +7,8 @@
     source,
     generator ? null,
     algorithm ? "ed25519",
-    userId ? name,
+    # Full OpenPGP UID ("Name <email>") for the gpg-key-pair generator.
+    userId ? null,
     length ? 32,
     owner ? null,
     group ? null,
@@ -106,6 +107,9 @@
         }
         // lib.optionalAttrs (generatorName != null) {
           generator.script = generatorName;
+        }
+        // lib.optionalAttrs (generatorName == "gpg-key-pair" && userId != null) {
+          settings = {inherit userId;};
         });
     };
 

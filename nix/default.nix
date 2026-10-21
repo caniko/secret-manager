@@ -32,7 +32,6 @@ nix-manager-core.lib.mkManagerOutputs {
   ];
   extraDevShellPackages = pkgs: [pkgs.gnupg pkgs.openssl];
   extraOutputs = {
-    self,
     lib,
     forAllSystems,
     pkgsFor,
@@ -163,6 +162,39 @@ nix-manager-core.lib.mkManagerOutputs {
       assert runnerFileEnv.instances == {};
         pkgs.runCommand "secret-manager-catalog-renderers" {} "touch $out";
 
+    # agenix-rekey hands `settings` to the generator, which owns the UID.
+    gpgUserIdCheckFor = pkgs: let
+      secret = userId:
+        (lib.evalModules {
+          modules = [
+            {
+              options.age.secrets = lib.mkOption {
+                type = lib.types.attrsOf lib.types.raw;
+                default = {};
+              };
+              options.assertions = lib.mkOption {
+                type = lib.types.listOf lib.types.raw;
+                default = [];
+              };
+            }
+            (secretLib.mkSecret ({
+                name = "bot-gpg-key";
+                stack = "system";
+                source = "age/secrets/bot-gpg-key.age";
+                generator = "gpg-key-pair";
+              }
+              // lib.optionalAttrs (userId != null) {inherit userId;}))
+          ];
+        })
+        .config
+        .age
+        .secrets
+        .bot-gpg-key;
+    in
+      assert (secret "bot <bot@example.test>").settings == {userId = "bot <bot@example.test>";};
+      assert !(secret null ? settings);
+        pkgs.runCommand "secret-manager-gpg-user-id" {} "touch $out";
+
     runnerFileEnvCheckFor = pkgs: let
       rendered = secretLib.mkForgejoRunnerFileEnv {
         catalog = {
@@ -227,6 +259,7 @@ nix-manager-core.lib.mkManagerOutputs {
         });
       catalog-renderers = rendererCheckFor pkgs;
       runner-file-env-renderer = runnerFileEnvCheckFor pkgs;
+      gpg-user-id = gpgUserIdCheckFor pkgs;
     });
     nixosModules = {
       secretSync = module;
@@ -282,7 +315,7 @@ nix-manager-core.lib.mkManagerOutputs {
           inherit pkgs cross;
           inherit (toolchain) craneLib;
           pname = "secret-manager";
-          commonArgs = cargo.commonArgs;
+          inherit (cargo) commonArgs;
           targets = ["aarch64-linux"];
           targetArgs."aarch64-linux" = {
             doCheck = false;
