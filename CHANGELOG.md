@@ -11,6 +11,10 @@
 
 ### Fixed
 
+- `rotate` failure messages state the actual recovery: a rotation restores
+  the previous source, while creating a new source removes the partial file
+  (they previously claimed "the previous source is untouched" in both cases).
+  Structural rejections now show the file's first bytes.
 - `mkAgenixStreamEncryptor` kept only a dangling symlink to agenix-rekey's age
   wrapper because `builtins.match` dropped its string context; the wrapper is
   now a runtime dependency of the encryptor package.
