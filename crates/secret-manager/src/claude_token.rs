@@ -299,7 +299,8 @@ mod tests {
         fs::create_dir(&bin).unwrap();
         script(
             &bin.join("agenix"),
-            "printf rekeyed >age/rekeyed/atlas/bbb-claude-oauth.age; printf again >age/rekeyed/atlas/aaa-other.age",
+            // `ddd-other-claude-oauth` belongs to the `other-claude-oauth` attribute.
+            "printf rekeyed >age/rekeyed/atlas/bbb-claude-oauth.age; printf again >age/rekeyed/atlas/aaa-other.age; printf sibling >age/rekeyed/atlas/ddd-other-claude-oauth.age",
         );
         let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
         let status = Command::new(std::env::current_exe().unwrap())

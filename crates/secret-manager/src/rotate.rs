@@ -657,7 +657,7 @@ pub(crate) fn distribute_named(
             && path
                 .file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| name.ends_with(&suffix))
+                .is_some_and(|name| is_copy_of(name, &suffix))
     };
     let snapshot = || status_names(repo_root).and_then(|names| snapshot_content(repo_root, &names));
     let before = snapshot().map_err(|e| {
@@ -700,7 +700,20 @@ fn tracked_copy(repo_root: &Path, suffix: &str) -> Result<bool> {
             out.stderr.trim()
         );
     }
-    Ok(out.stdout.lines().any(|line| line.ends_with(suffix)))
+    Ok(out.stdout.lines().any(|line| {
+        Path::new(line)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| is_copy_of(name, suffix))
+    }))
+}
+
+/// agenix-rekey names copies `<hex hash>-<attr>.age`; a bare suffix match
+/// would also claim `other-<attr>` copies, so require the exact hash prefix.
+fn is_copy_of(file_name: &str, suffix: &str) -> bool {
+    file_name
+        .strip_suffix(suffix)
+        .is_some_and(|hash| !hash.is_empty() && hash.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 /// Repo-relative paths with worktree or index changes, parsed from
