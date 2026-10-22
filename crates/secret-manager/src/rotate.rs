@@ -531,7 +531,7 @@ fn validate_fresh(repo_root: &Path, secret_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn stage_source(repo_root: &Path, rel: &Path, no_stage: bool) -> Result<()> {
+pub(crate) fn stage_source(repo_root: &Path, rel: &Path, no_stage: bool) -> Result<()> {
     if no_stage {
         return Ok(());
     }
