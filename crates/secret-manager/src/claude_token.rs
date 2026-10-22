@@ -18,7 +18,7 @@ use zeroize::Zeroizing;
 
 use crate::encryption::{StreamEncryptor, require_missing, with_store_write_lock};
 use crate::protection::{self, CredentialProtection};
-use crate::rotate::{distribute, stage_source};
+use crate::rotate::{distribute, distribute_named, stage_source};
 use crate::store::{Store, resolve_against};
 
 const PREFIX: &str = "sk-ant-oat01-";
@@ -60,6 +60,10 @@ pub struct TokenArgs {
     /// Do not stage the source or rekeyed copies.
     #[arg(long)]
     pub no_stage: bool,
+    /// Agenix attribute name of the secret; stages only its rekeyed copies,
+    /// leaving other uncommitted rekeyed changes untouched.
+    #[arg(long)]
+    pub secret: Option<String>,
 }
 
 impl TokenArgs {
@@ -121,6 +125,8 @@ impl TokenArgs {
         stage_source(&store.root, &rel, self.no_stage)?;
         if self.no_rekey {
             eprintln!("skipped rekey — run `agenix rekey -a` before deploying.");
+        } else if let Some(secret) = &self.secret {
+            distribute_named(&store.root, &rel, secret, self.no_stage)?;
         } else {
             distribute(&store.root, &rel, self.no_stage)?;
         }
@@ -204,6 +210,7 @@ mod tests {
             ),
             no_rekey: true,
             no_stage: true,
+            secret: None,
         }
     }
 
@@ -252,6 +259,100 @@ mod tests {
             assert!(!format!("{error:#}").contains("AbCdEf"));
             assert!(!root.path().join("age/secrets/claude.age").exists());
         }
+    }
+
+    /// Runs only inside `named_distribution_stages_only_its_copies`, whose
+    /// fake `agenix` on PATH must not leak into other tests.
+    #[test]
+    fn named_distribution_fixture() {
+        let Some(root) = std::env::var_os("SECRET_MANAGER_DISTRIBUTE_FIXTURE") else {
+            return;
+        };
+        distribute_named(
+            Path::new(&root),
+            Path::new("age/secrets/claude.age"),
+            "claude-oauth",
+            false,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn named_distribution_stages_only_its_copies() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo");
+        let git = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .args(args)
+                    .current_dir(&repo)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        fs::create_dir_all(repo.join("age/rekeyed/atlas")).unwrap();
+        git(&["init", "-q"]);
+        // Another operation's uncommitted rekeyed change.
+        fs::write(repo.join("age/rekeyed/atlas/aaa-other.age"), b"foreign").unwrap();
+        let bin = root.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        script(
+            &bin.join("agenix"),
+            "printf rekeyed >age/rekeyed/atlas/bbb-claude-oauth.age; printf again >age/rekeyed/atlas/aaa-other.age",
+        );
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "claude_token::tests::named_distribution_fixture",
+                "--quiet",
+            ])
+            .env("PATH", path)
+            .env("SECRET_MANAGER_DISTRIBUTE_FIXTURE", &repo)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let staged = Command::new("git")
+            .args(["diff", "--cached", "--name-only"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(staged.stdout).unwrap(),
+            "age/rekeyed/atlas/bbb-claude-oauth.age\n"
+        );
+    }
+
+    #[test]
+    fn named_distribution_rejects_an_undeclared_secret() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo");
+        fs::create_dir_all(repo.join("age/rekeyed")).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let bin = root.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        script(&bin.join("agenix"), "true");
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "claude_token::tests::named_distribution_fixture",
+                "--nocapture",
+            ])
+            .env("PATH", path)
+            .env("SECRET_MANAGER_DISTRIBUTE_FIXTURE", &repo)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("declare the secret"));
     }
 
     #[test]

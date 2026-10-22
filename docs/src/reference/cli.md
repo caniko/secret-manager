@@ -161,7 +161,9 @@ Claude Code has no machine-readable token output, so the command runs
 token into a hidden prompt. It must start with `sk-ant-oat01-`; anything else
 is rejected and nothing is stored. The token is encrypted with the store's
 agenix master policy, the source is staged, and `agenix rekey` distributes it.
-Tokens last one year; renew with `--rotate`.
+With `--secret NAME` (the secret's agenix attribute) only that secret's
+rekeyed copies are staged, so unrelated uncommitted rekeyed changes do not
+block it. Tokens last one year; renew with `--rotate`.
 
 | Flag               | Description                                                                       |
 | ------------------ | --------------------------------------------------------------------------------- |
@@ -170,6 +172,7 @@ Tokens last one year; renew with `--rotate`.
 | `--claude PATH`    | Claude Code executable (default `claude`)                                         |
 | `--no-rekey`       | Skip `agenix rekey`; run `agenix rekey -a` before deploying                       |
 | `--no-stage`       | Leave staging of the source and rekeyed copies to you                             |
+| `--secret NAME`    | Agenix attribute name; stage only its rekeyed copies, ignoring other dirty ones   |
 | `--encryptor PATH` | `lib.mkAgenixStreamEncryptor` executable (default `SECRET_MANAGER_AGE_ENCRYPTOR`) |
 
 ### `gpg publish` — Account signing keys
