@@ -260,3 +260,73 @@ esac
         }
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn targeted_sync_keeps_unselected_declared_entries_managed() {
+    use std::{fs, os::unix::fs::PermissionsExt, process::Command};
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let bin = root.join("bin");
+    fs::create_dir(&bin).unwrap();
+    let gh = bin.join("gh");
+    // Only variable uploads succeed; any delete fails the run.
+    fs::write(
+        &gh,
+        "#!/bin/sh\nprintf '<%s>' \"$@\" >> \"$GH_LOG\"\nprintf '\\n' >> \"$GH_LOG\"\ntest \"$1/$2\" = variable/set && cat > /dev/null\n",
+    )
+    .unwrap();
+    fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(root.join("a"), "a").unwrap();
+    fs::write(root.join("b"), "b").unwrap();
+    let doc = serde_json::json!({"hosts":[{"targets":{
+        "a":{"source":"a","name":"A","github":["caniko/demo"]},
+        "b":{"source":"b","name":"B","github":["caniko/demo"]}
+    }}]})
+    .to_string();
+    let config = root.join("targets.json");
+    fs::write(&config, &doc).unwrap();
+    let declared = desired_records(&SyncDocument::from_json(&doc).unwrap()).unwrap();
+    let state = root.join("state.toml");
+    SyncState::new(declared.clone())
+        .write_atomic(&state)
+        .unwrap();
+    let log = root.join("calls");
+    let path = std::env::join_paths(
+        std::iter::once(bin).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let sync = |extra: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_secret-manager"))
+            .args(["sync", "--config"])
+            .arg(&config)
+            .arg("--state")
+            .arg(&state)
+            .args(["--target", "a"])
+            .args(extra)
+            .env("SECRET_MANAGER_STORE", root)
+            .env("PATH", &path)
+            .env("GH_LOG", &log)
+            .output()
+            .unwrap()
+    };
+
+    assert!(!sync(&["--prune"]).status.success());
+    for extra in [&["--check"][..], &["--dry-run"], &[]] {
+        let output = sync(extra);
+        assert!(output.status.success(), "{output:?}");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(text.contains("no stale managed entries"), "{text}");
+        assert!(!text.contains("Stale managed entries"), "{text}");
+    }
+    let calls = fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        calls, "<variable><set><A><--repo><github.com/caniko/demo>\n",
+        "only the selected target may be pushed, nothing deleted"
+    );
+    assert_eq!(SyncState::load(&state).unwrap().unwrap().managed, declared);
+}

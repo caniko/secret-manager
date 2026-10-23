@@ -74,6 +74,10 @@ impl SyncArgs {
     pub fn run(self) -> Result<()> {
         validate_target_prune_args(&self.targets, self.prune)?;
         let doc = self.load_document()?;
+        // Staleness is judged against every declared target; --target only
+        // narrows which targets are pushed.
+        let declared_state = desired_records(&doc)?;
+        let replay = serde_json::to_vec(&doc)?;
         let doc = filter_document_targets(doc, &self.targets)?;
         let total = doc.total_targets();
         ui::step("discovering secret store");
@@ -92,7 +96,7 @@ impl SyncArgs {
         let previous_state = SyncState::load(&state_path)?.unwrap_or_else(SyncState::empty);
         let desired_state = desired_records(&doc)?;
         ui::step("checking stale managed entries");
-        let stale = stale_records(&previous_state.managed, &desired_state);
+        let stale = stale_records(&previous_state.managed, &declared_state);
         if stale.is_empty() {
             ui::step_success("no stale managed entries");
         } else {
@@ -127,10 +131,10 @@ impl SyncArgs {
         with_sync_protection(
             needs_decrypt,
             || {
-                // The original stdin may already be consumed. Replay the exact
-                // filtered public document, preserving CLI policy and state.
-                let input = serde_json::to_vec(&doc)?;
-                crate::protection::enter_scope_with_input(Some(&input))
+                // The original stdin may already be consumed. Replay the
+                // complete public document; the child reapplies the preserved
+                // --target selection, CLI policy and state.
+                crate::protection::enter_scope_with_input(Some(&replay))
             },
             crate::protection::CredentialProtection::acquire,
             || {

@@ -11,6 +11,11 @@
   Structural rejections report the file's size and echo its first line only
   when it is a known age header or a version-only variant of one, so
   misplaced plaintext never reaches logs.
+- `sync --target` judged staleness against the selected targets only, so every
+  other still-declared managed entry was reported as stale (and suggested for
+  `--prune`) in `--check`, `--dry-run` and real runs. Stale detection now
+  always compares against the complete collected config, including inside the
+  no-swap credential scope; `--target` only narrows which targets are pushed.
 
 ## [0.3.2] - 2026-10-23
 

@@ -356,6 +356,9 @@ require one of those explicit input paths.
 `--state <PATH>` to use a different state file. Entries that were previously
 managed but no longer appear in the collected config are reported as stale.
 They are only deleted from their configured forge when `--prune` is passed.
+`--target` only narrows which targets are pushed: staleness is always judged
+against the complete collected config, and `--prune` cannot be combined with
+`--target`.
 
 ### `decrypt` — Decrypt to stdout
 
