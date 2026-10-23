@@ -556,9 +556,11 @@ fn describe_rejected(bytes: &[u8]) -> String {
     match std::str::from_utf8(first) {
         Ok(line)
             if HEADERS.contains(&line)
-                || line.strip_prefix("age-encryption.org").is_some_and(|v| {
-                    v.len() <= 4 && v.bytes().all(|b| b" /v.0123456789".contains(&b))
-                }) =>
+                || line
+                    .strip_prefix("age-encryption.org")
+                    .map(|v| v.strip_prefix(['/', ' ']).unwrap_or(v))
+                    .and_then(|v| v.strip_prefix('v'))
+                    .is_some_and(|n| n.len() == 1 && n.as_bytes()[0].is_ascii_digit()) =>
         {
             format!("{} bytes, header {line:?}", bytes.len())
         }
@@ -1022,13 +1024,21 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(!err.contains("hunter2"), "{err}");
-        // Even a short tail after the public prefix is withheld.
-        let short = repo.path.join("short.age");
-        fs::write(&short, b"age-encryption.orgS3cr3t\n").expect("write");
-        let err = validate_fresh(&repo.path, &short, false)
-            .unwrap_err()
-            .to_string();
-        assert!(!err.contains("S3cr3t"), "{err}");
+        // Even a short tail after the public prefix is withheld unless it is
+        // a lone `v<digit>` version marker.
+        for line in [
+            "age-encryption.orgS3cr3t",
+            "age-encryption.org/123",
+            "age-encryption.org 007",
+            "age-encryption.org/v12",
+        ] {
+            let short = repo.path.join("short.age");
+            fs::write(&short, format!("{line}\n")).expect("write");
+            let err = validate_fresh(&repo.path, &short, false)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("no recognised age header"), "{err}");
+        }
     }
 
     #[test]
