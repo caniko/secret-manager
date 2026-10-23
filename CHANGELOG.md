@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `rotate` failure messages state the recovery that actually completed: a
+  rotation restores the previous source, while creating a new source removes
+  the partial file or names it when removal fails (they previously claimed
+  "the previous source is untouched" in every case, before recovery ran).
+  Structural rejections report the file's size and echo its first line only
+  when it is a known age header or a version-only variant of one, so
+  misplaced plaintext never reaches logs.
+
 ## [0.3.2] - 2026-10-23
 
 ### Added

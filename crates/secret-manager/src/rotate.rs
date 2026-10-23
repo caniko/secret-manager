@@ -171,16 +171,29 @@ impl RotateArgs {
             .and_then(|()| validate_fresh(repo_root, secret_path))
             .and_then(|()| stage_source(repo_root, rel, self.no_stage));
         if let Err(e) = outcome {
+            // Name the recovery only once it has actually happened.
             if existed {
                 // Keep the original failure visible when recovery fails
                 // too: a bare restore error would hide what went wrong.
                 restore(secret_path, &backup_path, repo_root).map_err(|r| {
                     anyhow!("{e}\n  and restoration of the previous source also failed: {r}")
                 })?;
-            } else {
-                remove_partial(secret_path);
+                return Err(anyhow!("{e}\n  the previous source is restored"));
             }
-            return Err(e);
+            remove_partial(secret_path);
+            // `symlink_metadata`, not `exists`: a dangling link is still a
+            // leftover. Only NotFound proves the cleanup; any other answer
+            // leaves it unverified.
+            return Err(match fs::symlink_metadata(secret_path) {
+                Err(m) if m.kind() == std::io::ErrorKind::NotFound => {
+                    anyhow!("{e}\n  no source was created")
+                }
+                other => anyhow!(
+                    "{e}\n  and the partial {} may remain{}; delete it before retrying",
+                    display_rel(repo_root, secret_path),
+                    other.err().map(|m| format!(" ({m})")).unwrap_or_default()
+                ),
+            });
         }
         if existed {
             remove_backup(&backup_path, repo_root)?;
@@ -464,7 +477,7 @@ fn regenerate(repo_root: &Path, rel: &Path, existed: bool) -> Result<()> {
     args.push(rel);
     run_child(repo_root, "agenix", &args).map_err(|e| {
         anyhow!(
-            "{e}\n  hint: rotation needs a `generator` on the secret's Nix declaration (e.g. `generator.script = \"strong-passphrase-64\"`); the previous source is untouched"
+            "{e}\n  hint: rotation needs a `generator` on the secret's Nix declaration (e.g. `generator.script = \"strong-passphrase-64\"`)"
         )
     })
 }
@@ -516,19 +529,46 @@ fn check_age_shape(bytes: &[u8]) -> Result<(), &'static str> {
 }
 
 fn validate_fresh(repo_root: &Path, secret_path: &Path) -> Result<()> {
+    // The caller restores the backup or removes the partial file on failure.
     let bytes = fs::read(secret_path).map_err(|e| {
         anyhow!(
-            "`agenix generate` reported success but {} is missing ({e}); the previous source is untouched",
+            "`agenix generate` reported success but {} is missing ({e})",
             display_rel(repo_root, secret_path)
         )
     })?;
     check_age_shape(&bytes).map_err(|why| {
         anyhow!(
-            "`agenix generate` wrote {} that fails structural checks ({why}); treating it as a partial write, the previous source is untouched",
-            display_rel(repo_root, secret_path)
+            "`agenix generate` wrote {} that fails structural checks ({why}; {}); treating it as a partial write",
+            display_rel(repo_root, secret_path),
+            describe_rejected(&bytes)
         )
     })?;
     Ok(())
+}
+
+/// A rejected file may be misplaced plaintext, so the first line is echoed
+/// only when it is a known age header or a version-only variant of one
+/// (such as the historical `age-encryption.org v1`); anything else is
+/// just measured.
+fn describe_rejected(bytes: &[u8]) -> String {
+    const HEADERS: [&str; 2] = [
+        "age-encryption.org/v1",
+        "-----BEGIN AGE ENCRYPTED FILE-----",
+    ];
+    let first = bytes.split(|&b| b == b'\n').next().unwrap_or_default();
+    match std::str::from_utf8(first) {
+        Ok(line)
+            if HEADERS.contains(&line)
+                || line
+                    .strip_prefix("age-encryption.org")
+                    .map(|v| v.strip_prefix(['/', ' ']).unwrap_or(v))
+                    .and_then(|v| v.strip_prefix('v'))
+                    .is_some_and(|n| n.len() == 1 && n.as_bytes()[0].is_ascii_digit()) =>
+        {
+            format!("{} bytes, header {line:?}", bytes.len())
+        }
+        _ => format!("{} bytes, no recognised age header", bytes.len()),
+    }
 }
 
 pub(crate) fn stage_source(repo_root: &Path, rel: &Path, no_stage: bool) -> Result<()> {
@@ -814,7 +854,9 @@ fn restore(secret_path: &Path, backup_path: &Path, repo_root: &Path) -> Result<(
 
 fn remove_partial(secret_path: &Path) {
     // Best effort: a failed create must not leave a partial file behind.
-    if secret_path.is_file() {
+    // Symlink sources are refused up front, so a link here came from the
+    // generator; unlink it without following it, even when it dangles.
+    if fs::symlink_metadata(secret_path).is_ok_and(|m| !m.is_dir()) {
         let _ = fs::remove_file(secret_path);
     }
 }
@@ -943,6 +985,57 @@ mod tests {
         fs::write(&unclosed, b"-----BEGIN AGE ENCRYPTED FILE-----\nYWdlCg==\n").expect("write");
         let err = validate_fresh(&repo.path, &unclosed).unwrap_err();
         assert!(err.to_string().contains("END"), "{err:?}");
+    }
+
+    #[test]
+    fn validate_fresh_shows_rejected_header_without_claiming_recovery() {
+        let repo = rooted();
+        let typo = repo.path.join("typo.age");
+        // The historical header typo: a space where `/` belongs.
+        fs::write(&typo, b"age-encryption.org v1\n-> X25519 abc\n").expect("write");
+        let err = validate_fresh(&repo.path, &typo).unwrap_err().to_string();
+        assert!(err.contains("age-encryption.org v1"), "{err}");
+        // Only the caller knows whether recovery succeeded.
+        assert!(
+            !err.contains("restored") && !err.contains("removed"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn validate_fresh_never_echoes_unrecognised_content() {
+        let repo = rooted();
+        let plaintext = repo.path.join("plaintext.age");
+        fs::write(&plaintext, b"hunter2-generated-passphrase\n").expect("write");
+        let err = validate_fresh(&repo.path, &plaintext)
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("hunter2"), "{err}");
+        assert!(err.contains("29 bytes, no recognised age header"), "{err}");
+        // A public prefix with secret material appended on the same line.
+        let smuggled = repo.path.join("smuggled.age");
+        fs::write(
+            &smuggled,
+            b"age-encryption.org v1 hunter2-generated-passphrase\n",
+        )
+        .expect("write");
+        let err = validate_fresh(&repo.path, &smuggled)
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("hunter2"), "{err}");
+        // Even a short tail after the public prefix is withheld unless it is
+        // a lone `v<digit>` version marker.
+        for line in [
+            "age-encryption.orgS3cr3t",
+            "age-encryption.org/123",
+            "age-encryption.org 007",
+            "age-encryption.org/v12",
+        ] {
+            let short = repo.path.join("short.age");
+            fs::write(&short, format!("{line}\n")).expect("write");
+            let err = validate_fresh(&repo.path, &short).unwrap_err().to_string();
+            assert!(err.contains("no recognised age header"), "{err}");
+        }
     }
 
     #[test]

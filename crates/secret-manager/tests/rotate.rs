@@ -30,6 +30,11 @@ if [ "$cmd" = "generate" ]; then
     # Simulate a slow generation so a second process can race us.
     sleep 6
   fi
+  if [ -e "$STUB_DIR/generate-dangling-symlink" ]; then
+    # Claims success but leaves only a link to nothing.
+    ln -s missing-target "$rel"
+    exit 0
+  fi
   if [ -e "$STUB_DIR/fail-generate-partial" ]; then
     # Lies about success the way a torn write would: non-empty output
     # without the age file header.
@@ -288,6 +293,10 @@ fn generate_failure_preserves_bytes_and_index() {
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("generator"), "hint at generator: {stderr}");
+    assert!(
+        stderr.contains("the previous source is restored"),
+        "must report the completed restore: {stderr}"
+    );
 }
 
 #[test]
@@ -486,6 +495,40 @@ fn partial_write_passing_exit_code_is_rejected_by_magic() {
     assert!(
         stderr.contains("age-encryption") || stderr.contains("partial"),
         "must name the header check, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("the previous source is restored"),
+        "must report the completed restore: {stderr}"
+    );
+    // Rotation output never echoes the rejected bytes.
+    assert!(!stderr.contains("truncated-garbage"), "got: {stderr}");
+}
+
+#[test]
+fn dangling_symlink_create_is_unlinked() {
+    let repo = TempRepo::new();
+    repo.marker("generate-dangling-symlink");
+    let out = repo.run(&["rotate", REL], &[]);
+    assert!(!out.status.success(), "a missing source must fail");
+    assert!(
+        fs::symlink_metadata(repo.repo().join(REL)).is_err(),
+        "dangling link removed"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("no source was created"), "got: {stderr}");
+}
+
+#[test]
+fn torn_create_removes_partial_and_says_so() {
+    let repo = TempRepo::new();
+    repo.marker("fail-generate-partial");
+    let out = repo.run(&["rotate", REL], &[]);
+    assert!(!out.status.success(), "torn write must fail");
+    assert!(!repo.repo().join(REL).exists(), "partial source removed");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no source was created") && !stderr.contains("previous source"),
+        "must report the completed cleanup, got: {stderr}"
     );
 }
 
