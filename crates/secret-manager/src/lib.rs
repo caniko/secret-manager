@@ -7,6 +7,7 @@
 //! thin shim over this library.
 
 pub mod add;
+pub mod claude_token;
 pub mod credential_process;
 pub mod encryption;
 pub mod env;

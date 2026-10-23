@@ -8,6 +8,10 @@
   flow, verifies its login and scopes, and encrypts it (bare and/or as an
   `ENV=token` file) with the store's agenix master policy. `gh` state lives in
   a private temporary directory, so the token never reaches the caller's login.
+- `secret-manager claude token` runs `claude setup-token`, reads the printed
+  token from a hidden prompt, validates it and encrypts it with the store's
+  agenix master policy, then stages and rekeys it inside the no-swap
+  credential scope.
 
 ### Fixed
 
