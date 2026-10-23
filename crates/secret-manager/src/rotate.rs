@@ -181,14 +181,19 @@ impl RotateArgs {
                 return Err(anyhow!("{e}\n  the previous source is restored"));
             }
             remove_partial(secret_path);
-            // `symlink_metadata`, not `exists`: a dangling link is still a leftover.
-            if fs::symlink_metadata(secret_path).is_ok() {
-                return Err(anyhow!(
-                    "{e}\n  and the partial {} could not be removed; delete it before retrying",
-                    display_rel(repo_root, secret_path)
-                ));
-            }
-            return Err(anyhow!("{e}\n  no source was created"));
+            // `symlink_metadata`, not `exists`: a dangling link is still a
+            // leftover. Only NotFound proves the cleanup; any other answer
+            // leaves it unverified.
+            return Err(match fs::symlink_metadata(secret_path) {
+                Err(m) if m.kind() == std::io::ErrorKind::NotFound => {
+                    anyhow!("{e}\n  no source was created")
+                }
+                other => anyhow!(
+                    "{e}\n  and the partial {} may remain{}; delete it before retrying",
+                    display_rel(repo_root, secret_path),
+                    other.err().map(|m| format!(" ({m})")).unwrap_or_default()
+                ),
+            });
         }
         if existed {
             remove_backup(&backup_path, repo_root)?;
