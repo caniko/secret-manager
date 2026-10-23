@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 
 use secret_manager::env::LocalEnv;
-use secret_manager::{add, github_app, gpg, legacy, push, registry, rotate, sync};
+use secret_manager::{add, claude_token, github_app, gpg, legacy, push, registry, rotate, sync};
 
 #[derive(Parser)]
 #[command(
@@ -34,6 +34,10 @@ enum Command {
     /// Enroll GitHub App credentials or mint account tokens into the store.
     #[command(subcommand, arg_required_else_help = true)]
     Github(github_app::GithubCmd),
+
+    /// Store Claude Code subscription credentials into the store.
+    #[command(subcommand, arg_required_else_help = true)]
+    Claude(claude_token::ClaudeCmd),
 
     /// Validate or export Pkl secret registries.
     #[command(subcommand, arg_required_else_help = true)]
@@ -89,6 +93,7 @@ fn main() -> anyhow::Result<()> {
         Command::Forgejo(cmd) => cmd.run(),
         Command::Gpg(cmd) => cmd.run(),
         Command::Github(cmd) => cmd.run(),
+        Command::Claude(cmd) => cmd.run(),
         Command::Registry(cmd) => cmd.run(),
         Command::List => legacy::list(),
         Command::Sync(args) => args.run(),

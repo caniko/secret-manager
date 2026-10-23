@@ -31,7 +31,7 @@
 //!    pretending a multi-file operation was rolled back by restoring one
 //!    file.
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail, ensure};
 use clap::Args;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -566,7 +566,7 @@ fn describe_rejected(bytes: &[u8]) -> String {
     }
 }
 
-fn stage_source(repo_root: &Path, rel: &Path, no_stage: bool) -> Result<()> {
+pub(crate) fn stage_source(repo_root: &Path, rel: &Path, no_stage: bool) -> Result<()> {
     if no_stage {
         return Ok(());
     }
@@ -674,6 +674,81 @@ pub(crate) fn distribute(repo_root: &Path, rel: &Path, no_stage: bool) -> Result
         exec::run_in(repo_root, "git", std::iter::once("add").chain(refs))?;
     }
     Ok(())
+}
+
+/// Like [`distribute`], but scoped to one agenix secret attribute: shared
+/// stores routinely carry other operations' rekeyed changes, so staging is
+/// limited to `<hash>-<secret>.age` copies whose content changed.
+pub(crate) fn distribute_named(
+    repo_root: &Path,
+    rel: &Path,
+    secret: &str,
+    no_stage: bool,
+) -> Result<()> {
+    let source = display_rel(repo_root, &repo_root.join(rel));
+    let suffix = format!("-{secret}.age");
+    let owned = |path: &Path| {
+        path.starts_with(REKEYED_DIR)
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| is_copy_of(name, &suffix))
+    };
+    let snapshot = || status_names(repo_root).and_then(|names| snapshot_content(repo_root, &names));
+    let before = snapshot().map_err(|e| {
+        anyhow!("source {source} updated, but distribution state is unknown: {e}; verify with `git status` and distribute with `agenix rekey -a`")
+    })?;
+    if let Err(e) = run_child(repo_root, "agenix", &["rekey"]) {
+        return Err(anyhow!(
+            "source {source} updated, but distribution is incomplete: {e}\n  retry with `agenix rekey -a` (no new key will be generated)"
+        ));
+    }
+    let after = snapshot().map_err(|e| {
+        anyhow!("rekey completed, but changed files could not be determined: {e}; inspect `git status` under {REKEYED_DIR} and stage the {secret} copies")
+    })?;
+    let mut fresh: Vec<&str> = after
+        .iter()
+        .filter(|&(path, hash)| owned(path) && before.get(path) != Some(hash))
+        .filter_map(|(path, _)| path.to_str())
+        .collect();
+    ensure!(
+        !fresh.is_empty()
+            || after.keys().any(|path| owned(path))
+            || tracked_copy(repo_root, &suffix)?,
+        "rekey produced no {REKEYED_DIR} copy of {secret}; declare the secret in the store configuration, then run `agenix rekey -a`"
+    );
+    fresh.sort();
+    if !no_stage && !fresh.is_empty() {
+        exec::run_in(repo_root, "git", std::iter::once("add").chain(fresh))?;
+    }
+    Ok(())
+}
+
+/// Whether a committed rekeyed copy with this suffix already exists, so an
+/// unchanged redistribution is not mistaken for an undeclared secret.
+fn tracked_copy(repo_root: &Path, suffix: &str) -> Result<bool> {
+    let out = exec::cap_in(repo_root, "git", ["ls-files", "--", REKEYED_DIR]);
+    if out.exit_code != 0 {
+        bail!(
+            "git ls-files failed in {}: {}",
+            repo_root.display(),
+            out.stderr.trim()
+        );
+    }
+    Ok(out.stdout.lines().any(|line| {
+        Path::new(line)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| is_copy_of(name, suffix))
+    }))
+}
+
+/// agenix-rekey names copies `<hex hash>-<attr>.age`; a bare suffix match
+/// would also claim `other-<attr>` copies, so require the exact hash prefix.
+fn is_copy_of(file_name: &str, suffix: &str) -> bool {
+    file_name
+        .strip_suffix(suffix)
+        .is_some_and(|hash| !hash.is_empty() && hash.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 /// Repo-relative paths with worktree or index changes, parsed from

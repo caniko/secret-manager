@@ -2,21 +2,32 @@
 
 ## [Unreleased]
 
-### Added
-
-- `secret-manager github token` mints an account token through `gh`'s device
-  flow, verifies its login and scopes, and encrypts it (bare and/or as an
-  `ENV=token` file) with the store's agenix master policy. `gh` state lives in
-  a private temporary directory, so the token never reaches the caller's login.
-
 ### Fixed
 
 - `rotate` failure messages state the actual recovery: a rotation restores
   the previous source, while creating a new source removes the partial file
   (they previously claimed "the previous source is untouched" in both cases).
   Structural rejections report the file's size and echo its first line only
-  when it is a short, recognised age header, so misplaced plaintext never
-  reaches logs.
+  when it is a known age header or a version-only variant of one, so
+  misplaced plaintext never reaches logs.
+
+## [0.3.2] - 2026-10-23
+
+### Added
+
+- `secret-manager github token` mints an account token through `gh`'s device
+  flow, verifies its login and scopes, and encrypts it (bare and/or as an
+  `ENV=token` file) with the store's agenix master policy. `gh` state lives in
+  a private temporary directory, so the token never reaches the caller's login.
+- `secret-manager claude token` runs `claude setup-token`, reads the printed
+  token from a hidden prompt, validates it and encrypts it with the store's
+  agenix master policy, then stages and rekeys it inside the no-swap
+  credential scope. With `--secret <attr>`, staging is limited to that
+  attribute's rekeyed copies, so unrelated changes in a shared store stay
+  untouched.
+
+### Fixed
+
 - `mkAgenixStreamEncryptor` kept only a dangling symlink to agenix-rekey's age
   wrapper because `builtins.match` dropped its string context; the wrapper is
   now a runtime dependency of the encryptor package.
@@ -114,5 +125,6 @@ runner-env add`), and Pkl evaluation via nix-pklx.
 - Corrected "foregejo" typos to "forgejo" in Nix module paths and source
   references.
 
-[Unreleased]: https://github.com/caniko/secret-manager/compare/0.3.1...HEAD
+[Unreleased]: https://github.com/caniko/secret-manager/compare/0.3.2...HEAD
+[0.3.2]: https://github.com/caniko/secret-manager/compare/0.3.1...0.3.2
 [0.3.1]: https://github.com/caniko/secret-manager/compare/0.3.0...0.3.1

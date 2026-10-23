@@ -146,6 +146,35 @@ run `agenix rekey` afterwards.
 | `--encryptor PATH`    | `lib.mkAgenixStreamEncryptor` executable (default `SECRET_MANAGER_AGE_ENCRYPTOR`) |
 | `--timeout-seconds N` | Authorization wait, 30–3600 (default 900)                                         |
 
+### `claude token` — Claude Code subscription tokens
+
+Store a long-lived Claude Code token for headless runners
+(`CLAUDE_CODE_OAUTH_TOKEN`) in one step:
+
+```sh
+SECRET_MANAGER_AGE_ENCRYPTOR=$(nix build --no-link --print-out-paths .#agenix-stream-encryptor)/bin/agenix-stream-encryptor \
+secret-manager claude token --out age/secrets/root/hosts/atlas/paperclip_operations_claude_oauth.age
+```
+
+Claude Code has no machine-readable token output, so the command runs
+`claude setup-token` (browser OAuth) and then asks you to paste the printed
+token into a hidden prompt. It must start with `sk-ant-oat01-`; anything else
+is rejected and nothing is stored. The token is encrypted with the store's
+agenix master policy, the source is staged, and `agenix rekey` distributes it.
+With `--secret NAME` (the secret's agenix attribute) only that secret's
+rekeyed copies are staged, so unrelated uncommitted rekeyed changes do not
+block it. Tokens last one year; renew with `--rotate`.
+
+| Flag               | Description                                                                       |
+| ------------------ | --------------------------------------------------------------------------------- |
+| `--out PATH`       | Encrypted source for the token                                                    |
+| `--rotate`         | Replace an existing source                                                        |
+| `--claude PATH`    | Claude Code executable (default `claude`)                                         |
+| `--no-rekey`       | Skip `agenix rekey`; run `agenix rekey -a` before deploying                       |
+| `--no-stage`       | Leave staging of the source and rekeyed copies to you                             |
+| `--secret NAME`    | Agenix attribute name; stage only its rekeyed copies, ignoring other dirty ones   |
+| `--encryptor PATH` | `lib.mkAgenixStreamEncryptor` executable (default `SECRET_MANAGER_AGE_ENCRYPTOR`) |
+
 ### `gpg publish` — Account signing keys
 
 Register an existing armored public key on authenticated forge accounts:
