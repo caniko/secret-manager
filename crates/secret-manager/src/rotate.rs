@@ -168,19 +168,26 @@ impl RotateArgs {
         }
 
         let outcome = regenerate(repo_root, rel, existed)
-            .and_then(|()| validate_fresh(repo_root, secret_path, existed))
+            .and_then(|()| validate_fresh(repo_root, secret_path))
             .and_then(|()| stage_source(repo_root, rel, self.no_stage));
         if let Err(e) = outcome {
+            // Name the recovery only once it has actually happened.
             if existed {
                 // Keep the original failure visible when recovery fails
                 // too: a bare restore error would hide what went wrong.
                 restore(secret_path, &backup_path, repo_root).map_err(|r| {
                     anyhow!("{e}\n  and restoration of the previous source also failed: {r}")
                 })?;
-            } else {
-                remove_partial(secret_path);
+                return Err(anyhow!("{e}\n  the previous source is restored"));
             }
-            return Err(e);
+            remove_partial(secret_path);
+            if secret_path.exists() {
+                return Err(anyhow!(
+                    "{e}\n  and the partial {} could not be removed; delete it before retrying",
+                    display_rel(repo_root, secret_path)
+                ));
+            }
+            return Err(anyhow!("{e}\n  no source was created"));
         }
         if existed {
             remove_backup(&backup_path, repo_root)?;
@@ -462,14 +469,9 @@ fn regenerate(repo_root: &Path, rel: &Path, existed: bool) -> Result<()> {
         args.push("--force-generate");
     }
     args.push(rel);
-    let recovery = if existed {
-        "the previous source is restored"
-    } else {
-        "no source was created"
-    };
     run_child(repo_root, "agenix", &args).map_err(|e| {
         anyhow!(
-            "{e}\n  hint: rotation needs a `generator` on the secret's Nix declaration (e.g. `generator.script = \"strong-passphrase-64\"`); {recovery}"
+            "{e}\n  hint: rotation needs a `generator` on the secret's Nix declaration (e.g. `generator.script = \"strong-passphrase-64\"`)"
         )
     })
 }
@@ -520,22 +522,17 @@ fn check_age_shape(bytes: &[u8]) -> Result<(), &'static str> {
     Err("no age file header (binary or armored)")
 }
 
-fn validate_fresh(repo_root: &Path, secret_path: &Path, existed: bool) -> Result<()> {
+fn validate_fresh(repo_root: &Path, secret_path: &Path) -> Result<()> {
     // The caller restores the backup or removes the partial file on failure.
-    let recovery = if existed {
-        "the previous source is restored"
-    } else {
-        "the partial file is removed"
-    };
     let bytes = fs::read(secret_path).map_err(|e| {
         anyhow!(
-            "`agenix generate` reported success but {} is missing ({e}); {recovery}",
+            "`agenix generate` reported success but {} is missing ({e})",
             display_rel(repo_root, secret_path)
         )
     })?;
     check_age_shape(&bytes).map_err(|why| {
         anyhow!(
-            "`agenix generate` wrote {} that fails structural checks ({why}; {}); treating it as a partial write, {recovery}",
+            "`agenix generate` wrote {} that fails structural checks ({why}; {}); treating it as a partial write",
             display_rel(repo_root, secret_path),
             describe_rejected(&bytes)
         )
@@ -942,7 +939,7 @@ mod tests {
             b"age-encryption.org/v1\n-> X25519 abcdefghijklmnopqrstuvwxyz0123456789ABC\nZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY3ODkwYWJjZGVmZ2hpamtsbW5vcA==\n--- c29tZS1tYWMtdmhpY2gtaXMtNDMtd2hhdGV2ZXItY2hhcnMtbG9uZw==\n",
         )
         .expect("write");
-        assert!(validate_fresh(&repo.path, &encrypted, false).is_ok());
+        assert!(validate_fresh(&repo.path, &encrypted).is_ok());
     }
 
     #[test]
@@ -954,17 +951,17 @@ mod tests {
             b"age-encryption.org/v1\n-> X25519 abcdefghijklmnopqrstuvwxyz0123456789ABC\nZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY3ODkwYWJjZGVmZ2hpamtsbW5vcA==\n--- c29tZS1tYWMtdmhpY2gtaXMtNDMtd2hhdGV2ZXItY2hhcnMtbG9uZw==\n",
         )
         .expect("write");
-        assert!(validate_fresh(&repo.path, &binary, false).is_ok());
+        assert!(validate_fresh(&repo.path, &binary).is_ok());
         let armored = repo.path.join("armored.age");
         fs::write(
             &armored,
             b"-----BEGIN AGE ENCRYPTED FILE-----\nYWdlLWVuY3J5cHRpb24ub3JnL3YxCg==\n-----END AGE ENCRYPTED FILE-----\n",
         )
         .expect("write");
-        assert!(validate_fresh(&repo.path, &armored, false).is_ok());
+        assert!(validate_fresh(&repo.path, &armored).is_ok());
         let garbage = repo.path.join("garbage.age");
         fs::write(&garbage, b"truncated-garbage").expect("write");
-        assert!(validate_fresh(&repo.path, &garbage, false).is_err());
+        assert!(validate_fresh(&repo.path, &garbage).is_err());
     }
 
     #[test]
@@ -973,33 +970,27 @@ mod tests {
         // Magic alone is a torn write, not a key.
         let header_only = repo.path.join("header.age");
         fs::write(&header_only, b"age-encryption.org/v1\n").expect("write");
-        let err = validate_fresh(&repo.path, &header_only, true).unwrap_err();
+        let err = validate_fresh(&repo.path, &header_only).unwrap_err();
         assert!(err.to_string().contains("truncated"), "{err:?}");
         // Armor without its END delimiter is a torn write too.
         let unclosed = repo.path.join("unclosed.age");
         fs::write(&unclosed, b"-----BEGIN AGE ENCRYPTED FILE-----\nYWdlCg==\n").expect("write");
-        let err = validate_fresh(&repo.path, &unclosed, true).unwrap_err();
+        let err = validate_fresh(&repo.path, &unclosed).unwrap_err();
         assert!(err.to_string().contains("END"), "{err:?}");
     }
 
     #[test]
-    fn validate_fresh_names_recovery_and_shows_rejected_header() {
+    fn validate_fresh_shows_rejected_header_without_claiming_recovery() {
         let repo = rooted();
         let typo = repo.path.join("typo.age");
         // The historical header typo: a space where `/` belongs.
         fs::write(&typo, b"age-encryption.org v1\n-> X25519 abc\n").expect("write");
-        let created = validate_fresh(&repo.path, &typo, false)
-            .unwrap_err()
-            .to_string();
-        assert!(created.contains("the partial file is removed"), "{created}");
-        assert!(created.contains("age-encryption.org v1"), "{created}");
-        assert!(!created.contains("previous source"), "{created}");
-        let rotated = validate_fresh(&repo.path, &typo, true)
-            .unwrap_err()
-            .to_string();
+        let err = validate_fresh(&repo.path, &typo).unwrap_err().to_string();
+        assert!(err.contains("age-encryption.org v1"), "{err}");
+        // Only the caller knows whether recovery succeeded.
         assert!(
-            rotated.contains("the previous source is restored"),
-            "{rotated}"
+            !err.contains("restored") && !err.contains("removed"),
+            "{err}"
         );
     }
 
@@ -1008,7 +999,7 @@ mod tests {
         let repo = rooted();
         let plaintext = repo.path.join("plaintext.age");
         fs::write(&plaintext, b"hunter2-generated-passphrase\n").expect("write");
-        let err = validate_fresh(&repo.path, &plaintext, false)
+        let err = validate_fresh(&repo.path, &plaintext)
             .unwrap_err()
             .to_string();
         assert!(!err.contains("hunter2"), "{err}");
@@ -1020,7 +1011,7 @@ mod tests {
             b"age-encryption.org v1 hunter2-generated-passphrase\n",
         )
         .expect("write");
-        let err = validate_fresh(&repo.path, &smuggled, false)
+        let err = validate_fresh(&repo.path, &smuggled)
             .unwrap_err()
             .to_string();
         assert!(!err.contains("hunter2"), "{err}");
@@ -1034,9 +1025,7 @@ mod tests {
         ] {
             let short = repo.path.join("short.age");
             fs::write(&short, format!("{line}\n")).expect("write");
-            let err = validate_fresh(&repo.path, &short, false)
-                .unwrap_err()
-                .to_string();
+            let err = validate_fresh(&repo.path, &short).unwrap_err().to_string();
             assert!(err.contains("no recognised age header"), "{err}");
         }
     }

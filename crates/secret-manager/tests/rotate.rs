@@ -288,6 +288,10 @@ fn generate_failure_preserves_bytes_and_index() {
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("generator"), "hint at generator: {stderr}");
+    assert!(
+        stderr.contains("the previous source is restored"),
+        "must report the completed restore: {stderr}"
+    );
 }
 
 #[test]
@@ -486,6 +490,26 @@ fn partial_write_passing_exit_code_is_rejected_by_magic() {
     assert!(
         stderr.contains("age-encryption") || stderr.contains("partial"),
         "must name the header check, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("the previous source is restored"),
+        "must report the completed restore: {stderr}"
+    );
+    // Rotation output never echoes the rejected bytes.
+    assert!(!stderr.contains("truncated-garbage"), "got: {stderr}");
+}
+
+#[test]
+fn torn_create_removes_partial_and_says_so() {
+    let repo = TempRepo::new();
+    repo.marker("fail-generate-partial");
+    let out = repo.run(&["rotate", REL], &[]);
+    assert!(!out.status.success(), "torn write must fail");
+    assert!(!repo.repo().join(REL).exists(), "partial source removed");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no source was created") && !stderr.contains("previous source"),
+        "must report the completed cleanup, got: {stderr}"
     );
 }
 
