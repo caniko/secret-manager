@@ -181,7 +181,8 @@ impl RotateArgs {
                 return Err(anyhow!("{e}\n  the previous source is restored"));
             }
             remove_partial(secret_path);
-            if secret_path.exists() {
+            // `symlink_metadata`, not `exists`: a dangling link is still a leftover.
+            if fs::symlink_metadata(secret_path).is_ok() {
                 return Err(anyhow!(
                     "{e}\n  and the partial {} could not be removed; delete it before retrying",
                     display_rel(repo_root, secret_path)
@@ -848,7 +849,9 @@ fn restore(secret_path: &Path, backup_path: &Path, repo_root: &Path) -> Result<(
 
 fn remove_partial(secret_path: &Path) {
     // Best effort: a failed create must not leave a partial file behind.
-    if secret_path.is_file() {
+    // Symlink sources are refused up front, so a link here came from the
+    // generator; unlink it without following it, even when it dangles.
+    if fs::symlink_metadata(secret_path).is_ok_and(|m| !m.is_dir()) {
         let _ = fs::remove_file(secret_path);
     }
 }
