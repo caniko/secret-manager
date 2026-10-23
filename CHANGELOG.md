@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-10-23
+
 ### Added
 
 - `secret-manager github token` mints an account token through `gh`'s device
@@ -11,7 +13,9 @@
 - `secret-manager claude token` runs `claude setup-token`, reads the printed
   token from a hidden prompt, validates it and encrypts it with the store's
   agenix master policy, then stages and rekeys it inside the no-swap
-  credential scope.
+  credential scope. With `--secret <attr>`, staging is limited to that
+  attribute's rekeyed copies, so unrelated changes in a shared store stay
+  untouched.
 
 ### Fixed
 
@@ -112,5 +116,6 @@ runner-env add`), and Pkl evaluation via nix-pklx.
 - Corrected "foregejo" typos to "forgejo" in Nix module paths and source
   references.
 
-[Unreleased]: https://github.com/caniko/secret-manager/compare/0.3.1...HEAD
+[Unreleased]: https://github.com/caniko/secret-manager/compare/0.3.2...HEAD
+[0.3.2]: https://github.com/caniko/secret-manager/compare/0.3.1...0.3.2
 [0.3.1]: https://github.com/caniko/secret-manager/compare/0.3.0...0.3.1
