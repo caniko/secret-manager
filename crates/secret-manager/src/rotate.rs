@@ -535,12 +535,35 @@ fn validate_fresh(repo_root: &Path, secret_path: &Path, existed: bool) -> Result
     })?;
     check_age_shape(&bytes).map_err(|why| {
         anyhow!(
-            "`agenix generate` wrote {} that fails structural checks ({why}; starts with {:?}); treating it as a partial write, {recovery}",
+            "`agenix generate` wrote {} that fails structural checks ({why}; {}); treating it as a partial write, {recovery}",
             display_rel(repo_root, secret_path),
-            String::from_utf8_lossy(&bytes[..bytes.len().min(24)])
+            describe_rejected(&bytes)
         )
     })?;
     Ok(())
+}
+
+/// A rejected file may be misplaced plaintext, so the first line is echoed
+/// only when it is a known age header or a version-only variant of one
+/// (such as the historical `age-encryption.org v1`); anything else is
+/// just measured.
+fn describe_rejected(bytes: &[u8]) -> String {
+    const HEADERS: [&str; 2] = [
+        "age-encryption.org/v1",
+        "-----BEGIN AGE ENCRYPTED FILE-----",
+    ];
+    let first = bytes.split(|&b| b == b'\n').next().unwrap_or_default();
+    match std::str::from_utf8(first) {
+        Ok(line)
+            if HEADERS.contains(&line)
+                || line.strip_prefix("age-encryption.org").is_some_and(|v| {
+                    v.len() <= 4 && v.bytes().all(|b| b" /v.0123456789".contains(&b))
+                }) =>
+        {
+            format!("{} bytes, header {line:?}", bytes.len())
+        }
+        _ => format!("{} bytes, no recognised age header", bytes.len()),
+    }
 }
 
 fn stage_source(repo_root: &Path, rel: &Path, no_stage: bool) -> Result<()> {
@@ -883,7 +906,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_fresh_names_recovery_and_shows_rejected_bytes() {
+    fn validate_fresh_names_recovery_and_shows_rejected_header() {
         let repo = rooted();
         let typo = repo.path.join("typo.age");
         // The historical header typo: a space where `/` belongs.
@@ -901,6 +924,36 @@ mod tests {
             rotated.contains("the previous source is restored"),
             "{rotated}"
         );
+    }
+
+    #[test]
+    fn validate_fresh_never_echoes_unrecognised_content() {
+        let repo = rooted();
+        let plaintext = repo.path.join("plaintext.age");
+        fs::write(&plaintext, b"hunter2-generated-passphrase\n").expect("write");
+        let err = validate_fresh(&repo.path, &plaintext, false)
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("hunter2"), "{err}");
+        assert!(err.contains("29 bytes, no recognised age header"), "{err}");
+        // A public prefix with secret material appended on the same line.
+        let smuggled = repo.path.join("smuggled.age");
+        fs::write(
+            &smuggled,
+            b"age-encryption.org v1 hunter2-generated-passphrase\n",
+        )
+        .expect("write");
+        let err = validate_fresh(&repo.path, &smuggled, false)
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("hunter2"), "{err}");
+        // Even a short tail after the public prefix is withheld.
+        let short = repo.path.join("short.age");
+        fs::write(&short, b"age-encryption.orgS3cr3t\n").expect("write");
+        let err = validate_fresh(&repo.path, &short, false)
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("S3cr3t"), "{err}");
     }
 
     #[test]
