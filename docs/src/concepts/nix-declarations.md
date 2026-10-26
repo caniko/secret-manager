@@ -115,3 +115,20 @@ secrets.host "thething" "vikunja-mailer"
 # Module-scoped secret
 secrets.module "forgejo-runner/copr-token"
 ```
+
+## Generators
+
+`lib.mkGenerators {rotateCommand ? "secret-manager rotate"}` returns the
+agenix-rekey generators behind the names `mkSecret` emits
+(`strong-passphrase`, `strong-passphrase-48`, `strong-passphrase-64`,
+`ssh-ed25519-pub`, `ssh-rsa-pub`, `gpg-key-pair`) plus `minisign-key-pair`.
+Register them on every agenix module that evaluates these secrets:
+
+```nix
+age.generators = secret-manager.lib.mkGenerators {};
+```
+
+Passphrases avoid every character special to a systemd `EnvironmentFile` or a
+shell `export`. `minisign-key-pair` depends on exactly one password secret and
+encrypts the key with it; `rotateCommand` is quoted in its error when that
+password has not been generated yet.

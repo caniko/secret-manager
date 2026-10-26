@@ -219,6 +219,63 @@ nix-manager-core.lib.mkManagerOutputs {
       assert builtins.elem "-e COPR_TOKEN_FILE=/run/secret-manager/forgejo-runner/nixTrusted/copr-token" instance.containerOptions;
       assert instance.validVolumes == ["/run/secret-manager/forgejo-runner/nixTrusted"];
         pkgs.runCommand "secret-manager-runner-file-env-renderer" {} "touch $out";
+
+    generatorChecksFor = pkgs: let
+      generators = secretLib.mkGenerators {rotateCommand = "example rotate";};
+      script = name: pkgs.writeText name (generators.${name} {inherit pkgs;});
+      # The password dependency is a plaintext file and `decrypt` is `cat`.
+      minisign = pkgs.writeText "minisign-key-pair" (generators.minisign-key-pair {
+        inherit pkgs lib;
+        file = "key.age";
+        decrypt = "${pkgs.coreutils}/bin/cat";
+        deps = [
+          {
+            name = "password";
+            host = "nixos:check";
+            file = "password";
+          }
+        ];
+      });
+    in {
+      generator-minisign = pkgs.runCommand "secret-manager-generator-minisign" {nativeBuildInputs = [pkgs.minisign];} ''
+        # Run like agenix does: inside a command substitution, where `set -e`
+        # is not in force, so the generator must fail on its own.
+        generate() { key=$(${lib.getExe pkgs.bash} ${minisign} </dev/null); }
+        for broken in missing empty; do
+          rm -f password key.pub
+          if [ "$broken" = empty ]; then : > password; fi
+          if generate 2>err; then
+            echo "minisign-key-pair: succeeded with a $broken password secret" >&2
+            exit 1
+          fi
+          if [ -e key.pub ]; then
+            echo "minisign-key-pair: wrote key.pub with a $broken password secret" >&2
+            exit 1
+          fi
+          if [ "$broken" = missing ]; then grep -qF 'run `example rotate` on it first' err; fi
+        done
+        printf '%s' 'correct-Horse.battery9' > password
+        generate
+        printf '%s\n' "$key" > key
+        grep -q '^untrusted comment: minisign encrypted secret key' key
+        echo payload > message
+        printf '%s\n' 'correct-Horse.battery9' | minisign -S -s key -m message -x message.minisig
+        minisign -V -p key.pub -m message -x message.minisig
+        if printf 'wrong\n' | minisign -S -s key -m message -x wrong.minisig; then
+          echo 'minisign-key-pair: key signed with the wrong password' >&2
+          exit 1
+        fi
+        touch "$out"
+      '';
+      generator-alphabet = pkgs.runCommand "secret-manager-generator-alphabet" {} ''
+        ${lib.getExe pkgs.python3} ${./tests/passphrase-alphabet.py} \
+          ${lib.getExe pkgs.bash} \
+          32 ${script "strong-passphrase"} \
+          48 ${script "strong-passphrase-48"} \
+          64 ${script "strong-passphrase-64"}
+        touch "$out"
+      '';
+    };
   in {
     checks = forAllSystems (system: let
       pkgs = pkgsFor system;
@@ -246,21 +303,23 @@ nix-manager-core.lib.mkManagerOutputs {
               || path == "${toString ../.}/crates/secret-manager/tests/fixtures/gpg-public.asc";
           };
         };
-    in {
-      clippy = cargo.craneLib.cargoClippy (testArgs
-        // {
-          cargoClippyExtraArgs = "--all-targets -- --deny warnings";
-        });
-      nextest = cargo.craneLib.cargoNextest (testArgs
-        // {
-          nativeBuildInputs = [pkgs.git pkgs.openssl pkgs.rage pkgs.gnupg];
-          partitions = 1;
-          partitionType = "count";
-        });
-      catalog-renderers = rendererCheckFor pkgs;
-      runner-file-env-renderer = runnerFileEnvCheckFor pkgs;
-      gpg-user-id = gpgUserIdCheckFor pkgs;
-    });
+    in
+      {
+        clippy = cargo.craneLib.cargoClippy (testArgs
+          // {
+            cargoClippyExtraArgs = "--all-targets -- --deny warnings";
+          });
+        nextest = cargo.craneLib.cargoNextest (testArgs
+          // {
+            nativeBuildInputs = [pkgs.git pkgs.openssl pkgs.rage pkgs.gnupg];
+            partitions = 1;
+            partitionType = "count";
+          });
+        catalog-renderers = rendererCheckFor pkgs;
+        runner-file-env-renderer = runnerFileEnvCheckFor pkgs;
+        gpg-user-id = gpgUserIdCheckFor pkgs;
+      }
+      // generatorChecksFor pkgs);
     nixosModules = {
       secretSync = module;
       default = module;

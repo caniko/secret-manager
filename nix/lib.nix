@@ -387,5 +387,6 @@
   };
 in {
   mkAgenixStreamEncryptor = import ./stream-encryptor.nix;
+  mkGenerators = import ./generators.nix;
   inherit mkForgejoRunnerFileEnv mkHomeEnvSecretModules mkSecret mkSecretSyncTargets mkSharedSecret pubOf secretFileName;
 }
