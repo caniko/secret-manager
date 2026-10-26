@@ -224,58 +224,77 @@ nix-manager-core.lib.mkManagerOutputs {
       generators = secretLib.mkGenerators {rotateCommand = "example rotate";};
       script = name: pkgs.writeText name (generators.${name} {inherit pkgs;});
       # The password dependency is a plaintext file and `decrypt` is `cat`.
-      minisign = pkgs.writeText "minisign-key-pair" (generators.minisign-key-pair {
-        inherit pkgs lib;
-        file = "key.age";
-        decrypt = "${pkgs.coreutils}/bin/cat";
-        deps = [
-          {
-            name = "password";
-            host = "nixos:check";
-            file = "password";
-          }
-        ];
-      });
-    in {
-      generator-minisign = pkgs.runCommand "secret-manager-generator-minisign" {nativeBuildInputs = [pkgs.minisign];} ''
-        # Run like agenix does: inside a command substitution, where `set -e`
-        # is not in force, so the generator must fail on its own.
-        generate() { key=$(${lib.getExe pkgs.bash} ${minisign} </dev/null); }
-        for broken in missing empty; do
-          rm -f password key.pub
-          if [ "$broken" = empty ]; then : > password; fi
-          if generate 2>err; then
-            echo "minisign-key-pair: succeeded with a $broken password secret" >&2
+      password = {
+        name = "password";
+        host = "nixos:check";
+        file = "password";
+      };
+      minisignWith = deps:
+        generators.minisign-key-pair {
+          inherit pkgs lib deps;
+          file = "key.age";
+          decrypt = "${pkgs.coreutils}/bin/cat";
+        };
+      minisignScript = minisignWith [password];
+      minisign = pkgs.writeText "minisign-key-pair" minisignScript;
+      # A public half that cannot be written must fail before the private key
+      # is emitted.
+      unwritable = name:
+        pkgs.writeText name (generators.${name} {
+          inherit pkgs lib name;
+          file = "missing/key.age";
+        });
+    in
+      assert minisignWith {inherit password;} == minisignScript; {
+        generator-minisign = pkgs.runCommand "secret-manager-generator-minisign" {nativeBuildInputs = [pkgs.minisign];} ''
+          # Run like agenix does: inside a command substitution, where `set -e`
+          # is not in force, so the generator must fail on its own.
+          generate() { key=$(${lib.getExe pkgs.bash} ${minisign} </dev/null); }
+          for broken in missing empty; do
+            rm -f password key.pub
+            if [ "$broken" = empty ]; then : > password; fi
+            if generate 2>err; then
+              echo "minisign-key-pair: succeeded with a $broken password secret" >&2
+              exit 1
+            fi
+            if [ -e key.pub ]; then
+              echo "minisign-key-pair: wrote key.pub with a $broken password secret" >&2
+              exit 1
+            fi
+            if [ "$broken" = missing ]; then grep -qF 'run `example rotate` on it first' err; fi
+          done
+          printf '%s' 'correct-Horse.battery9' > password
+          generate
+          printf '%s\n' "$key" > key
+          grep -q '^untrusted comment: minisign encrypted secret key' key
+          echo payload > message
+          printf '%s\n' 'correct-Horse.battery9' | minisign -S -s key -m message -x message.minisig
+          minisign -V -p key.pub -m message -x message.minisig
+          if printf 'wrong\n' | minisign -S -s key -m message -x wrong.minisig; then
+            echo 'minisign-key-pair: key signed with the wrong password' >&2
             exit 1
           fi
-          if [ -e key.pub ]; then
-            echo "minisign-key-pair: wrote key.pub with a $broken password secret" >&2
-            exit 1
-          fi
-          if [ "$broken" = missing ]; then grep -qF 'run `example rotate` on it first' err; fi
-        done
-        printf '%s' 'correct-Horse.battery9' > password
-        generate
-        printf '%s\n' "$key" > key
-        grep -q '^untrusted comment: minisign encrypted secret key' key
-        echo payload > message
-        printf '%s\n' 'correct-Horse.battery9' | minisign -S -s key -m message -x message.minisig
-        minisign -V -p key.pub -m message -x message.minisig
-        if printf 'wrong\n' | minisign -S -s key -m message -x wrong.minisig; then
-          echo 'minisign-key-pair: key signed with the wrong password' >&2
-          exit 1
-        fi
-        touch "$out"
-      '';
-      generator-alphabet = pkgs.runCommand "secret-manager-generator-alphabet" {} ''
-        ${lib.getExe pkgs.python3} ${./tests/passphrase-alphabet.py} \
-          ${lib.getExe pkgs.bash} \
-          32 ${script "strong-passphrase"} \
-          48 ${script "strong-passphrase-48"} \
-          64 ${script "strong-passphrase-64"}
-        touch "$out"
-      '';
-    };
+          touch "$out"
+        '';
+        generator-public-key-write = pkgs.runCommand "secret-manager-generator-public-key-write" {} ''
+          for script in ${unwritable "ssh-ed25519-pub"} ${unwritable "gpg-key-pair"}; do
+            if key=$(${lib.getExe pkgs.bash} "$script" </dev/null); then
+              echo "$script: succeeded without writing its public key" >&2
+              exit 1
+            fi
+            test -z "$key"
+          done
+          touch "$out"
+        '';
+        generator-alphabet = pkgs.runCommand "secret-manager-generator-alphabet" {} ''
+          ${lib.getExe pkgs.python3} ${./tests/passphrase-alphabet.py} \
+            ${lib.getExe pkgs.bash} \
+            32 ${script "strong-passphrase"} \
+            48 ${script "strong-passphrase-48"} \
+            64 ${script "strong-passphrase-64"}
+          touch "$out"
+        '';
+      };
   in {
     checks = forAllSystems (system: let
       pkgs = pkgsFor system;

@@ -7,6 +7,9 @@
 # `{ name, secret, lib, pkgs, file, deps, decrypt, ... }` and runs the returned
 # script with bash to produce the secret plaintext on stdout. The script may
 # write adjacent files (the ssh generators drop a `.pub` next to the `.age`).
+# agenix-rekey runs each script as `( script ) || die`, where `set -e` is
+# ignored, so the key generators fail explicitly on every step before they
+# emit the private key.
 #
 # `rotateCommand` is the consumer's command for regenerating one secret; it
 # only appears in diagnostics.
@@ -59,12 +62,12 @@
     ...
   }: ''
     (
-      tmp=$(${pkgs.coreutils}/bin/mktemp -d)
+      tmp=$(${pkgs.coreutils}/bin/mktemp -d) || exit 1
       trap '${pkgs.coreutils}/bin/rm -rf "$tmp"' EXIT
       ${pkgs.openssh}/bin/ssh-keygen -q -t ${algo} ${lib.optionalString (algo == "rsa") "-b 4096"} \
-        -N "" -C ${lib.escapeShellArg name} -f "$tmp/key"
+        -N "" -C ${lib.escapeShellArg name} -f "$tmp/key" || exit 1
       ${pkgs.coreutils}/bin/install -m 0644 "$tmp/key.pub" \
-        ${lib.escapeShellArg (lib.removeSuffix ".age" file + ".pub")}
+        ${lib.escapeShellArg (lib.removeSuffix ".age" file + ".pub")} || exit 1
       ${pkgs.coreutils}/bin/cat "$tmp/key"
     )
   '';
@@ -80,22 +83,21 @@
     ...
   }: ''
     (
-      tmp=$(${pkgs.coreutils}/bin/mktemp -d)
+      tmp=$(${pkgs.coreutils}/bin/mktemp -d) || exit 1
       trap '${pkgs.coreutils}/bin/rm -rf "$tmp"' EXIT
       export GNUPGHOME="$tmp/gnupg"
-      ${pkgs.coreutils}/bin/mkdir -p "$GNUPGHOME"
-      ${pkgs.coreutils}/bin/chmod 700 "$GNUPGHOME"
+      ${pkgs.coreutils}/bin/mkdir -m 700 "$GNUPGHOME" || exit 1
       ${pkgs.gnupg}/bin/gpg --batch --pinentry-mode loopback --passphrase "" \
         --quick-generate-key ${lib.escapeShellArg (secret.settings.userId or "${name} <${name}@secrets.invalid>")} \
-        rsa4096 sign 0
+        rsa4096 sign 0 || exit 1
       fingerprint=$(${pkgs.gnupg}/bin/gpg --batch --with-colons --list-secret-keys \
         | ${pkgs.gawk}/bin/awk -F: '$1 == "fpr" { print $10; exit }')
-      test -n "$fingerprint"
+      test -n "$fingerprint" || exit 1
       public=${lib.escapeShellArg (lib.removeSuffix ".age" file + ".asc")}
       fingerprint_file=${lib.escapeShellArg (lib.removeSuffix ".age" file + ".fingerprint")}
-      ${pkgs.gnupg}/bin/gpg --batch --armor --export "$fingerprint" > "$public"
-      ${pkgs.coreutils}/bin/printf '%s\n' "$fingerprint" > "$fingerprint_file"
-      ${pkgs.coreutils}/bin/chmod 0644 "$public" "$fingerprint_file"
+      ${pkgs.gnupg}/bin/gpg --batch --armor --export "$fingerprint" > "$public" || exit 1
+      ${pkgs.coreutils}/bin/printf '%s\n' "$fingerprint" > "$fingerprint_file" || exit 1
+      ${pkgs.coreutils}/bin/chmod 0644 "$public" "$fingerprint_file" || exit 1
       ${pkgs.gnupg}/bin/gpg --batch --pinentry-mode loopback --passphrase "" \
         --armor --export-secret-keys "$fingerprint"
     )
@@ -106,9 +108,8 @@
   # `.age` plaintext is the encrypted key file; the public key is written to
   # `<secret>.pub` next to it. Release CI signs with the pair as
   # MINISIGN_SECRET_KEY + MINISIGN_PASSWORD. The password only crosses a pipe.
-  # agenix runs generators inside a command substitution, where `set -e` does
-  # not apply, so every step fails explicitly. `agenix generate <key path>`
-  # does not generate the dependency: rotate the password first.
+  # `agenix generate <key path>` does not generate the dependency: rotate the
+  # password first.
   mkMinisignKeyPair = {
     pkgs,
     lib,
@@ -116,13 +117,19 @@
     deps,
     decrypt,
     ...
-  }:
-    assert lib.assertMsg (builtins.isList deps && builtins.length deps == 1)
+  }: let
+    # agenix-rekey passes `deps` in the shape `dependencies` was declared in.
+    depList =
+      if builtins.isAttrs deps
+      then builtins.attrValues deps
+      else deps;
+  in
+    assert lib.assertMsg (builtins.length depList == 1)
     "minisign-key-pair: depend on exactly one password secret"; ''
       (
         tmp=$(${pkgs.coreutils}/bin/mktemp -d)
         trap '${pkgs.coreutils}/bin/rm -rf "$tmp"' EXIT
-        dep=${lib.escapeShellArg (lib.head deps).file}
+        dep=${lib.escapeShellArg (lib.head depList).file}
         if [ ! -s "$dep" ]; then
           echo "minisign-key-pair: password secret $dep is missing; run \`"${lib.escapeShellArg rotateCommand}"\` on it first" >&2
           exit 1
