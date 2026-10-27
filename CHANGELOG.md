@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-10-27
+
+### Changed
+
+- Requires `nix-manager-core` 0.4.5, which refreshes expired `fj` OAuth tokens
+  before Forgejo and Codeberg pushes.
+
 ### Added
 
 - `lib.mkGenerators` provides the agenix-rekey generators behind the names
@@ -150,6 +157,7 @@ runner-env add`), and Pkl evaluation via nix-pklx.
 - Corrected "foregejo" typos to "forgejo" in Nix module paths and source
   references.
 
-[Unreleased]: https://github.com/caniko/secret-manager/compare/0.3.2...HEAD
+[Unreleased]: https://github.com/caniko/secret-manager/compare/0.3.3...HEAD
+[0.3.3]: https://github.com/caniko/secret-manager/compare/0.3.2...0.3.3
 [0.3.2]: https://github.com/caniko/secret-manager/compare/0.3.1...0.3.2
 [0.3.1]: https://github.com/caniko/secret-manager/compare/0.3.0...0.3.1

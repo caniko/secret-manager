@@ -268,7 +268,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "caniko-secret-manager"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "age",
  "age-core",
@@ -1653,9 +1653,9 @@ dependencies = [
 
 [[package]]
 name = "nix-manager-core"
-version = "0.4.3"
+version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f18e4a0a04e9edeca8d65d8df2176e45d1b96991dc7508238e85ba7bef7ba7d"
+checksum = "7535d571635a3403f1969b9979d71a2b3d7f3bd5fcba62a07f4dcfe843b08274"
 dependencies = [
  "age",
  "age-core",
