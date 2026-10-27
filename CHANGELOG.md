@@ -10,6 +10,10 @@
 
 ### Fixed
 
+- `rotate` no longer claims the secret lacks a generator whenever `agenix generate`
+  fails (for example a failed FIDO2 assertion while decrypting a dependency).
+  agenix skips secrets without a generator and exits 0, so the hint now rides
+  on the "reported success but the source is missing" error instead.
 - `rotate` failure messages state the recovery that actually completed: a
   rotation restores the previous source, while creating a new source removes
   the partial file or names it when removal fails (they previously claimed

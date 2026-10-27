@@ -475,11 +475,7 @@ fn regenerate(repo_root: &Path, rel: &Path, existed: bool) -> Result<()> {
         args.push("--force-generate");
     }
     args.push(rel);
-    run_child(repo_root, "agenix", &args).map_err(|e| {
-        anyhow!(
-            "{e}\n  hint: rotation needs a `generator` on the secret's Nix declaration (e.g. `generator.script = \"strong-passphrase-64\"`)"
-        )
-    })
+    run_child(repo_root, "agenix", &args)
 }
 
 /// Smallest plausible age file: the 23-byte magic plus one recipient
@@ -532,7 +528,7 @@ fn validate_fresh(repo_root: &Path, secret_path: &Path) -> Result<()> {
     // The caller restores the backup or removes the partial file on failure.
     let bytes = fs::read(secret_path).map_err(|e| {
         anyhow!(
-            "`agenix generate` reported success but {} is missing ({e})",
+            "`agenix generate` reported success but {} is missing ({e})\n  hint: agenix skips secrets without a generator; rotation needs a `generator` on the secret's Nix declaration (e.g. `generator.script = \"strong-passphrase-64\"`)",
             display_rel(repo_root, secret_path)
         )
     })?;
@@ -936,6 +932,16 @@ mod tests {
         std::os::unix::fs::symlink("/", repo.path.join("linkdir")).expect("symlink");
         let err = contained_rel(&repo.path, "linkdir/token.age").unwrap_err();
         assert!(err.to_string().contains("inside the repo"), "{err:?}");
+    }
+
+    #[test]
+    fn generator_hint_only_when_generate_wrote_nothing() {
+        let repo = rooted();
+        let missing = validate_fresh(&repo.path, &repo.path.join("none.age")).unwrap_err();
+        assert!(missing.to_string().contains("generator"), "{missing:?}");
+        // An agenix failure (e.g. a failed FIDO2 assertion) is not a missing generator.
+        let failed = run_child(&repo.path, "false", &[]).unwrap_err();
+        assert!(!failed.to_string().contains("generator"), "{failed:?}");
     }
 
     #[test]
