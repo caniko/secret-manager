@@ -292,7 +292,11 @@ fn generate_failure_preserves_bytes_and_index() {
         "backup must be cleaned up after restore"
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("generator"), "hint at generator: {stderr}");
+    // A failed agenix run is not a missing generator; only the missing-output path hints.
+    assert!(
+        !stderr.contains("hint:"),
+        "unexpected generator hint: {stderr}"
+    );
     assert!(
         stderr.contains("the previous source is restored"),
         "must report the completed restore: {stderr}"
