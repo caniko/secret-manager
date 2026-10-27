@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- `lib.mkGenerators` provides the agenix-rekey generators behind the names
+  `mkSecret` emits, plus `minisign-key-pair`, with flake checks for the
+  passphrase alphabet and minisign failure handling. Moved from canix.
+
 ### Fixed
 
 - `rotate` failure messages state the recovery that actually completed: a
