@@ -10,6 +10,15 @@
 
 ### Fixed
 
+- `sync` planned twice when any record was an encrypted secret: the parent
+  discovered the store, loaded state and checked stale entries, then re-ran
+  everything in the no-swap scope child, so those steps printed twice. The
+  parent now decides from the loaded document alone and re-executes before any
+  planning; the child plans once. `--check` and `--dry-run` are unchanged.
+- `sync` lost its state when a forge call failed part-way (for example an
+  expired token): records already pushed in that run were not recorded. The
+  state is now written for the pushed records before the error is returned, and
+  a partial run never prunes entries from it.
 - `rotate` no longer claims the secret lacks a generator whenever `agenix generate`
   fails (for example a failed FIDO2 assertion while decrypting a dependency).
   agenix skips secrets without a generator and exits 0, so the hint now rides
