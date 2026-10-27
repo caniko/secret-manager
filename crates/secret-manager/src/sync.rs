@@ -74,70 +74,85 @@ impl SyncArgs {
     pub fn run(self) -> Result<()> {
         validate_target_prune_args(&self.targets, self.prune)?;
         let doc = self.load_document()?;
+        // The original stdin may already be consumed. Replay the complete
+        // public document; the child reapplies the preserved --target
+        // selection, CLI policy and state.
+        let replay = serde_json::to_vec(&doc)?;
+        self.run_document(
+            doc,
+            || crate::protection::enter_scope_with_input(Some(&replay)),
+            crate::protection::CredentialProtection::acquire,
+        )
+    }
+
+    /// Decide from the loaded document alone whether the run needs the
+    /// credential scope, and re-exec before any store discovery, state load or
+    /// stale check, so all planning output is produced exactly once, in the
+    /// process that does the work.
+    fn run_document<G>(
+        self,
+        doc: SyncDocument,
+        enter_scope: impl FnOnce() -> Result<Option<std::process::ExitStatus>>,
+        acquire: impl FnOnce() -> Result<G>,
+    ) -> Result<()> {
         // Staleness is judged against every declared target; --target only
         // narrows which targets are pushed.
         let declared_state = desired_records(&doc)?;
-        let replay = serde_json::to_vec(&doc)?;
         let doc = filter_document_targets(doc, &self.targets)?;
         let total = doc.total_targets();
-        ui::step("discovering secret store");
-        let store = Store::discover()?;
-        if self.verbose {
-            ui::info(format!("store root: {}", store.root.display()));
-        }
-        let state_path = self
-            .state
-            .clone()
-            .unwrap_or_else(|| default_state_path(&store));
-        ui::step("loading sync state");
-        if self.verbose {
-            ui::info(format!("sync state path: {}", state_path.display()));
-        }
-        let previous_state = SyncState::load(&state_path)?.unwrap_or_else(SyncState::empty);
         let desired_state = desired_records(&doc)?;
-        ui::step("checking stale managed entries");
-        let stale = stale_records(&previous_state.managed, &declared_state);
-        if stale.is_empty() {
-            ui::step_success("no stale managed entries");
-        } else {
-            ui::step(format!(
-                "found {} stale managed entr{}",
-                stale.len(),
-                plural_y(stale.len())
-            ));
-        }
-
-        if self.dry_run || self.check {
-            if self.check {
-                println!("Planned pushes (--check):");
-            } else {
-                println!("Planned pushes (--dry-run):");
-            }
-            for record in &desired_state {
-                println!();
-                println!("  target: {}", record.target);
-                println!("  kind:   {}", kind_label(record.kind));
-                println!("  source: {}", record.source);
-                println!("  name:   {}", record.name);
-                println!("  → {}", record.destination_label());
-            }
-            print_stale_records(&stale, self.prune);
-            println!();
-            println!("total targets: {total}");
-            return Ok(());
-        }
-
         let needs_decrypt = records_need_decrypt_session(&desired_state);
         with_sync_protection(
-            needs_decrypt,
+            needs_decrypt && !(self.dry_run || self.check),
+            enter_scope,
+            acquire,
             || {
-                // The original stdin may already be consumed. Replay the
-                // complete public document; the child reapplies the preserved
-                // --target selection, CLI policy and state.
-                crate::protection::enter_scope_with_input(Some(&replay))
-            },
-            crate::protection::CredentialProtection::acquire,
-            || {
+                ui::step("discovering secret store");
+                let store = Store::discover()?;
+                if self.verbose {
+                    ui::info(format!("store root: {}", store.root.display()));
+                }
+                let state_path = self
+                    .state
+                    .clone()
+                    .unwrap_or_else(|| default_state_path(&store));
+                ui::step("loading sync state");
+                if self.verbose {
+                    ui::info(format!("sync state path: {}", state_path.display()));
+                }
+                let previous_state = SyncState::load(&state_path)?.unwrap_or_else(SyncState::empty);
+                ui::step("checking stale managed entries");
+                let stale = stale_records(&previous_state.managed, &declared_state);
+                if stale.is_empty() {
+                    ui::step_success("no stale managed entries");
+                } else {
+                    ui::step(format!(
+                        "found {} stale managed entr{}",
+                        stale.len(),
+                        plural_y(stale.len())
+                    ));
+                }
+
+                if self.dry_run || self.check {
+                    if self.check {
+                        println!("Planned pushes (--check):");
+                    } else {
+                        println!("Planned pushes (--dry-run):");
+                    }
+                    for record in &desired_state {
+                        println!();
+                        println!("  target: {}", record.target);
+                        println!("  kind:   {}", kind_label(record.kind));
+                        println!("  source: {}", record.source);
+                        println!("  name:   {}", record.name);
+                        println!("  → {}", record.destination_label());
+                    }
+                    print_stale_records(&stale, self.prune);
+                    println!();
+                    println!("total targets: {total}");
+                    return Ok(());
+                }
+
                 let decrypt_session = if needs_decrypt {
                     let identities = store.resolve_identities(&self.identities)?;
                     let session = age::DecryptSession::from_identities(&identities)?;
@@ -152,47 +167,45 @@ impl SyncArgs {
                     None
                 };
                 let mut value_cache = SyncValueCache::default();
-
-                for record in &desired_state {
-                    ui::step(format!(
-                        "sync: `{}` {} from {}",
-                        record.target,
-                        kind_label(record.kind),
-                        record.source
-                    ));
-                    if self.verbose {
-                        ui::info(format!("destination: {}", record.destination_label()));
-                    }
-
-                    let value =
-                        value_cache.get(&store, &record_value(record), decrypt_session.as_ref())?;
-                    push_managed_record(record, &value)?;
-                }
-
-                if self.prune {
-                    ui::step(format!(
-                        "pruning {} stale managed entr{}",
-                        stale.len(),
-                        plural_y(stale.len())
-                    ));
-                    for record in &stale {
-                        delete_managed_record(record)?;
-                    }
-                } else {
-                    ui::step("reporting stale managed entries");
-                    report_stale_records(&stale);
-                }
-
-                let next_records = if self.prune {
-                    desired_state
-                } else {
-                    retained_without_prune(&previous_state.managed, &desired_state)
-                };
-                ui::step("writing sync state");
-                if self.verbose {
-                    ui::info(format!("sync state path: {}", state_path.display()));
-                }
-                SyncState::new(next_records).write_atomic(&state_path)?;
+                push_and_commit(
+                    &desired_state,
+                    &previous_state.managed,
+                    self.prune,
+                    &state_path,
+                    |record| {
+                        ui::step(format!(
+                            "sync: `{}` {} from {}",
+                            record.target,
+                            kind_label(record.kind),
+                            record.source
+                        ));
+                        if self.verbose {
+                            ui::info(format!("destination: {}", record.destination_label()));
+                        }
+                        let value = value_cache.get(
+                            &store,
+                            &record_value(record),
+                            decrypt_session.as_ref(),
+                        )?;
+                        push_managed_record(record, &value)
+                    },
+                    || {
+                        if self.prune {
+                            ui::step(format!(
+                                "pruning {} stale managed entr{}",
+                                stale.len(),
+                                plural_y(stale.len())
+                            ));
+                            for record in &stale {
+                                delete_managed_record(record)?;
+                            }
+                        } else {
+                            ui::step("reporting stale managed entries");
+                            report_stale_records(&stale);
+                        }
+                        Ok(())
+                    },
+                )?;
 
                 ui::success(format!("synced {total} target(s)"));
                 Ok(())
@@ -262,6 +275,42 @@ impl SyncArgs {
         Store::discover()
             .map(|store| FlakeRef::Path(store.root))
             .map_err(|e| anyhow!("{NO_INPUT}: {e}"))
+    }
+}
+
+/// Push each record, then run `finish` (prune/report). The sync state is
+/// written even when a later record or `finish` fails, so records already
+/// pushed in this run are not forgotten; the original error is then returned.
+fn push_and_commit(
+    desired: &[ManagedRecord],
+    previous: &[ManagedRecord],
+    prune: bool,
+    state_path: &Path,
+    mut push: impl FnMut(&ManagedRecord) -> Result<()>,
+    finish: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let mut pushed = Vec::new();
+    let outcome = (|| {
+        for record in desired {
+            push(record)?;
+            pushed.push(record.clone());
+        }
+        finish()
+    })();
+    if outcome.is_err() && pushed.is_empty() {
+        return outcome;
+    }
+    // A partial run never prunes the previous state down to what it pushed.
+    let next = if prune && outcome.is_ok() {
+        desired.to_vec()
+    } else {
+        retained_without_prune(previous, &pushed)
+    };
+    ui::step("writing sync state");
+    match (outcome, SyncState::new(next).write_atomic(state_path)) {
+        (Err(error), Err(write)) => Err(error.context(format!("sync state not saved: {write:#}"))),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), written) => written,
     }
 }
 
@@ -1262,6 +1311,88 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn parent_reexecs_before_planning_and_child_plans_once() {
+        use std::{cell::Cell, os::unix::process::ExitStatusExt};
+        let dir = tempfile::tempdir().unwrap();
+        // Unreadable state: any planning step in the parent would fail.
+        let state = dir.path().join("state.toml");
+        fs::write(&state, "not [valid toml").unwrap();
+        let doc = || {
+            SyncDocument::from_json(r#"{"hosts":[{"targets":{"token":{"secret":"token.age","name":"TOKEN","github":["caniko/demo"]}}}]}"#).unwrap()
+        };
+        let args = || SyncArgs {
+            config: None,
+            flake: None,
+            no_flake: true,
+            identities: vec![],
+            dry_run: false,
+            check: false,
+            targets: vec![],
+            prune: false,
+            verbose: false,
+            state: Some(state.clone()),
+        };
+        let scoped = Cell::new(0);
+        args()
+            .run_document(
+                doc(),
+                || {
+                    scoped.set(scoped.get() + 1);
+                    Ok(Some(std::process::ExitStatus::from_raw(0)))
+                },
+                || -> Result<()> { panic!("parent acquired protection after re-exec") },
+            )
+            .unwrap();
+        assert_eq!(scoped.get(), 1);
+        // Planning-only runs never enter the scope; they do reach the state.
+        let mut check = args();
+        check.check = true;
+        let result = check.run_document(
+            doc(),
+            || -> Result<Option<std::process::ExitStatus>> { panic!("--check entered a scope") },
+            || -> Result<()> { panic!("--check acquired protection") },
+        );
+        assert!(result.is_err(), "planning should have loaded the state");
+    }
+
+    #[test]
+    fn partial_failure_still_persists_pushed_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.toml");
+        let doc = SyncDocument::from_json(
+            r#"{"hosts":[{"targets":{
+            "a":{"source":"a","name":"A","github":["caniko/one"]},
+            "b":{"source":"b","name":"B","github":["caniko/two"]}}}]}"#,
+        )
+        .unwrap();
+        let desired = desired_records(&doc).unwrap();
+        assert_eq!(desired.len(), 2);
+        let result = push_and_commit(
+            &desired,
+            &[],
+            false,
+            &state,
+            |record| {
+                if record.target == "b" {
+                    bail!("token expired");
+                }
+                Ok(())
+            },
+            || panic!("finish ran after a failed push"),
+        );
+        assert_eq!(result.unwrap_err().to_string(), "token expired");
+        let saved = SyncState::load(&state).unwrap().unwrap();
+        assert_eq!(saved.managed, vec![desired[0].clone()]);
+
+        // Nothing pushed: the state file is not created.
+        let untouched = dir.path().join("none.toml");
+        assert!(
+            push_and_commit(&desired, &[], false, &untouched, |_| bail!("x"), || Ok(())).is_err()
+        );
+        assert!(!untouched.exists());
     }
 
     #[test]
