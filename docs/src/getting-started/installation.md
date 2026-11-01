@@ -26,7 +26,7 @@ The registry package is `caniko-secret-manager`; installing it provides the
 same `secret-manager` executable:
 
 ```sh
-cargo install caniko-secret-manager --version 0.3.0 --locked
+cargo install caniko-secret-manager --version 0.4.0 --locked
 ```
 
 ## Prerequisites

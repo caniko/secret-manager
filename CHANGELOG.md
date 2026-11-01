@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-01
+
+### Added
+
+- `kubernetes` sync destinations write an encrypted value to a Kubernetes
+  Secret with `kubectl apply --server-side --force-conflicts` in a named
+  context and namespace. Formats: `opaque` (one data key, default the target
+  `name`) and `dockerconfigjson` (registry login built from `username` and the
+  decrypted value). Plaintext `source` values are refused. The manifest is built
+  in zeroized memory and reaches `kubectl` on stdin only; the value is never in
+  argv or the child environment, `-o`/`-v` are never passed, and child output
+  is bounded and redacted of the value and its base64 forms before any report.
+  Dry-run and `--check` print the destination and data key names only. Available
+  in the `services.secretSync` module, `mkSecretSyncTargets` and the Pkl
+  `SyncTarget.kubernetes` schema. `--prune` removes a Secret that is no longer
+  declared with `kubectl delete secret --ignore-not-found`.
+- Sync state records Kubernetes destinations (provider `kubernetes`, scope
+  `namespace`). Older binaries reject these records; do not reuse such a state
+  file with an older release.
+
 ## [0.3.3] - 2026-10-27
 
 ### Changed
@@ -157,7 +177,8 @@ runner-env add`), and Pkl evaluation via nix-pklx.
 - Corrected "foregejo" typos to "forgejo" in Nix module paths and source
   references.
 
-[Unreleased]: https://github.com/caniko/secret-manager/compare/0.3.3...HEAD
+[Unreleased]: https://github.com/caniko/secret-manager/compare/0.4.0...HEAD
+[0.4.0]: https://github.com/caniko/secret-manager/compare/0.3.3...0.4.0
 [0.3.3]: https://github.com/caniko/secret-manager/compare/0.3.2...0.3.3
 [0.3.2]: https://github.com/caniko/secret-manager/compare/0.3.1...0.3.2
 [0.3.1]: https://github.com/caniko/secret-manager/compare/0.3.0...0.3.1
