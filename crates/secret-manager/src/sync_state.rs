@@ -5,7 +5,9 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::sync_targets::{Provider, SyncDocument, SyncValue};
+use crate::sync_targets::{
+    KubernetesDestination, KubernetesFormat, Provider, SyncDocument, SyncValue,
+};
 
 pub const STATE_VERSION: u32 = 1;
 
@@ -34,6 +36,11 @@ pub struct ManagedRecord {
     pub name: String,
     pub target: String,
     pub source: String,
+    /// Kubernetes only: `host` is the kubectl context, `owner` the namespace
+    /// and `repo` and `name` the Secret name. The data key is not part of the
+    /// identity, so renaming it never schedules the live Secret for pruning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kubernetes: Option<KubernetesDestination>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -43,6 +50,7 @@ pub enum Scope {
     Environment,
     Org,
     User,
+    Namespace,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -87,8 +95,18 @@ impl ManagedRecord {
             Provider::Forgejo => "forgejo",
             Provider::Github => "github",
             Provider::Crow => "crow",
+            Provider::Kubernetes => "kubernetes",
         };
         match self.scope {
+            Scope::Namespace => format!(
+                "{provider}/{} secret {}/{} key {}",
+                self.host,
+                self.owner.as_deref().unwrap_or("<missing-namespace>"),
+                self.repo.as_deref().unwrap_or("<missing-secret>"),
+                self.kubernetes
+                    .as_ref()
+                    .map_or("<missing-key>", |kube| kube.data_key(""))
+            ),
             Scope::Repo => format!(
                 "{provider}/{} repo  {}/{}",
                 self.host,
@@ -189,6 +207,7 @@ impl SyncState {
 
 pub fn desired_records(doc: &SyncDocument) -> Result<Vec<ManagedRecord>> {
     let mut records = Vec::new();
+    let mut kube_secrets = BTreeSet::new();
     for (_, target_key, target) in doc.iter_targets() {
         let kind = match &target.value {
             SyncValue::Secret(_) => ManagedKind::Secret,
@@ -210,6 +229,7 @@ pub fn desired_records(doc: &SyncDocument) -> Result<Vec<ManagedRecord>> {
                 name: target.name.clone(),
                 target: target_key.to_string(),
                 source: source.clone(),
+                kubernetes: None,
             });
         }
 
@@ -231,6 +251,7 @@ pub fn desired_records(doc: &SyncDocument) -> Result<Vec<ManagedRecord>> {
                 name: target.name.to_ascii_uppercase(),
                 target: target_key.to_string(),
                 source: source.clone(),
+                kubernetes: None,
             });
         }
 
@@ -250,6 +271,47 @@ pub fn desired_records(doc: &SyncDocument) -> Result<Vec<ManagedRecord>> {
                 name: target.name.clone(),
                 target: target_key.to_string(),
                 source: source.clone(),
+                kubernetes: None,
+            });
+        }
+
+        for destination in &target.kubernetes {
+            if kind != ManagedKind::Secret {
+                bail!(
+                    "sync target `{target_key}`: Kubernetes destinations take encrypted `secret` sources only"
+                );
+            }
+            destination.validate(&target.name)?;
+            if !kube_secrets.insert((
+                destination.context.clone(),
+                destination.namespace.clone(),
+                destination.secret.clone(),
+            )) {
+                bail!(
+                    "sync target `{target_key}`: Kubernetes Secret {}/{}/{} is declared more than once; \
+                     server-side apply by one field manager would drop the other keys",
+                    destination.context,
+                    destination.namespace,
+                    destination.secret
+                );
+            }
+            records.push(ManagedRecord {
+                provider: Provider::Kubernetes,
+                host: destination.context.clone(),
+                scope: Scope::Namespace,
+                owner: Some(destination.namespace.clone()),
+                repo: Some(destination.secret.clone()),
+                org: None,
+                environment: None,
+                kind,
+                name: destination.secret.clone(),
+                target: target_key.to_string(),
+                source: source.clone(),
+                kubernetes: Some(KubernetesDestination {
+                    key: (destination.format == KubernetesFormat::Opaque)
+                        .then(|| destination.data_key(&target.name).to_string()),
+                    ..destination.clone()
+                }),
             });
         }
 
@@ -266,6 +328,7 @@ pub fn desired_records(doc: &SyncDocument) -> Result<Vec<ManagedRecord>> {
                 name: target.name.clone(),
                 target: target_key.to_string(),
                 source,
+                kubernetes: None,
             });
         }
     }
@@ -526,6 +589,7 @@ source = 'age/public/quote" and ü.txt'
             name: name.to_string(),
             target: target.to_string(),
             source: "age/secrets/token.age".to_string(),
+            kubernetes: None,
         }
     }
 
@@ -546,6 +610,7 @@ source = 'age/public/quote" and ü.txt'
             name: name.to_string(),
             target: target.to_string(),
             source: "age/secrets/token.age".to_string(),
+            kubernetes: None,
         }
     }
 }

@@ -298,6 +298,9 @@
         // lib.optionalAttrs ((entry.sync.githubEnvironments or null) != null) {
           githubEnvironments = map (destination: builtins.removeAttrs destination ["__pkl_class"]) entry.sync.githubEnvironments;
         }
+        // lib.optionalAttrs ((entry.sync.kubernetes or null) != null) {
+          kubernetes = map (destination: lib.filterAttrs (_: value: value != null) (builtins.removeAttrs destination ["__pkl_class"])) entry.sync.kubernetes;
+        }
         // {
           ${sourceAttr} =
             if sourceAttr == "secret"

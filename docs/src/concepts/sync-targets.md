@@ -1,8 +1,8 @@
 # Sync Targets
 
 `secret-manager` can push encrypted values to Codeberg/Forgejo, Codefloe, and
-GitHub Actions secret stores and plaintext non-secret values to their Actions
-variables.
+GitHub Actions secret stores and to Kubernetes Secrets, and plaintext
+non-secret values to Actions variables.
 
 Sync targets are **declared declaratively** via Nix module options — the
 `services.secretSync` namespace — rather than passed as ad-hoc CLI flags.
@@ -95,6 +95,7 @@ entry. Never reuse such a state file with an older Secret Manager.
 | `codefloe`           | `list of str`                       | `[]`             | `owner/repo` Codefloe repository targets     |
 | `github`             | `list of str`                       | `[]`             | `owner/repo` GitHub repository targets       |
 | `githubEnvironments` | `list of {repository, environment}` | `[]`             | GitHub environment targets                   |
+| `kubernetes`         | `list of {context, namespace, ...}` | `[]`             | Kubernetes Secret targets (`secret` only)    |
 | `codebergOrgs`       | `list of str`                       | `[]`             | Forgejo organization/account-scope targets   |
 | `codebergUser`       | `bool`                              | `false`          | Forgejo authenticated-user account target    |
 | `host`               | `str`                               | `"codeberg.org"` | Forge host for `codeberg*` token lookup      |
@@ -103,6 +104,82 @@ Each target must set exactly one of `secret` or `source`.
 Codefloe targets are repository-scoped; GitHub supports repository and environment
 destinations. Authenticate Codefloe with
 `fj -H codefloe.com` and GitHub with `gh auth login`.
+
+## Kubernetes Secrets
+
+`kubernetes` writes a decrypted `secret` value to a Kubernetes Secret with
+`kubectl apply --server-side --force-conflicts`. Authenticate `kubectl` for the
+named context beforehand; `secret-manager` never reads kubeconfig itself.
+
+```nix
+services.secretSync.targets."registry-pull" = {
+  secret = "age/secrets/registry-pull.age";
+  name = "REGISTRY_PASSWORD";
+  kubernetes = [
+    {
+      context = "nautilus";
+      namespace = "syndb";
+      secret = "registry-pull";
+      format = "dockerconfigjson";
+      username = "robot";
+      registry = "registry.example"; # default https://index.docker.io/v1/
+    }
+    {
+      context = "nautilus";
+      namespace = "syndb";
+      secret = "api-token";
+      format = "opaque";
+      key = "token"; # default: the target `name`
+    }
+  ];
+};
+```
+
+| Field          | Applies to         | Description                                                     |
+| -------------- | ------------------ | --------------------------------------------------------------- |
+| `context`      | both               | `kubectl --context`; required                                   |
+| `namespace`    | both               | RFC 1123 subdomain; required                                    |
+| `secret`       | both               | Secret name, RFC 1123 subdomain; required                       |
+| `format`       | both               | `opaque` or `dockerconfigjson`; required                        |
+| `key`          | `opaque`           | Data key `[-._a-zA-Z0-9]+`; defaults to the target `name`       |
+| `registry`     | `dockerconfigjson` | Registry key in `auths`; defaults to `https://index.docker.io/v1/` |
+| `username`     | `dockerconfigjson` | Required; must not contain `:`                                  |
+| `fieldManager` | both               | Server-side apply manager; defaults to `secret-manager`         |
+
+`opaque` stores the value base64-encoded under `key` with `type: Opaque`.
+`dockerconfigjson` stores `{"auths":{"<registry>":{"username","password","auth"}}}`
+under `.dockerconfigjson` with `type: kubernetes.io/dockerconfigjson`, using the
+decrypted value as the password. Invalid names, mixed fields (for example
+`registry` on an `opaque` destination), plaintext `source` values and a Secret
+declared twice are rejected before any decryption or `kubectl` call. Server-side
+apply by one field manager owns the whole `data` map, so one Secret has exactly
+one declaration. `--prune` deletes a Secret that is no longer declared.
+
+### Leak guarantees
+
+The decrypted value is only ever in zeroized buffers and in the manifest piped to
+`kubectl` on stdin. Specifically:
+
+- It is never in `kubectl`'s argv or environment, and `-o`/`--output` and
+  `-v`/`--v` are never passed, so `kubectl` has nothing verbose to echo.
+- `kubectl`'s stdout and stderr are captured through the same bounded private
+  pipes as the other credential helpers (1 MiB cap, 90 s deadline, no core
+  dumps, inherited sleep inhibitor, process-group cleanup). Nothing is forwarded
+  to the terminal.
+- On failure the report is one line of at most 400 bytes. Before it is built,
+  every occurrence of the plaintext, its JSON-escaped form, its base64, and for
+  `dockerconfigjson` the `user:password` string, its base64 and the whole config
+  JSON and its base64 is replaced with `[redacted]`. Errors from the capture
+  layer pass through the same redaction.
+- On success the only output is `kubernetes <context>/<namespace>/secret/<name>:
+  applied`. `--dry-run` and `--check` print the destination and the data key
+  names only, and never decrypt.
+- The sync state file records destination metadata (context, namespace, Secret
+  name, key, registry, username) and never a value.
+
+Redaction is a backstop, not the control: the value is kept out of every channel
+that could echo it. A value shorter than a few characters makes redaction
+over-eager; use real credentials.
 
 ## Relation to mkSecret
 
@@ -138,6 +215,20 @@ document of the shape:
           "codebergOrgs": ["caniko"],
           "codebergUser": true,
           "host": "codeberg.org"
+        },
+        "registry-pull": {
+          "secret": "age/secrets/registry-pull.age",
+          "name": "REGISTRY_PASSWORD",
+          "kubernetes": [
+            {
+              "context": "nautilus",
+              "namespace": "syndb",
+              "secret": "registry-pull",
+              "format": "dockerconfigjson",
+              "username": "robot",
+              "registry": "registry.example"
+            }
+          ]
         },
         "public-key": {
           "source": "age/secrets/public-key.asc",

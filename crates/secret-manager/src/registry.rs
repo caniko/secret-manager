@@ -137,6 +137,12 @@ pub struct SyncTarget {
     pub github_environments: Vec<crate::sync_targets::GithubEnvironment>,
     #[serde(
         default,
+        deserialize_with = "null_to_empty_kubernetes",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub kubernetes: Vec<crate::sync_targets::KubernetesDestination>,
+    #[serde(
+        default,
         deserialize_with = "null_to_empty_vec",
         skip_serializing_if = "Vec::is_empty"
     )]
@@ -538,6 +544,37 @@ fn render_sync(out: &mut String, sync: &SyncTarget, level: usize) {
             out.push(']');
         });
     }
+    if !sync.kubernetes.is_empty() {
+        render_field(out, "kubernetes", level + 1, |out| {
+            out.push_str("[\n");
+            for destination in &sync.kubernetes {
+                indent(out, level + 2);
+                out.push_str("{\n");
+                render_string_field(out, "context", &destination.context, level + 3);
+                render_string_field(out, "namespace", &destination.namespace, level + 3);
+                render_string_field(out, "secret", &destination.secret, level + 3);
+                let format = match destination.format {
+                    crate::sync_targets::KubernetesFormat::Opaque => "opaque",
+                    crate::sync_targets::KubernetesFormat::Dockerconfigjson => "dockerconfigjson",
+                };
+                render_string_field(out, "format", format, level + 3);
+                for (name, value) in [
+                    ("key", &destination.key),
+                    ("registry", &destination.registry),
+                    ("username", &destination.username),
+                    ("fieldManager", &destination.field_manager),
+                ] {
+                    if let Some(value) = value {
+                        render_string_field(out, name, value, level + 3);
+                    }
+                }
+                indent(out, level + 2);
+                out.push_str("}\n");
+            }
+            indent(out, level + 1);
+            out.push(']');
+        });
+    }
     if !sync.codeberg_orgs.is_empty() {
         render_string_list_field(out, "codebergOrgs", &sync.codeberg_orgs, level + 1);
     }
@@ -642,6 +679,18 @@ where
     Ok(Option::<Vec<String>>::deserialize(deserializer)?.unwrap_or_default())
 }
 
+fn null_to_empty_kubernetes<'de, D>(
+    deserializer: D,
+) -> Result<Vec<crate::sync_targets::KubernetesDestination>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(
+        Option::<Vec<crate::sync_targets::KubernetesDestination>>::deserialize(deserializer)?
+            .unwrap_or_default(),
+    )
+}
+
 fn null_to_empty_environments<'de, D>(
     deserializer: D,
 ) -> Result<Vec<crate::sync_targets::GithubEnvironment>, D::Error>
@@ -736,6 +785,7 @@ mod tests {
             codefloe: vec!["caniko/codefloe-repo".to_string()],
             github: vec!["caniko/github-repo".to_string()],
             github_environments: Vec::new(),
+            kubernetes: Vec::new(),
             codeberg_orgs: Vec::new(),
             host: default_host(),
         };

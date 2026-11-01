@@ -101,6 +101,70 @@
         ];
       };
 
+      kubernetes = lib.mkOption {
+        type = lib.types.listOf (lib.types.submodule {
+          options = {
+            context = lib.mkOption {
+              type = lib.types.str;
+              description = "kubectl context that selects the cluster.";
+            };
+            namespace = lib.mkOption {
+              type = lib.types.str;
+              description = "Namespace of the Secret (RFC 1123 subdomain).";
+            };
+            secret = lib.mkOption {
+              type = lib.types.str;
+              description = "Secret name (RFC 1123 subdomain).";
+            };
+            format = lib.mkOption {
+              type = lib.types.enum ["opaque" "dockerconfigjson"];
+              description = ''
+                `opaque` stores the value under `key`; `dockerconfigjson`
+                builds a `kubernetes.io/dockerconfigjson` Secret from
+                `username` and the value as the password.
+              '';
+            };
+            key = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              description = "`opaque` only: data key. Defaults to the target `name`.";
+            };
+            registry = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              description = "`dockerconfigjson` only: registry. Defaults to `https://index.docker.io/v1/`.";
+            };
+            username = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              description = "`dockerconfigjson` only (required): registry user name.";
+            };
+            fieldManager = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              description = "Server-side apply field manager. Defaults to `secret-manager`.";
+            };
+          };
+        });
+        default = [];
+        description = ''
+          Kubernetes Secret destinations for encrypted `secret` sources. The
+          value is applied with `kubectl apply --server-side`, passed on
+          stdin only. Each Secret may be declared once, because server-side
+          apply by a single field manager would drop sibling keys.
+        '';
+        example = [
+          {
+            context = "nautilus";
+            namespace = "syndb";
+            secret = "registry-pull";
+            format = "dockerconfigjson";
+            username = "robot";
+            registry = "registry.example";
+          }
+        ];
+      };
+
       codebergOrgs = lib.mkOption {
         type = lib.types.listOf lib.types.str;
         default = [];

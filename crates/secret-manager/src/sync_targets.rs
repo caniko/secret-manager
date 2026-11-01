@@ -44,6 +44,9 @@ pub struct SyncTarget {
     #[serde(rename = "githubEnvironments")]
     pub github_environments: Vec<GithubEnvironment>,
 
+    /// Kubernetes Secret destinations; encrypted sources only.
+    pub kubernetes: Vec<KubernetesDestination>,
+
     /// Codeberg/Forgejo organizations to push to at account scope.
     #[serde(rename = "codebergOrgs")]
     pub codeberg_orgs: Vec<String>,
@@ -64,6 +67,7 @@ pub enum Provider {
     Forgejo,
     Github,
     Crow,
+    Kubernetes,
 }
 
 /// Where a sync target's value comes from.
@@ -128,6 +132,139 @@ impl GithubEnvironment {
     }
 }
 
+/// How a decrypted value is shaped into a Kubernetes Secret.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum KubernetesFormat {
+    /// `type: Opaque` with the value under one `data` key.
+    Opaque,
+    /// `type: kubernetes.io/dockerconfigjson` built from `username` and the value.
+    Dockerconfigjson,
+}
+
+pub const DEFAULT_DOCKER_REGISTRY: &str = "https://index.docker.io/v1/";
+pub const DEFAULT_FIELD_MANAGER: &str = "secret-manager";
+pub const DOCKERCONFIGJSON_KEY: &str = ".dockerconfigjson";
+
+/// A Kubernetes Secret written with `kubectl apply --server-side`.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct KubernetesDestination {
+    pub context: String,
+    pub namespace: String,
+    pub secret: String,
+    pub format: KubernetesFormat,
+    /// `opaque` only; defaults to the target's `name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// `dockerconfigjson` only; defaults to [`DEFAULT_DOCKER_REGISTRY`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry: Option<String>,
+    /// Required for `dockerconfigjson`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// Defaults to [`DEFAULT_FIELD_MANAGER`].
+    #[serde(
+        default,
+        rename = "fieldManager",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub field_manager: Option<String>,
+}
+
+fn is_rfc1123_subdomain(name: &str) -> bool {
+    let edge = |byte: u8| byte.is_ascii_lowercase() || byte.is_ascii_digit();
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 253
+        && edge(bytes[0])
+        && edge(bytes[bytes.len() - 1])
+        && bytes
+            .iter()
+            .all(|byte| edge(*byte) || matches!(byte, b'-' | b'.'))
+        && name
+            .split('.')
+            .all(|label| !label.is_empty() && !label.starts_with('-') && !label.ends_with('-'))
+}
+
+fn is_plain_text(value: &str, max: usize) -> bool {
+    !value.trim().is_empty()
+        && value.len() <= max
+        && !value.starts_with('-')
+        && !value.chars().any(char::is_control)
+}
+
+impl KubernetesDestination {
+    /// Effective `data` key: `.dockerconfigjson`, or `key` / the target `name`.
+    pub fn data_key<'a>(&'a self, target_name: &'a str) -> &'a str {
+        match self.format {
+            KubernetesFormat::Dockerconfigjson => DOCKERCONFIGJSON_KEY,
+            KubernetesFormat::Opaque => self.key.as_deref().unwrap_or(target_name),
+        }
+    }
+
+    /// Reject malformed names and field combinations before any effect.
+    pub fn validate(&self, target_name: &str) -> anyhow::Result<()> {
+        use anyhow::bail;
+        if !is_plain_text(&self.context, 253) {
+            bail!("Kubernetes context must be nonblank and must not start with `-`");
+        }
+        for (what, value) in [("namespace", &self.namespace), ("secret", &self.secret)] {
+            if !is_rfc1123_subdomain(value) {
+                bail!("Kubernetes {what} `{value}` must be an RFC 1123 subdomain");
+            }
+        }
+        if let Some(manager) = &self.field_manager
+            && !is_plain_text(manager, 128)
+        {
+            bail!(
+                "Kubernetes fieldManager must be nonblank, at most 128 bytes and not start with `-`"
+            );
+        }
+        match self.format {
+            KubernetesFormat::Opaque => {
+                if self.registry.is_some() || self.username.is_some() {
+                    bail!("Kubernetes `opaque` secrets do not take `registry` or `username`");
+                }
+                let key = self.data_key(target_name);
+                if key.is_empty()
+                    || key.len() > 253
+                    || matches!(key, "." | "..")
+                    || !key.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+                    })
+                {
+                    bail!("Kubernetes secret key `{key}` must match [-._a-zA-Z0-9]+");
+                }
+            }
+            KubernetesFormat::Dockerconfigjson => {
+                if self.key.is_some() {
+                    bail!(
+                        "Kubernetes `dockerconfigjson` secrets always use `{DOCKERCONFIGJSON_KEY}`; remove `key`"
+                    );
+                }
+                match &self.username {
+                    Some(user) if !user.is_empty() && !user.chars().any(char::is_control) => {}
+                    _ => bail!("Kubernetes `dockerconfigjson` secrets require a `username`"),
+                }
+                if self
+                    .username
+                    .as_deref()
+                    .is_some_and(|user| user.contains(':'))
+                {
+                    bail!("Kubernetes dockerconfigjson `username` must not contain `:`");
+                }
+                if let Some(registry) = &self.registry
+                    && (registry.is_empty() || registry.chars().any(char::is_control))
+                {
+                    bail!("Kubernetes dockerconfigjson `registry` must be nonblank");
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 pub(crate) fn validate_github_environment_value_name(name: &str) -> anyhow::Result<()> {
     if name.is_empty()
         || name.as_bytes()[0].is_ascii_digit()
@@ -184,6 +321,8 @@ impl<'de> Deserialize<'de> for SyncTarget {
             github: Vec<String>,
             #[serde(default, rename = "githubEnvironments")]
             github_environments: Vec<GithubEnvironment>,
+            #[serde(default)]
+            kubernetes: Vec<KubernetesDestination>,
             #[serde(default, rename = "codebergOrgs")]
             codeberg_orgs: Vec<String>,
             #[serde(default, rename = "codebergUser")]
@@ -215,6 +354,7 @@ impl<'de> Deserialize<'de> for SyncTarget {
             codefloe: raw.codefloe,
             github: raw.github,
             github_environments: raw.github_environments,
+            kubernetes: raw.kubernetes,
             codeberg_orgs: raw.codeberg_orgs,
             codeberg_user: raw.codeberg_user,
             host: raw.host,

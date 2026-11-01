@@ -26,6 +26,7 @@ pub mod render;
 pub mod rotate;
 pub mod store;
 pub mod sync;
+mod sync_kubernetes;
 pub mod sync_state;
 pub mod sync_targets;
 pub mod target;

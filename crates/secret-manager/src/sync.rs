@@ -644,12 +644,14 @@ fn push_managed_record(record: &ManagedRecord, value: &str) -> Result<()> {
         Provider::Forgejo => push_forgejo_record(record, value),
         Provider::Github => push_github_record(record, value),
         Provider::Crow => push_crow_record(record, value),
+        Provider::Kubernetes => crate::sync_kubernetes::push(record, value),
     }
 }
 
 fn push_forgejo_record(record: &ManagedRecord, value: &str) -> Result<()> {
     match record.scope {
         Scope::Environment => bail!("Forgejo environment sync is not supported"),
+        Scope::Namespace => bail!("Forgejo sync record has a Kubernetes scope"),
         Scope::Repo => {
             let repo = record_repo(record)?;
             match record.kind {
@@ -1055,6 +1057,7 @@ fn delete_managed_record(record: &ManagedRecord) -> Result<()> {
         Provider::Forgejo => delete_forgejo_record(record),
         Provider::Github => delete_github_record(record),
         Provider::Crow => delete_crow_record(record),
+        Provider::Kubernetes => crate::sync_kubernetes::delete(record),
     }
 }
 
@@ -1139,6 +1142,7 @@ enum DeleteAction<'a> {
 fn delete_action_for(record: &ManagedRecord) -> Result<DeleteAction<'_>> {
     match (record.scope, record.kind) {
         (Scope::Environment, _) => bail!("Forgejo environment sync is not supported"),
+        (Scope::Namespace, _) => bail!("Forgejo sync record has a Kubernetes scope"),
         (Scope::Repo, ManagedKind::Secret) => Ok(DeleteAction::RepoSecret {
             owner: required_field(record.owner.as_deref(), record, "owner")?,
             repo: required_field(record.repo.as_deref(), record, "repo")?,
@@ -1993,6 +1997,7 @@ mod tests {
             name: "TOKEN".to_string(),
             target: "token".to_string(),
             source: "age/secrets/token.age".to_string(),
+            kubernetes: None,
         }
     }
 
@@ -2009,6 +2014,7 @@ mod tests {
             name: "TOKEN".to_string(),
             target: "token".to_string(),
             source: "age/secrets/token.age".to_string(),
+            kubernetes: None,
         }
     }
 
@@ -2025,6 +2031,7 @@ mod tests {
             name: "TOKEN".to_string(),
             target: "token".to_string(),
             source: "age/secrets/token.age".to_string(),
+            kubernetes: None,
         }
     }
 }
