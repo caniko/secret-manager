@@ -78,6 +78,19 @@ nix-manager-core.lib.mkManagerOutputs {
                 environment = "simit-crates-io";
               }
             ];
+            kubernetes = [
+              {
+                __pkl_class = "KubernetesDestination";
+                context = "nautilus";
+                namespace = "syndb";
+                secret = "registry-pull";
+                format = "dockerconfigjson";
+                key = null;
+                registry = null;
+                username = "robot";
+                fieldManager = null;
+              }
+            ];
           };
         };
       };
@@ -151,6 +164,16 @@ nix-manager-core.lib.mkManagerOutputs {
         {
           repository = "caniko/github-example";
           environment = "simit-crates-io";
+        }
+      ];
+      assert renderedSync.sync-only-target.kubernetes
+      == [
+        {
+          context = "nautilus";
+          namespace = "syndb";
+          secret = "registry-pull";
+          format = "dockerconfigjson";
+          username = "robot";
         }
       ];
       assert !(renderedSync.sync-only-target ? __pkl_class);

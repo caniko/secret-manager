@@ -7,7 +7,7 @@ retain the existing library imports:
 
 ```toml
 [dependencies]
-secret-manager = { package = "caniko-secret-manager", version = "0.3.0" }
+secret-manager = { package = "caniko-secret-manager", version = "0.4.0" }
 ```
 
 The minimum supported Rust compiler is 1.88. Public Forgejo authentication

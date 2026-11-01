@@ -326,11 +326,14 @@ secret-manager push <SECRET.age> \
 ### `sync` — Push declared sync targets
 
 Read a collected `services.secretSync` JSON document and push each declared
-target to Codeberg/Forgejo, Codefloe, or GitHub Actions scopes. Codeberg/Forgejo
-targets support repository, organization, and authenticated-user scopes;
-Codefloe and GitHub targets are repository-scoped. Encrypted `secret` targets
-are pushed as Actions secrets; plaintext `source` targets are pushed as Actions
-variables.
+target to Codeberg/Forgejo, Codefloe, or GitHub Actions scopes, or to
+Kubernetes Secrets. Codeberg/Forgejo targets support repository, organization,
+and authenticated-user scopes; Codefloe and GitHub targets are
+repository-scoped; Kubernetes targets name a `kubectl` context, namespace and
+Secret (see [Sync Targets](../concepts/sync-targets.md#kubernetes-secrets)).
+Encrypted `secret` targets are pushed as Actions secrets; plaintext `source`
+targets are pushed as Actions variables. Kubernetes accepts encrypted `secret`
+targets only.
 
 ```sh
 secret-manager sync --dry-run

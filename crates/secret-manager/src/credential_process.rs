@@ -44,6 +44,32 @@ fn capture_inner(
     timeout: Duration,
     group: bool,
 ) -> Result<Zeroizing<Vec<u8>>> {
+    Ok(run_captured(command, input, timeout, group, false)?.stdout)
+}
+
+/// Output of a captured helper that is allowed to fail with diagnostics.
+pub(crate) struct Captured {
+    pub status: std::process::ExitStatus,
+    pub stdout: Zeroizing<Vec<u8>>,
+    pub stderr: Zeroizing<Vec<u8>>,
+}
+
+/// Like [`capture`], but a failing helper returns its bounded stdout and stderr
+/// so the caller can redact known secrets before surfacing them.
+pub(crate) fn capture_with_diagnostics(
+    command: &mut Command,
+    input: Option<&[u8]>,
+) -> Result<Captured> {
+    run_captured(command, input, Duration::from_secs(90), true, true)
+}
+
+fn run_captured(
+    command: &mut Command,
+    input: Option<&[u8]>,
+    timeout: Duration,
+    group: bool,
+    diagnostics: bool,
+) -> Result<Captured> {
     disable_core_dumps()?;
     crate::protection::inherit_active_inhibitors(command)?;
     command
@@ -164,23 +190,34 @@ fn capture_inner(
         }
         thread::sleep(Duration::from_millis(20));
     };
-    ensure!(
-        status.success(),
-        "credential helper failed with {status}; diagnostics suppressed to protect secrets"
-    );
+    if !diagnostics {
+        ensure!(
+            status.success(),
+            "credential helper failed with {status}; diagnostics suppressed to protect secrets"
+        );
+    }
     let remaining = || deadline.saturating_duration_since(Instant::now());
     let bytes = output_recv.recv_timeout(remaining()).map_err(|_| {
         anyhow::anyhow!("credential helper stdout did not settle before deadline")
     })??;
-    let _errors = error_recv.recv_timeout(remaining()).map_err(|_| {
+    let stderr = error_recv.recv_timeout(remaining()).map_err(|_| {
         anyhow::anyhow!("credential helper stderr did not settle before deadline")
     })??;
     if let Some(writer) = writer {
-        writer.recv_timeout(remaining()).map_err(|_| {
+        let written = writer.recv_timeout(remaining()).map_err(|_| {
             anyhow::anyhow!("credential helper stdin did not settle before deadline")
-        })??;
+        })?;
+        // A helper that fails before reading its input closes the pipe; its
+        // diagnostics are more useful than the resulting broken-pipe error.
+        if status.success() || !diagnostics {
+            written?;
+        }
     }
-    Ok(bytes)
+    Ok(Captured {
+        status,
+        stdout: bytes,
+        stderr,
+    })
 }
 
 fn nonblocking(stream: &impl AsRawFd) -> Result<()> {
