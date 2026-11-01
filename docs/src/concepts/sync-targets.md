@@ -135,16 +135,16 @@ services.secretSync.targets."registry-pull" = {
 };
 ```
 
-| Field          | Applies to         | Description                                                     |
-| -------------- | ------------------ | --------------------------------------------------------------- |
-| `context`      | both               | `kubectl --context`; required                                   |
-| `namespace`    | both               | RFC 1123 subdomain; required                                    |
-| `secret`       | both               | Secret name, RFC 1123 subdomain; required                       |
-| `format`       | both               | `opaque` or `dockerconfigjson`; required                        |
-| `key`          | `opaque`           | Data key `[-._a-zA-Z0-9]+`; defaults to the target `name`       |
+| Field          | Applies to         | Description                                                        |
+| -------------- | ------------------ | ------------------------------------------------------------------ |
+| `context`      | both               | `kubectl --context`; required                                      |
+| `namespace`    | both               | RFC 1123 subdomain; required                                       |
+| `secret`       | both               | Secret name, RFC 1123 subdomain; required                          |
+| `format`       | both               | `opaque` or `dockerconfigjson`; required                           |
+| `key`          | `opaque`           | Data key `[-._a-zA-Z0-9]+`; defaults to the target `name`          |
 | `registry`     | `dockerconfigjson` | Registry key in `auths`; defaults to `https://index.docker.io/v1/` |
-| `username`     | `dockerconfigjson` | Required; must not contain `:`                                  |
-| `fieldManager` | both               | Server-side apply manager; defaults to `secret-manager`         |
+| `username`     | `dockerconfigjson` | Required; must not contain `:`                                     |
+| `fieldManager` | both               | Server-side apply manager; defaults to `secret-manager`            |
 
 `opaque` stores the value base64-encoded under `key` with `type: Opaque`.
 `dockerconfigjson` stores `{"auths":{"<registry>":{"username","password","auth"}}}`
@@ -172,7 +172,7 @@ The decrypted value is only ever in zeroized buffers and in the manifest piped t
   JSON and its base64 is replaced with `[redacted]`. Errors from the capture
   layer pass through the same redaction.
 - On success the only output is `kubernetes <context>/<namespace>/secret/<name>:
-  applied`. `--dry-run` and `--check` print the destination and the data key
+applied`. `--dry-run` and `--check` print the destination and the data key
   names only, and never decrypt.
 - The sync state file records destination metadata (context, namespace, Secret
   name, key, registry, username) and never a value.
