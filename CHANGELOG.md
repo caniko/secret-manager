@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `kubernetes` sync with the `dockerconfigjson` format now refuses an empty
+  value or one containing whitespace or control characters (such as an
+  editor-added trailing newline) before any `kubectl` call, so a malformed
+  value can no longer overwrite a working pull secret. The error names the
+  context, namespace and Secret, never the value, and suggests re-enrolling
+  with `canix secret dockerhub-pat --replace`. `opaque` values are unchanged.
+
 ## [0.4.1] - 2026-11-03
 
 ### Added

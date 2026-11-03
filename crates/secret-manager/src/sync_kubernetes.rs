@@ -180,6 +180,20 @@ fn manifest(destination: &KubernetesDestination, value: &str, secret: &str) -> R
             (key, encoded, needles)
         }
         KubernetesFormat::Dockerconfigjson => {
+            // Fail closed: an editor-added newline or a mis-encrypted value must
+            // not be applied over a working pull secret. The value is never named.
+            if value.is_empty()
+                || value
+                    .chars()
+                    .any(|c| c.is_ascii_whitespace() || c.is_control())
+            {
+                bail!(
+                    "refusing to sync kubernetes {}/{}/secret/{}: the dockerconfigjson value is empty or contains whitespace or control characters; re-enroll it with `canix secret dockerhub-pat --replace`",
+                    destination.context,
+                    destination.namespace,
+                    destination.secret
+                );
+            }
             let user = destination
                 .username
                 .as_deref()
@@ -271,4 +285,37 @@ fn json_string(out: &mut String, value: &str) {
         }
     }
     out.push('"');
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn destination(format: &str) -> KubernetesDestination {
+        serde_json::from_value(serde_json::json!({
+            "context": "nrp", "namespace": "syndb", "secret": "pull",
+            "format": format, "key": "k", "username": "robot",
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn dockerconfigjson_rejects_unclean_values_without_echoing_them() {
+        let docker = destination("dockerconfigjson");
+        assert!(manifest(&docker, "dckr_pat_Abc-123_xyz", "pull").is_ok());
+        for bad in [
+            "dckr_pat_secret\n",
+            "",
+            " dckr_pat_x",
+            "dckr\tpat",
+            "dckr\u{7f}pat",
+        ] {
+            let error = format!("{:#}", manifest(&docker, bad, "pull").err().unwrap());
+            assert!(error.contains("nrp/syndb/secret/pull"), "{error}");
+            assert!(error.contains("dockerhub-pat --replace"), "{error}");
+            assert!(bad.is_empty() || !error.contains(bad.trim()), "{error}");
+        }
+        // Opaque values are passed through unchanged.
+        assert!(manifest(&destination("opaque"), "line\n", "pull").is_ok());
+    }
 }
