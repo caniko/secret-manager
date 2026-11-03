@@ -22,7 +22,8 @@ pub enum HmCmd {
     Ssh(HmSshArgs),
     /// Generate a passphrase and expose it as env vars or a home-manager file.
     Password(HmPasswordArgs),
-    /// Encrypt text from the editor, stdin, or --from-file and expose it as env vars.
+    /// Encrypt text from the editor, stdin, or --from-file and expose it as env vars
+    /// or a bare source.
     Text(HmTextArgs),
     /// Encrypt a file payload and expose it as a home-manager file.
     File(HmFileArgs),
@@ -185,7 +186,7 @@ pub struct HmTextArgs {
     #[command(flatten)]
     pub target: HmBaseArgs,
 
-    /// Secret slug. Defaults from the first --env value.
+    /// Secret slug. Defaults from the first --env value. Required with --bare.
     #[arg(long)]
     pub name: Option<String>,
 
@@ -196,6 +197,11 @@ pub struct HmTextArgs {
     /// Read plaintext from this file. If omitted, plaintext is read from stdin.
     #[arg(long = "from-file")]
     pub from_file: Option<PathBuf>,
+
+    /// Create a bare agenix secret without env wiring.
+    /// Requires --name. No --env needed.
+    #[arg(long, default_value_t = false)]
+    pub bare: bool,
 
     #[command(flatten)]
     pub exec: ExecutionArgs,
@@ -607,6 +613,28 @@ impl HmTextArgs {
     }
 
     fn build_plan(&self, env: &dyn StoreEnv) -> Result<AddPlan> {
+        if self.bare {
+            let slug = self
+                .name
+                .clone()
+                .ok_or_else(|| anyhow!("hm text --bare requires --name"))?;
+            validate_slug(&slug)?;
+            let source_only_paths = if self.target.shared {
+                vec![shared_secret_path(&slug)]
+            } else {
+                let user = resolve_home_user(&self.target.user, env)?;
+                vec![
+                    home_target(&user, &slug, Vec::new(), None)?
+                        .secret_path(&env.host_secret_dir()),
+                ]
+            };
+            return Ok(AddPlan {
+                slug,
+                source: SourceKind::Plaintext,
+                targets: Vec::new(),
+                source_only_paths,
+            });
+        }
         if self.env.is_empty() && !self.target.shared {
             bail!("hm text requires at least one --env target");
         }
@@ -1395,6 +1423,7 @@ mod tests {
             name: None,
             env: vec!["KAGGLE_API_TOKEN".to_string()],
             from_file: Some(PathBuf::from("./token")),
+            bare: false,
             exec: ExecutionArgs::default(),
         };
         let plan = args.build_plan(&TestEnv).unwrap();
@@ -1421,6 +1450,7 @@ mod tests {
             name: None,
             env: vec!["KAGGLE_API_TOKEN".to_string()],
             from_file: None,
+            bare: false,
             exec: ExecutionArgs::default(),
         };
         let plan = args.build_plan(&TestEnv).unwrap();
@@ -1472,6 +1502,7 @@ mod tests {
             name: None,
             env: vec!["DEEPSEEK_API_KEY".to_string()],
             from_file: None,
+            bare: false,
             exec: ExecutionArgs::default(),
         };
         let plan = args.build_plan(&TestEnv).unwrap();
@@ -1494,6 +1525,7 @@ mod tests {
             name: Some("deepseek".to_string()),
             env: Vec::new(),
             from_file: None,
+            bare: false,
             exec: ExecutionArgs::default(),
         };
         let plan = args.build_plan(&TestEnv).unwrap();
@@ -1502,6 +1534,41 @@ mod tests {
             plan.source_only_paths,
             vec![PathBuf::from("age/secrets/users/shared/deepseek.age")]
         );
+    }
+
+    #[test]
+    fn home_text_bare_plan_produces_user_source_only_path() {
+        let args = HmTextArgs {
+            target: hm_base(),
+            name: Some("syndb-dockerhub-pat".to_string()),
+            env: Vec::new(),
+            from_file: None,
+            bare: true,
+            exec: ExecutionArgs::default(),
+        };
+        let plan = args.build_plan(&TestEnv).unwrap();
+        assert!(plan.targets.is_empty());
+        assert_eq!(
+            plan.source_only_paths,
+            vec![PathBuf::from(
+                "age/secrets/users/can/syndb_dockerhub_pat.age"
+            )]
+        );
+    }
+
+    #[test]
+    fn home_text_bare_plan_requires_name() {
+        let err = HmTextArgs {
+            target: hm_base(),
+            name: None,
+            env: Vec::new(),
+            from_file: None,
+            bare: true,
+            exec: ExecutionArgs::default(),
+        }
+        .build_plan(&TestEnv)
+        .unwrap_err();
+        assert!(err.to_string().contains("hm text --bare requires --name"));
     }
 
     #[test]
