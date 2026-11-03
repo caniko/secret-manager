@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-03
+
 ### Added
 
 - `secret-manager hm text --bare` writes only the encrypted source (requires
@@ -183,7 +185,8 @@ runner-env add`), and Pkl evaluation via nix-pklx.
 - Corrected "foregejo" typos to "forgejo" in Nix module paths and source
   references.
 
-[Unreleased]: https://github.com/caniko/secret-manager/compare/0.4.0...HEAD
+[Unreleased]: https://github.com/caniko/secret-manager/compare/0.4.1...HEAD
+[0.4.1]: https://github.com/caniko/secret-manager/compare/0.4.0...0.4.1
 [0.4.0]: https://github.com/caniko/secret-manager/compare/0.3.3...0.4.0
 [0.3.3]: https://github.com/caniko/secret-manager/compare/0.3.2...0.3.3
 [0.3.2]: https://github.com/caniko/secret-manager/compare/0.3.1...0.3.2
