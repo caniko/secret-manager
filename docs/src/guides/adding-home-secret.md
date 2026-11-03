@@ -9,7 +9,7 @@ targets either a specific user or the shared profile (`--shared`).
 | ---------- | ---------------------------- | ------------------------ |
 | `ssh`      | Generated Ed25519            | `--file` path            |
 | `password` | Generated passphrase         | `--env` vars or `--file` |
-| `text`     | Plaintext from stdin/file    | `--env` vars             |
+| `text`     | Plaintext from stdin/file    | `--env` vars or bare     |
 | `file`     | Plaintext or existing `.age` | `--file` path            |
 
 ## SSH key (file delivery)
@@ -39,6 +39,23 @@ echo "my-secret-value" | secret-manager hm text \
   --env MY_SECRET \
   --user can
 ```
+
+## Bare source (no env wiring)
+
+Use `--bare` to create only the encrypted source, for consumers that read the
+`.age` file directly (for example a `services.secretSync` Kubernetes target)
+instead of a home-profile env var. `--name` is required:
+
+```sh
+echo "my-secret-value" | secret-manager hm text \
+  --bare \
+  --name app-token \
+  --user can
+```
+
+The source is written to `age/secrets/users/<user>/<name>.age`. Re-running the
+same command refuses to overwrite an existing source; use `agenix edit` to
+replace the value.
 
 ## Shared secrets
 

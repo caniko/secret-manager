@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- `secret-manager hm text --bare` writes only the encrypted source (requires
+  `--name`, no `--env`) for consumers that read the `.age` file directly, such
+  as Kubernetes sync targets.
+
 ## [0.4.0] - 2026-11-01
 
 ### Added
