@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-11-07
+
+### Fixed
+
+- Claude browser enrollment no longer treats native terminal presentation as
+  credential data. CSI framing, keyboard modes, OSC links/titles and CR redraws
+  outside token paragraphs no longer reject successful authorization. Numeric
+  SGR styling (including colon colors) and private display modes are handled
+  without changing token text. Editing controls inside token data, incomplete
+  sequences and ambiguous tokens remain rejected; output stays private.
+
 ## [0.4.3] - 2026-11-07
 
 ### Fixed
@@ -208,7 +219,8 @@ runner-env add`), and Pkl evaluation via nix-pklx.
 - Corrected "foregejo" typos to "forgejo" in Nix module paths and source
   references.
 
-[Unreleased]: https://github.com/caniko/secret-manager/compare/0.4.3...HEAD
+[Unreleased]: https://github.com/caniko/secret-manager/compare/0.4.4...HEAD
+[0.4.4]: https://github.com/caniko/secret-manager/compare/0.4.3...0.4.4
 [0.4.3]: https://github.com/caniko/secret-manager/compare/0.4.2...0.4.3
 [0.4.2]: https://github.com/caniko/secret-manager/compare/0.4.1...0.4.2
 [0.4.1]: https://github.com/caniko/secret-manager/compare/0.4.0...0.4.1

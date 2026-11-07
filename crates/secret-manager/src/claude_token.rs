@@ -146,26 +146,69 @@ fn mint_token(claude: &Path) -> Result<Zeroizing<String>> {
 fn token_from_output(stdout: &[u8], stderr: &[u8]) -> Result<Zeroizing<String>> {
     let mut selected: Option<Zeroizing<String>> = None;
     for channel in [stdout, stderr] {
-        // Strip only ANSI styling, not cursor movement that could change token text.
-        // Reserve once: no abandoned plaintext allocations during normalization.
-        let mut plain = Zeroizing::new(Vec::with_capacity(channel.len()));
-        let mut bytes = channel.iter().copied();
-        while let Some(byte) = bytes.next() {
+        // Native UI framing is not credential data. Preserve editing controls as
+        // invalid-token markers instead of rejecting unrelated terminal output.
+        // CR redraws can expand to two bytes; reserve once to avoid reallocations.
+        let mut plain = Zeroizing::new(Vec::with_capacity(channel.len() * 2));
+        let mut bytes = channel.iter().copied().enumerate();
+        while let Some((start, byte)) = bytes.next() {
             if byte == 0x1b {
-                ensure!(
-                    bytes.next() == Some(b'['),
-                    "unsupported native Claude output; nothing was stored"
-                );
-                let end = bytes.by_ref().find(|b| !b.is_ascii_digit() && *b != b';');
-                ensure!(
-                    end == Some(b'm'),
-                    "unsupported native Claude styling; nothing was stored"
-                );
+                let (_, kind) = bytes.next().context("incomplete native Claude escape")?;
+                let decoration = match kind {
+                    b'[' => {
+                        let (end, kind) = bytes
+                            .by_ref()
+                            .find(|(_, b)| (0x40..=0x7e).contains(b))
+                            .context(
+                            "incomplete native Claude terminal control; nothing was stored",
+                        )?;
+                        let parameters = &channel[start + 2..end];
+                        ensure!(
+                            parameters.iter().all(|b| (0x20..=0x3f).contains(b)),
+                            "malformed native Claude terminal control; nothing was stored"
+                        );
+                        let numbers = |bytes: &[u8]| {
+                            bytes
+                                .iter()
+                                .all(|b| b.is_ascii_digit() || matches!(b, b';' | b':'))
+                        };
+                        (kind == b'm' && numbers(parameters))
+                            || (matches!(kind, b'h' | b'l')
+                                && parameters.strip_prefix(b"?").is_some_and(numbers))
+                    }
+                    b']' | b'P' | b'X' | b'^' | b'_' => {
+                        let mut escape = false;
+                        let terminated = bytes.by_ref().any(|(_, b)| {
+                            let end = b == 7 || b == 0x9c || (escape && b == b'\\');
+                            escape = b == 0x1b;
+                            end
+                        });
+                        ensure!(
+                            terminated,
+                            "incomplete native Claude terminal string; nothing was stored"
+                        );
+                        false
+                    }
+                    mut kind => {
+                        while (0x20..=0x2f).contains(&kind) {
+                            kind = bytes.next().context("incomplete native Claude escape")?.1;
+                        }
+                        ensure!(
+                            (0x30..=0x7e).contains(&kind),
+                            "malformed native Claude escape; nothing was stored"
+                        );
+                        false
+                    }
+                };
+                if !decoration {
+                    plain.push(0);
+                }
             } else if byte == b'\r' {
-                ensure!(
-                    bytes.next() == Some(b'\n'),
-                    "unsupported native Claude line ending; nothing was stored"
-                );
+                if bytes.clone().next().is_some_and(|(_, b)| b == b'\n') {
+                    bytes.next();
+                } else {
+                    plain.push(0);
+                }
                 plain.push(b'\n');
             } else {
                 plain.push(byte);
@@ -174,6 +217,12 @@ fn token_from_output(stdout: &[u8], stderr: &[u8]) -> Result<Zeroizing<String>> 
         let text = std::str::from_utf8(&plain).context("invalid native Claude output encoding")?;
         let mut token = Zeroizing::new(String::with_capacity(PREFIX.len() + 512));
         for line in text.lines().map(str::trim).chain(std::iter::once("")) {
+            // A redraw before the first token character cannot edit that token.
+            let line = if token.is_empty() {
+                line.trim_start_matches(|c: char| c == '\0' || c.is_whitespace())
+            } else {
+                line
+            };
             if line.is_empty() && !token.is_empty() {
                 ensure!(
                     valid_token(&token),
@@ -209,6 +258,56 @@ mod tests {
         b"age-encryption.org/v1\nciphertext-padded-above-minimum-supported-age-file-size";
 
     #[test]
+    fn terminal_framing_outside_token_data_does_not_reject_authorization() {
+        let output = format!(
+            "\x1b[?2026h\x1b[2J\x1b[HWaiting for browser\r\x1b[2K\x1b[1G\x1b[>1u\x1b[>4;2mYour OAuth token\n\n\x1b[38:2:255:128:0m{TOKEN}\x1b[0m\n\n\x1b[<u\x1b[?2026l"
+        );
+        assert_eq!(&*token_from_output(output.as_bytes(), b"").unwrap(), TOKEN);
+        assert_eq!(&*token_from_output(b"", output.as_bytes()).unwrap(), TOKEN);
+        for framing in [
+            "\x1b[2K\x1b[1G",
+            "\x1b[?1049h\x1b[?1049l",
+            "\x1b]8;;https://example.invalid\x07link\x1b]8;;\x07",
+            "\x1b]0;public window title\x1b\\",
+        ] {
+            assert_eq!(
+                &*token_from_output(TOKEN.as_bytes(), framing.as_bytes()).unwrap(),
+                TOKEN
+            );
+            assert_eq!(
+                &*token_from_output(format!("{framing}\n\n{TOKEN}\n\n").as_bytes(), b"").unwrap(),
+                TOKEN
+            );
+        }
+        assert_eq!(
+            &*token_from_output(format!("\x1b[2K\x1b[1G{TOKEN}").as_bytes(), b"").unwrap(),
+            TOKEN
+        );
+        for control in ["\x1b[2K", "\x1b[1A", "\x1b]0;title\x07"] {
+            assert!(
+                token_from_output(
+                    format!("{}{control}{}", &TOKEN[..30], &TOKEN[30..]).as_bytes(),
+                    b""
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn native_ink_modes_do_not_turn_private_token_capture_into_a_styling_error() {
+        // Claude's bundled renderer uses these non-text controls independently
+        // of color: cursor visibility and synchronized updates.
+        for control in ["?25h", "?25l", "?2026h", "?2026l"] {
+            let output = format!("\x1b[{control}Your OAuth token\n\n{TOKEN}\n\n\x1b[{control}");
+            assert_eq!(&*token_from_output(output.as_bytes(), b"").unwrap(), TOKEN);
+            assert_eq!(&*token_from_output(b"", output.as_bytes()).unwrap(), TOKEN);
+        }
+        let output = format!("\x1b[?2026h\x1b[?25l{TOKEN}\x1b[?25h\x1b[?2026l");
+        assert_eq!(&*token_from_output(output.as_bytes(), b"").unwrap(), TOKEN);
+    }
+
+    #[test]
     fn extracts_one_native_token_across_terminal_wrapping_and_channels() {
         for output in [
             format!("Success\n\n{TOKEN}\n\nStore it securely.\n"),
@@ -238,6 +337,10 @@ mod tests {
             format!("{TOKEN} {}", "unsafe"),
             format!("{TOKEN}\rhidden"),
             format!("{TOKEN}\x1b[2K"),
+            format!("{TOKEN}\x1b[1A"),
+            format!("{TOKEN}\x1b[?25m"),
+            format!("{TOKEN}\x1b[??2027h"),
+            format!("{TOKEN}\x1b[?25"),
             format!("{TOKEN}\nextra prose"),
             format!("{PREFIX}{}", "a".repeat(513)),
         ] {
@@ -256,7 +359,7 @@ mod tests {
         settings.claude = script(
             &root.path().join("claude"),
             &format!(
-                "[ \"$1\" = setup-token ] || exit 9\nif read -r unexpected; then exit 8; fi\nprintf '%s%s\\n' '{PREFIX}' '{}'",
+                "[ \"$1\" = setup-token ] || exit 9\nif read -r unexpected; then exit 8; fi\nprintf '\\033[?2026h\\033[2J\\033[HWaiting\\r\\033[2KYour OAuth token\\n\\n\\033[38:2:255:128:0m%s%s\\033[0m\\n\\n' '{PREFIX}' '{}'\nprintf '\\033[<u\\033]0;done\\007\\033[?2026l' >&2",
                 &TOKEN[PREFIX.len()..],
             ),
         );
