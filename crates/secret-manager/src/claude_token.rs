@@ -146,24 +146,29 @@ fn mint_token(claude: &Path) -> Result<Zeroizing<String>> {
 fn token_from_output(stdout: &[u8], stderr: &[u8]) -> Result<Zeroizing<String>> {
     let mut selected: Option<Zeroizing<String>> = None;
     for channel in [stdout, stderr] {
-        // Strip only ANSI styling, not cursor movement that could change token text.
+        // Strip styling and Ink's non-text modes, not cursor movement or erasure.
         // Reserve once: no abandoned plaintext allocations during normalization.
         let mut plain = Zeroizing::new(Vec::with_capacity(channel.len()));
-        let mut bytes = channel.iter().copied();
-        while let Some(byte) = bytes.next() {
+        let mut bytes = channel.iter().copied().enumerate();
+        while let Some((start, byte)) = bytes.next() {
             if byte == 0x1b {
                 ensure!(
-                    bytes.next() == Some(b'['),
+                    matches!(bytes.next(), Some((_, b'['))),
                     "unsupported native Claude output; nothing was stored"
                 );
-                let end = bytes.by_ref().find(|b| !b.is_ascii_digit() && *b != b';');
+                let (end, kind) = bytes
+                    .by_ref()
+                    .find(|(_, b)| !b.is_ascii_digit() && !matches!(b, b';' | b'?'))
+                    .context("incomplete native Claude terminal control; nothing was stored")?;
+                let parameters = &channel[start + 2..end];
                 ensure!(
-                    end == Some(b'm'),
+                    (kind == b'm' && parameters.iter().all(|b| b.is_ascii_digit() || *b == b';'))
+                        || (matches!(parameters, b"?25" | b"?2026") && matches!(kind, b'h' | b'l')),
                     "unsupported native Claude styling; nothing was stored"
                 );
             } else if byte == b'\r' {
                 ensure!(
-                    bytes.next() == Some(b'\n'),
+                    matches!(bytes.next(), Some((_, b'\n'))),
                     "unsupported native Claude line ending; nothing was stored"
                 );
                 plain.push(b'\n');
@@ -209,6 +214,19 @@ mod tests {
         b"age-encryption.org/v1\nciphertext-padded-above-minimum-supported-age-file-size";
 
     #[test]
+    fn native_ink_modes_do_not_turn_private_token_capture_into_a_styling_error() {
+        // Claude's bundled renderer uses these non-text controls independently
+        // of color: cursor visibility and synchronized updates.
+        for control in ["?25h", "?25l", "?2026h", "?2026l"] {
+            let output = format!("\x1b[{control}Your OAuth token\n\n{TOKEN}\n\n\x1b[{control}");
+            assert_eq!(&*token_from_output(output.as_bytes(), b"").unwrap(), TOKEN);
+            assert_eq!(&*token_from_output(b"", output.as_bytes()).unwrap(), TOKEN);
+        }
+        let output = format!("\x1b[?2026h\x1b[?25l{TOKEN}\x1b[?25h\x1b[?2026l");
+        assert_eq!(&*token_from_output(output.as_bytes(), b"").unwrap(), TOKEN);
+    }
+
+    #[test]
     fn extracts_one_native_token_across_terminal_wrapping_and_channels() {
         for output in [
             format!("Success\n\n{TOKEN}\n\nStore it securely.\n"),
@@ -238,6 +256,10 @@ mod tests {
             format!("{TOKEN} {}", "unsafe"),
             format!("{TOKEN}\rhidden"),
             format!("{TOKEN}\x1b[2K"),
+            format!("{TOKEN}\x1b[1A"),
+            format!("{TOKEN}\x1b[?25m"),
+            format!("{TOKEN}\x1b[?2027h"),
+            format!("{TOKEN}\x1b[?25"),
             format!("{TOKEN}\nextra prose"),
             format!("{PREFIX}{}", "a".repeat(513)),
         ] {
@@ -256,7 +278,7 @@ mod tests {
         settings.claude = script(
             &root.path().join("claude"),
             &format!(
-                "[ \"$1\" = setup-token ] || exit 9\nif read -r unexpected; then exit 8; fi\nprintf '%s%s\\n' '{PREFIX}' '{}'",
+                "[ \"$1\" = setup-token ] || exit 9\nif read -r unexpected; then exit 8; fi\nprintf '\\033[?2026h\\033[?25l%s%s\\n' '{PREFIX}' '{}'\nprintf '\\033[?25h\\033[?2026l' >&2",
                 &TOKEN[PREFIX.len()..],
             ),
         );

@@ -167,6 +167,9 @@ With `--secret NAME` (the secret's agenix attribute) only that secret's
 rekeyed copies are staged, so unrelated uncommitted rekeyed changes do not
 block it. Tokens last one year; renew with `--rotate`.
 
+Native color styling, cursor visibility and synchronized-update controls are
+handled without changing token text. Other editing controls are rejected.
+
 Encryption/rekey may still require security-key or pinentry approval. A native
 browser-launch or authorization failure does not fall back to printing a URL or
 token. If rekey fails after encryption, retain the encrypted source and retry

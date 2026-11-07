@@ -15,7 +15,7 @@ and its executable is `secret-manager`. Rust 1.88 or newer is required.
 
 ```toml
 [dependencies]
-secret-manager = { package = "caniko-secret-manager", version = "0.4.3" }
+secret-manager = { package = "caniko-secret-manager", version = "0.4.4" }
 ```
 
 See the [library guide](docs/src/reference/library.md) for the API and the

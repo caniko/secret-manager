@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-11-07
+
+### Fixed
+
+- Claude browser enrollment accepts the native Ink renderer's cursor-visibility
+  (`CSI ?25 h/l`) and synchronized-update (`CSI ?2026 h/l`) controls, which can be
+  emitted even with `NO_COLOR`. They no longer cause `unsupported native Claude
+styling` after authorization. Cursor movement, erasure, unknown controls and
+  ambiguous tokens remain rejected; token output stays private.
+
 ## [0.4.3] - 2026-11-07
 
 ### Fixed
@@ -208,7 +218,8 @@ runner-env add`), and Pkl evaluation via nix-pklx.
 - Corrected "foregejo" typos to "forgejo" in Nix module paths and source
   references.
 
-[Unreleased]: https://github.com/caniko/secret-manager/compare/0.4.3...HEAD
+[Unreleased]: https://github.com/caniko/secret-manager/compare/0.4.4...HEAD
+[0.4.4]: https://github.com/caniko/secret-manager/compare/0.4.3...0.4.4
 [0.4.3]: https://github.com/caniko/secret-manager/compare/0.4.2...0.4.3
 [0.4.2]: https://github.com/caniko/secret-manager/compare/0.4.1...0.4.2
 [0.4.1]: https://github.com/caniko/secret-manager/compare/0.4.0...0.4.1
