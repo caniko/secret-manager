@@ -2,17 +2,16 @@
 //!
 //! Claude Code's documented headless route is `claude setup-token`, which
 //! runs a browser OAuth flow and prints a one-year token for
-//! `CLAUDE_CODE_OAUTH_TOKEN`. It has no machine-readable output, so the
-//! operator pastes the printed token into a no-echo prompt. The token is
-//! validated, encrypted with the store's agenix master policy and
+//! `CLAUDE_CODE_OAUTH_TOKEN`. Its output is captured privately and parsed
+//! conservatively, without printing or asking the operator to paste the token.
+//! The token is validated, encrypted with the store's agenix master policy and
 //! distributed; plaintext never reaches argv, disk or logs.
 use anyhow::{Context, Result, ensure};
 use clap::{Args, Subcommand};
 use std::{
-    io::{BufRead, BufReader, Write},
-    os::fd::AsRawFd,
-    path::PathBuf,
-    process::{Command, Stdio},
+    path::{Path, PathBuf},
+    process::Command,
+    time::Duration,
 };
 use zeroize::Zeroizing;
 
@@ -25,7 +24,7 @@ const PREFIX: &str = "sk-ant-oat01-";
 
 #[derive(Subcommand)]
 pub enum ClaudeCmd {
-    /// Run `claude setup-token` and encrypt the pasted token into the store.
+    /// Authorize in the browser, then privately capture, encrypt and rekey the token.
     Token(TokenArgs),
 }
 
@@ -71,7 +70,7 @@ impl TokenArgs {
         protection::with_protection(
             protection::enter_scope,
             CredentialProtection::acquire,
-            || self.enroll(read_hidden_token),
+            || self.enroll(|| mint_token(&self.claude)),
         )
     }
 
@@ -94,18 +93,6 @@ impl TokenArgs {
             Some(path) => StreamEncryptor::new(path.clone())?,
             None => StreamEncryptor::from_env()?,
         };
-
-        let mut setup = Command::new(&self.claude);
-        setup
-            .arg("setup-token")
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
-        protection::inherit_active_inhibitors(&mut setup)?;
-        let status = setup
-            .status()
-            .with_context(|| format!("starting `{} setup-token`", self.claude.display()))?;
-        ensure!(status.success(), "`claude setup-token` failed: {status}");
 
         let token = read_token()?;
         ensure!(
@@ -144,40 +131,72 @@ fn valid_token(token: &str) -> bool {
     })
 }
 
-/// Read one line from the controlling terminal with echo disabled.
-fn read_hidden_token() -> Result<Zeroizing<String>> {
-    let mut tty = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/dev/tty")
-        .context("a terminal is required to paste the token")?;
-    write!(tty, "Paste the token printed above (input is hidden): ")?;
-    tty.flush()?;
-    let fd = tty.as_raw_fd();
-    // SAFETY: termios is plain data and fd is an open terminal.
-    let mut original: libc::termios = unsafe { std::mem::zeroed() };
-    ensure!(
-        unsafe { libc::tcgetattr(fd, &mut original) } == 0,
-        "cannot read terminal attributes"
+fn mint_token(claude: &Path) -> Result<Zeroizing<String>> {
+    eprintln!(
+        "Approve Claude authorization in your browser (15 minute deadline). Token output stays private."
     );
-    struct Restore(i32, libc::termios);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            // SAFETY: restores the attributes captured above on the same fd.
-            unsafe { libc::tcsetattr(self.0, libc::TCSANOW, &self.1) };
+    let captured = crate::credential_process::capture_channels_with_timeout(
+        Command::new(claude).arg("setup-token").env("NO_COLOR", "1"),
+        Duration::from_secs(15 * 60),
+    )
+    .context("native Claude authorization failed; nothing was stored")?;
+    token_from_output(&captured.stdout, &captured.stderr)
+}
+
+fn token_from_output(stdout: &[u8], stderr: &[u8]) -> Result<Zeroizing<String>> {
+    let mut selected: Option<Zeroizing<String>> = None;
+    for channel in [stdout, stderr] {
+        // Strip only ANSI styling, not cursor movement that could change token text.
+        // Reserve once: no abandoned plaintext allocations during normalization.
+        let mut plain = Zeroizing::new(Vec::with_capacity(channel.len()));
+        let mut bytes = channel.iter().copied();
+        while let Some(byte) = bytes.next() {
+            if byte == 0x1b {
+                ensure!(
+                    bytes.next() == Some(b'['),
+                    "unsupported native Claude output; nothing was stored"
+                );
+                let end = bytes.by_ref().find(|b| !b.is_ascii_digit() && *b != b';');
+                ensure!(
+                    end == Some(b'm'),
+                    "unsupported native Claude styling; nothing was stored"
+                );
+            } else if byte == b'\r' {
+                ensure!(
+                    bytes.next() == Some(b'\n'),
+                    "unsupported native Claude line ending; nothing was stored"
+                );
+                plain.push(b'\n');
+            } else {
+                plain.push(byte);
+            }
+        }
+        let text = std::str::from_utf8(&plain).context("invalid native Claude output encoding")?;
+        let mut token = Zeroizing::new(String::with_capacity(PREFIX.len() + 512));
+        for line in text.lines().map(str::trim).chain(std::iter::once("")) {
+            if line.is_empty() && !token.is_empty() {
+                ensure!(
+                    valid_token(&token),
+                    "unrecognized native Claude token output; nothing was stored"
+                );
+                ensure!(
+                    selected
+                        .as_ref()
+                        .is_none_or(|previous| **previous == *token),
+                    "ambiguous native Claude tokens; nothing was stored"
+                );
+                selected = Some(Zeroizing::new(token.to_string()));
+                zeroize::Zeroize::zeroize(&mut *token);
+            } else if !token.is_empty() || line.contains(PREFIX) {
+                ensure!(
+                    token.len() + line.len() <= PREFIX.len() + 512,
+                    "native Claude token exceeds size limit; nothing was stored"
+                );
+                token.push_str(line);
+            }
         }
     }
-    let _restore = Restore(fd, original);
-    let mut hidden = original;
-    hidden.c_lflag &= !libc::ECHO;
-    ensure!(
-        unsafe { libc::tcsetattr(fd, libc::TCSANOW, &hidden) } == 0,
-        "cannot disable terminal echo"
-    );
-    let mut line = Zeroizing::new(String::new());
-    BufReader::new(&tty).read_line(&mut line)?;
-    writeln!(tty)?;
-    Ok(Zeroizing::new(line.trim().to_owned()))
+    selected.context("native Claude did not emit a recognized token; nothing was stored")
 }
 
 #[cfg(test)]
@@ -188,6 +207,80 @@ mod tests {
     const TOKEN: &str = "sk-ant-oat01-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-";
     const CIPHERTEXT: &[u8] =
         b"age-encryption.org/v1\nciphertext-padded-above-minimum-supported-age-file-size";
+
+    #[test]
+    fn extracts_one_native_token_across_terminal_wrapping_and_channels() {
+        for output in [
+            format!("Success\n\n{TOKEN}\n\nStore it securely.\n"),
+            format!(
+                "\x1b[32m{}\n  {}\x1b[0m\n\nUse this token.\n",
+                &TOKEN[..30],
+                &TOKEN[30..]
+            ),
+            format!("{TOKEN}\n\n{TOKEN}\n"),
+            format!(
+                "Your OAuth token (valid for 1 year)\r\n \r\n  {}\r\n  {}  \r\n \r\nStore this token securely.\r\n",
+                &TOKEN[..30],
+                &TOKEN[30..]
+            ),
+        ] {
+            assert_eq!(&*token_from_output(output.as_bytes(), b"").unwrap(), TOKEN);
+            assert_eq!(&*token_from_output(b"", output.as_bytes()).unwrap(), TOKEN);
+        }
+        assert_eq!(
+            &*token_from_output(TOKEN.as_bytes(), TOKEN.as_bytes()).unwrap(),
+            TOKEN
+        );
+        for output in [
+            "no token".to_owned(),
+            "sk-ant-oat01-short".to_owned(),
+            format!("{TOKEN}\n\n{TOKEN}other\n"),
+            format!("{TOKEN} {}", "unsafe"),
+            format!("{TOKEN}\rhidden"),
+            format!("{TOKEN}\x1b[2K"),
+            format!("{TOKEN}\nextra prose"),
+            format!("{PREFIX}{}", "a".repeat(513)),
+        ] {
+            let error = token_from_output(output.as_bytes(), b"").unwrap_err();
+            assert!(!format!("{error:#}").contains("AbCdEf"));
+        }
+        assert!(token_from_output(TOKEN.as_bytes(), format!("{TOKEN}other").as_bytes()).is_err());
+        assert!(token_from_output(b"\xff", b"").is_err());
+    }
+
+    #[test]
+    fn browser_only_capture_needs_no_terminal_and_native_failure_stores_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("age/secrets")).unwrap();
+        let mut settings = args(root.path());
+        settings.claude = script(
+            &root.path().join("claude"),
+            &format!(
+                "[ \"$1\" = setup-token ] || exit 9\nif read -r unexpected; then exit 8; fi\nprintf '%s%s\\n' '{PREFIX}' '{}'",
+                &TOKEN[PREFIX.len()..],
+            ),
+        );
+        assert_eq!(&*mint_token(&settings.claude).unwrap(), TOKEN);
+        settings.enroll(|| mint_token(&settings.claude)).unwrap();
+        assert_eq!(
+            fs::read(root.path().join("age/secrets/claude.age")).unwrap(),
+            CIPHERTEXT
+        );
+        assert!(!contains_token(root.path()));
+        fs::remove_file(root.path().join("age/secrets/claude.age")).unwrap();
+        settings.claude = script(
+            &root.path().join("claude"),
+            &format!(
+                "printf '%s%s\\n' '{PREFIX}' '{}' >&2\nexit 23",
+                &TOKEN[PREFIX.len()..],
+            ),
+        );
+        let error = settings
+            .enroll(|| mint_token(&settings.claude))
+            .unwrap_err();
+        assert!(!format!("{error:#}").contains("AbCdEf"));
+        assert!(!root.path().join("age/secrets/claude.age").exists());
+    }
 
     fn script(path: &Path, body: &str) -> PathBuf {
         fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
@@ -206,7 +299,11 @@ mod tests {
             )),
             claude: script(
                 &root.join("claude"),
-                &format!("touch '{}'", root.join("ran").display()),
+                &format!(
+                    "touch '{}'\nprintf '%s%s\\n' '{PREFIX}' '{}'",
+                    root.join("ran").display(),
+                    &TOKEN[PREFIX.len()..]
+                ),
             ),
             no_rekey: true,
             no_stage: true,
@@ -232,9 +329,8 @@ mod tests {
     fn stores_only_ciphertext_for_a_valid_token() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("age/secrets")).unwrap();
-        args(root.path())
-            .enroll(|| Ok(Zeroizing::new(TOKEN.to_owned())))
-            .unwrap();
+        let settings = args(root.path());
+        settings.enroll(|| mint_token(&settings.claude)).unwrap();
         assert!(root.path().join("ran").exists());
         assert_eq!(
             fs::read(root.path().join("age/secrets/claude.age")).unwrap(),
