@@ -6,11 +6,12 @@
 
 ### Fixed
 
-- Claude browser enrollment accepts the native Ink renderer's cursor-visibility
-  (`CSI ?25 h/l`) and synchronized-update (`CSI ?2026 h/l`) controls, which can be
-  emitted even with `NO_COLOR`. They no longer cause `unsupported native Claude
-styling` after authorization. Cursor movement, erasure, unknown controls and
-  ambiguous tokens remain rejected; token output stays private.
+- Claude browser enrollment no longer treats native terminal presentation as
+  credential data. CSI framing, keyboard modes, OSC links/titles and CR redraws
+  outside token paragraphs no longer reject successful authorization. Numeric
+  SGR styling (including colon colors) and private display modes are handled
+  without changing token text. Editing controls inside token data, incomplete
+  sequences and ambiguous tokens remain rejected; output stays private.
 
 ## [0.4.3] - 2026-11-07
 
