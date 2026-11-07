@@ -156,14 +156,21 @@ SECRET_MANAGER_AGE_ENCRYPTOR=$(nix build --no-link --print-out-paths .#agenix-st
 secret-manager claude token --out age/secrets/root/hosts/atlas/paperclip_operations_claude_oauth.age
 ```
 
-Claude Code has no machine-readable token output, so the command runs
-`claude setup-token` (browser OAuth) and then asks you to paste the printed
-token into a hidden prompt. It must start with `sk-ant-oat01-`; anything else
-is rejected and nothing is stored. The token is encrypted with the store's
+The command runs native `claude setup-token` and waits up to 15 minutes for
+browser authorization. Only browser interaction is needed: both output channels
+are captured privately in bounded, zeroizing memory, never printed or saved as
+plaintext. No token copy/paste or controlling terminal is required. Native output
+must contain one unique, valid `sk-ant-oat01-` token; changed, ambiguous or
+malformed output fails closed without storage. The token is encrypted with the store's
 agenix master policy, the source is staged, and `agenix rekey` distributes it.
 With `--secret NAME` (the secret's agenix attribute) only that secret's
 rekeyed copies are staged, so unrelated uncommitted rekeyed changes do not
 block it. Tokens last one year; renew with `--rotate`.
+
+Encryption/rekey may still require security-key or pinentry approval. A native
+browser-launch or authorization failure does not fall back to printing a URL or
+token. If rekey fails after encryption, retain the encrypted source and retry
+`agenix rekey -a`, rather than minting again. Host deployment remains separate.
 
 | Flag               | Description                                                                       |
 | ------------------ | --------------------------------------------------------------------------------- |

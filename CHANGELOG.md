@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-11-07
+
+### Fixed
+
+- `claude token` now captures native `claude setup-token` output privately and
+  encrypts the token directly after browser authorization, removing the terminal
+  token display and hidden paste prompt. Both output channels are bounded and
+  zeroized, with a 15-minute deadline and existing credential protection. ANSI
+  styling and hard-wrapped token paragraphs are supported; malformed or differing
+  tokens fail closed without storage or secret-bearing diagnostics. Rekeying and
+  scoped staging are unchanged.
+
 ## [0.4.2] - 2026-11-03
 
 ### Fixed
@@ -196,7 +208,8 @@ runner-env add`), and Pkl evaluation via nix-pklx.
 - Corrected "foregejo" typos to "forgejo" in Nix module paths and source
   references.
 
-[Unreleased]: https://github.com/caniko/secret-manager/compare/0.4.2...HEAD
+[Unreleased]: https://github.com/caniko/secret-manager/compare/0.4.3...HEAD
+[0.4.3]: https://github.com/caniko/secret-manager/compare/0.4.2...0.4.3
 [0.4.2]: https://github.com/caniko/secret-manager/compare/0.4.1...0.4.2
 [0.4.1]: https://github.com/caniko/secret-manager/compare/0.4.0...0.4.1
 [0.4.0]: https://github.com/caniko/secret-manager/compare/0.3.3...0.4.0

@@ -54,6 +54,14 @@ pub(crate) struct Captured {
     pub stderr: Zeroizing<Vec<u8>>,
 }
 
+/// Capture both private channels, suppressing all diagnostics on failure.
+pub(crate) fn capture_channels_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+) -> Result<Captured> {
+    run_captured(command, None, timeout, true, false)
+}
+
 /// Like [`capture`], but a failing helper returns its bounded stdout and stderr
 /// so the caller can redact known secrets before surfacing them.
 pub(crate) fn capture_with_diagnostics(
