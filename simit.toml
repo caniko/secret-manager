@@ -3,6 +3,7 @@ runner = "ubuntu-24.04"
 runtime = "nix"
 provider = "actions"
 platform = "github"
+push_branches = ["trunk"]
 publish_crates = true
 all_features = false
 publish_strategy = "members"
