@@ -42,6 +42,30 @@ nix-manager-core.lib.mkManagerOutputs {
     collectLib = import ./collect.nix {inherit lib;};
     secretLib = import ./lib.nix {inherit lib;};
 
+    # cargo-binstall archives. The crate is Linux-only (libc PDEATHSIG, /proc
+    # cgroup swap checks, logind inhibitors) and uses std::os::unix, so the
+    # Windows and Darwin targets are not declared at all.
+    binstallReleaseFor = system: let
+      pkgs = pkgsFor system;
+      cargo = cargoFor system;
+    in
+      harbor-rs.lib.mkBinstallRelease {
+        inherit pkgs system;
+        pname = "secret-manager";
+        version = (builtins.fromTOML (builtins.readFile ../Cargo.toml)).workspace.package.version;
+        # The archive needs the binary only: the test suite wants host tooling
+        # (git, rage, gnupg) and the GPG fixture crane's filter drops.
+        commonArgs = cargo.commonArgs // {doCheck = false;};
+        crates.caniko-secret-manager = {cargoToml = ../crates/secret-manager/Cargo.toml;};
+        targets = {x86_64-linux = ["x86_64-linux-musl" "aarch64-linux-musl"];};
+        # GCC's aarch64 outline atomics call __aarch64_ldadd4_sync from libgcc,
+        # which rustc's static musl link line does not include: vendored libdbus
+        # then fails to link. Inline libdbus' word-size atomics instead.
+        targetArgs.aarch64-linux-musl = {
+          CFLAGS_aarch64_unknown_linux_musl = "-mno-outline-atomics";
+        };
+      };
+
     rendererCheckFor = pkgs: let
       catalog = {
         with-sync = {
@@ -361,7 +385,8 @@ nix-manager-core.lib.mkManagerOutputs {
         runner-file-env-renderer = runnerFileEnvCheckFor pkgs;
         gpg-user-id = gpgUserIdCheckFor pkgs;
       }
-      // generatorChecksFor pkgs);
+      // generatorChecksFor pkgs
+      // (binstallReleaseFor system).checks);
     nixosModules = {
       secretSync = module;
       default = module;
@@ -372,6 +397,7 @@ nix-manager-core.lib.mkManagerOutputs {
     packages = forAllSystems (system: let
       pkgs = pkgsFor system;
       pklx = nix-pklx.packages.${system}.pklx;
+      release = binstallReleaseFor system;
       docs = pkgs.stdenv.mkDerivation {
         pname = "secret-manager-docs";
         version = "0.1.0";
@@ -387,15 +413,18 @@ nix-manager-core.lib.mkManagerOutputs {
           cp -r docs/book "$out"
         '';
       };
-    in {
-      inherit docs;
-      inherit pklx;
-      site = pkgs.runCommand "secret-manager-site" {} ''
-        mkdir -p $out
-        cp -rL --no-preserve=mode ${docs}/. $out/
-        printf '%s\n' "secret-manager.tartanoglu.com" > $out/.domains
-      '';
-    });
+    in
+      {
+        inherit docs;
+        inherit pklx;
+        site = pkgs.runCommand "secret-manager-site" {} ''
+          mkdir -p $out
+          cp -rL --no-preserve=mode ${docs}/. $out/
+          printf '%s\n' "secret-manager.tartanoglu.com" > $out/.domains
+        '';
+      }
+      # Only the listed build hosts have a release bundle.
+      // lib.optionalAttrs (release.releaseBundle != null) {release-bundle = release.releaseBundle;});
 
     # Crossbow consumers need the runtime decryptor on the target host. Keep
     # the native package surface above unchanged and publish an explicit
