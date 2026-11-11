@@ -3,7 +3,7 @@ name: Qualify environment sync
 
 on:
   push:
-    branches: [feat/github-environment-sync, feat/rbw-environment-integration, trunk]
+    branches: [trunk]
   pull_request:
 
 permissions:
