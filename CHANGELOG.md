@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-11-11
+
+### Added
+
+- New workspace crate `caniko-secret-manager-schema` for registry data types,
+  starting with switchable service accounts: several accounts per credential
+  service, a fleet default, and per-host and per-user overrides resolved host
+  first. `pkl/SecretRegistry.pkl` gains the matching `Account`,
+  `AccountService`, `AccountHost` and `AccountCatalogue` classes.
+- CI and crate publishing now run per workspace member.
+
 ## [0.4.4] - 2026-11-07
 
 ### Fixed
@@ -219,7 +230,8 @@ runner-env add`), and Pkl evaluation via nix-pklx.
 - Corrected "foregejo" typos to "forgejo" in Nix module paths and source
   references.
 
-[Unreleased]: https://github.com/caniko/secret-manager/compare/0.4.4...HEAD
+[Unreleased]: https://github.com/caniko/secret-manager/compare/0.4.5...HEAD
+[0.4.5]: https://github.com/caniko/secret-manager/compare/0.4.4...0.4.5
 [0.4.4]: https://github.com/caniko/secret-manager/compare/0.4.3...0.4.4
 [0.4.3]: https://github.com/caniko/secret-manager/compare/0.4.2...0.4.3
 [0.4.2]: https://github.com/caniko/secret-manager/compare/0.4.1...0.4.2

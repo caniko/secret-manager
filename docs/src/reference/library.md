@@ -1,3 +1,21 @@
+## Schema crate
+
+Registry data types live in a separate, dependency-light crate so data
+repositories can decode them without the engine:
+
+```toml
+[dependencies]
+secret-manager-schema = { package = "caniko-secret-manager-schema", version = "0.4.5" }
+```
+
+`secret_manager_schema::accounts::AccountCatalogue` decodes switchable service
+accounts: several accounts per credential service, a fleet default, and
+per-host and per-user overrides. `select(service, host, user)` returns the host
+override, else the user override, else the default; `validate` checks that
+every default and override names a registered account. The matching Pkl
+classes (`Account`, `AccountService`, `AccountHost`, `AccountCatalogue`) are in
+`pkl/SecretRegistry.pkl`.
+
 # Library API
 
 The `secret_manager` library provides the building blocks used by the CLI.

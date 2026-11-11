@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/secret-manager"]
+members = ["crates/secret-manager", "crates/secret-manager-schema"]
 
 [workspace.package]
-version = "0.4.4"
+version = "0.4.5"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
