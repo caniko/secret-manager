@@ -1,0 +1,25 @@
+[package]
+name = "caniko-secret-manager-schema"
+description = "Data schema for secret-manager registries: switchable service accounts and their resolution"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "README.md"
+documentation = "https://docs.rs/caniko-secret-manager-schema"
+keywords = ["nix", "agenix", "secrets", "schema"]
+categories = ["config"]
+include = ["Cargo.toml", "README.md", "LICENSE", "src/**"]
+
+[lib]
+name = "secret_manager_schema"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
