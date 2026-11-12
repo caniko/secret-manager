@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.4.7] - 2026-11-12
+
+### Fixed
+
+- Release archives: the GitHub release now builds and publishes the signed
+  cargo-binstall archives (the previous tag's release workflow failed).
+
 ## [0.4.6] - 2026-11-12
 
 ### Security
@@ -238,7 +245,8 @@ runner-env add`), and Pkl evaluation via nix-pklx.
 - Corrected "foregejo" typos to "forgejo" in Nix module paths and source
   references.
 
-[Unreleased]: https://github.com/caniko/secret-manager/compare/0.4.6...HEAD
+[Unreleased]: https://github.com/caniko/secret-manager/compare/0.4.7...HEAD
+[0.4.7]: https://github.com/caniko/secret-manager/compare/0.4.6...0.4.7
 [0.4.6]: https://github.com/caniko/secret-manager/compare/0.4.5...0.4.6
 [0.4.5]: https://github.com/caniko/secret-manager/compare/0.4.4...0.4.5
 [0.4.4]: https://github.com/caniko/secret-manager/compare/0.4.3...0.4.4
