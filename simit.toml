@@ -23,4 +23,4 @@ target_branch = "trunk"
 prebuild_binaries = true
 binstall = true
 system_runners = { x86_64-linux = "ubuntu-24.04" }
-sign = false
+sign = true
