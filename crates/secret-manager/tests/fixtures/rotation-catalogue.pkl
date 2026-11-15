@@ -30,4 +30,22 @@ guides: Mapping<String, S.RotationGuide> = new {
     }
     command = "secret-manager hm text --name dockerhub-pat"
   }
+  ["internal-metrics-key"] {
+    title = "Internal metrics key"
+    steps {
+      "Mint a key in the internal console; it has no end date."
+    }
+    expiry = "never"
+  }
+  ["cloudflare-pages-token"] {
+    title = "Cloudflare Pages deploy token"
+    urls {
+      "https://dash.cloudflare.com/profile/api-tokens"
+    }
+    steps {
+      "Create an account-scoped API token with the Pages edit permission."
+    }
+    expiry = "provider"
+    provider = "cloudflare-account-token"
+  }
 }

@@ -5,7 +5,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
-use secret_manager_schema::rotation::{RotationCatalogue, RotationGuide};
+use secret_manager_schema::rotation::{Expiry, RotationCatalogue, RotationGuide};
 
 use crate::pkl;
 
@@ -58,7 +58,7 @@ pub fn load(path: &Path) -> Result<RotationCatalogue> {
     Ok(catalogue)
 }
 
-/// The operator-facing text: title, numbered steps, pages, command, cadence.
+/// The operator-facing text: title, numbered steps, pages, command, expiry.
 pub fn render(key: &str, guide: &RotationGuide) -> String {
     let mut out = format!("{key}: {}\n", guide.title);
     for (idx, step) in guide.steps.iter().enumerate() {
@@ -73,12 +73,21 @@ pub fn render(key: &str, guide: &RotationGuide) -> String {
     if let Some(command) = &guide.command {
         out.push_str(&format!("  command:\n    {command}\n"));
     }
-    if let Some(days) = guide.cadence_days {
-        match guide.warn_days {
-            Some(warn) => out.push_str(&format!(
-                "  cadence: every {days} days, warn {warn} days before\n"
-            )),
-            None => out.push_str(&format!("  cadence: every {days} days\n")),
+    match guide.expiry {
+        Expiry::Never => out.push_str("  expiry: never expires\n"),
+        Expiry::Provider => out.push_str(&format!(
+            "  expiry: provider-reported ({})\n",
+            guide.provider.as_deref().unwrap_or_default()
+        )),
+        Expiry::Cadence => {
+            if let Some(days) = guide.cadence_days {
+                match guide.warn_days {
+                    Some(warn) => out.push_str(&format!(
+                        "  cadence: every {days} days, warn {warn} days before\n"
+                    )),
+                    None => out.push_str(&format!("  cadence: every {days} days\n")),
+                }
+            }
         }
     }
     out

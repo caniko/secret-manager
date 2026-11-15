@@ -31,10 +31,34 @@ pub struct RotationGuide {
     /// Command that stores the new value.
     #[serde(default)]
     pub command: Option<String>,
+    /// How the credential expires. Absent means [`Expiry::Cadence`], so a
+    /// catalogue written before this field existed keeps its meaning.
+    #[serde(default)]
+    pub expiry: Expiry,
+    /// Provider id that reports the expiry; set iff `expiry` is
+    /// [`Expiry::Provider`].
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Replacement interval for [`Expiry::Cadence`].
     #[serde(default)]
     pub cadence_days: Option<u32>,
+    /// Days before the cadence deadline to start warning.
     #[serde(default)]
     pub warn_days: Option<u32>,
+}
+
+/// How a credential expires. `Never` is an explicit kind — a value created
+/// without an end date — not an undeclared or unknown expiry.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Expiry {
+    /// Replaced on a fixed interval (`cadence_days`).
+    #[default]
+    Cadence,
+    /// Created without an end date; it cannot expire.
+    Never,
+    /// The issuing provider reports the expiry, named by `provider`.
+    Provider,
 }
 
 impl RotationCatalogue {
@@ -46,9 +70,10 @@ impl RotationCatalogue {
             .map(|(key, guide)| (key.as_str(), guide))
     }
 
-    /// Re-check what Pkl already types: slug-shaped keys and `https://` URLs.
-    /// Data repositories may hand-write or generate this file, and the URLs
-    /// reach `xdg-open`, so validation lives on this side too.
+    /// Re-check what Pkl already types: slug-shaped keys, `https://` URLs, and
+    /// an expiry kind whose fields agree with it. Data repositories may
+    /// hand-write or generate this file, and the URLs reach `xdg-open`, so
+    /// validation lives on this side too.
     pub fn validate(&self) -> Result<()> {
         for (key, guide) in &self.guides {
             if !is_key(key) {
@@ -61,6 +86,31 @@ impl RotationCatalogue {
                     );
                 }
             }
+            guide.validate_expiry(key)?;
+        }
+        Ok(())
+    }
+}
+
+impl RotationGuide {
+    /// `provider` is required for, and only for, `expiry = "provider"`; the
+    /// cadence fields describe a cadence, so they are unset for `never`.
+    fn validate_expiry(&self, key: &str) -> Result<()> {
+        match &self.provider {
+            Some(id) if id.is_empty() => {
+                bail!("rotation guide {key}: provider id must not be empty")
+            }
+            Some(id) if self.expiry != Expiry::Provider => bail!(
+                "rotation guide {key}: provider id {id:?} is only valid with expiry \"provider\""
+            ),
+            None if self.expiry == Expiry::Provider => {
+                bail!("rotation guide {key}: expiry \"provider\" requires a provider id")
+            }
+            _ => {}
+        }
+        if self.expiry == Expiry::Never && (self.cadence_days.is_some() || self.warn_days.is_some())
+        {
+            bail!("rotation guide {key}: expiry \"never\" cannot set cadenceDays or warnDays");
         }
         Ok(())
     }
@@ -132,5 +182,71 @@ mod tests {
             c.guides.insert(key.into(), guide);
             assert!(c.validate().is_err(), "{key:?} must be rejected");
         }
+    }
+
+    fn guide(json: serde_json::Value) -> Result<RotationGuide> {
+        Ok(serde_json::from_value(json)?)
+    }
+
+    #[test]
+    fn expiry_kinds_decode_and_default_to_cadence() {
+        let cadence = guide(serde_json::json!({"title": "t"})).unwrap();
+        assert_eq!(cadence.expiry, Expiry::Cadence);
+        assert_eq!(cadence.provider, None);
+
+        let never = guide(serde_json::json!({"title": "t", "expiry": "never"})).unwrap();
+        assert_eq!(never.expiry, Expiry::Never);
+
+        let provider = guide(serde_json::json!({
+            "title": "t",
+            "expiry": "provider",
+            "provider": "cloudflare-account-token"
+        }))
+        .unwrap();
+        assert_eq!(provider.expiry, Expiry::Provider);
+        assert_eq!(
+            provider.provider.as_deref(),
+            Some("cloudflare-account-token")
+        );
+    }
+
+    #[test]
+    fn validation_rejects_expiry_fields_that_disagree_with_the_kind() {
+        let mut c = catalogue();
+        let guide = c.guides.get_mut("github-token").unwrap();
+        guide.expiry = Expiry::Provider;
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("requires a provider id"), "{err}");
+
+        let mut c = catalogue();
+        c.guides.get_mut("github-token").unwrap().provider = Some("cloudflare".into());
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("only valid with expiry \"provider\""), "{err}");
+
+        let mut c = catalogue();
+        let guide = c.guides.get_mut("github-token").unwrap();
+        guide.expiry = Expiry::Never;
+        let err = c.validate().unwrap_err().to_string();
+        assert!(err.contains("cannot set cadenceDays or warnDays"), "{err}");
+
+        let mut c = catalogue();
+        {
+            let guide = c.guides.get_mut("github-token").unwrap();
+            guide.expiry = Expiry::Provider;
+            guide.provider = Some(String::new());
+            guide.cadence_days = None;
+            guide.warn_days = None;
+        }
+        assert!(c.validate().is_err());
+
+        let mut c = catalogue();
+        {
+            let guide = c.guides.get_mut("github-token").unwrap();
+            guide.expiry = Expiry::Provider;
+            guide.provider = Some("cloudflare".into());
+            guide.cadence_days = None;
+            guide.warn_days = None;
+        }
+        c.validate().unwrap();
     }
 }
