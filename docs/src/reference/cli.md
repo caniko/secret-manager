@@ -408,6 +408,26 @@ Encrypt a Gerrit `.gitcookies` payload into an agenix secret.
 secret-manager gerrit-cookies <INPUT_FILE> <SECRET.age>
 ```
 
+### `guide` — Manual rotation guides
+
+Print how to replace one credential by hand, and hand its provider pages to
+`xdg-open`. Without a key, list every guide in the catalogue.
+
+```sh
+secret-manager guide --catalogue lib/secrets/Rotations.pkl [KEY] [--no-browser]
+```
+
+| Flag                 | Description                                           |
+| -------------------- | ----------------------------------------------------- |
+| `--catalogue <PATH>` | Pkl file whose module-level `guides` is the catalogue |
+| `--no-browser`       | Print the provider pages instead of opening them      |
+
+The catalogue is decoded by `caniko-secret-manager-schema` and re-validated
+before use: keys must match `^[a-z0-9][a-z0-9._-]*$` and every URL must start
+with `https://` (the URLs reach the opener, so this is a trust boundary).
+Opening a page is best effort: a missing `xdg-open` never fails the command,
+and the URLs are printed either way.
+
 ## Global flags
 
 | Flag              | Description   |

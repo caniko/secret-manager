@@ -16,6 +16,14 @@ every default and override names a registered account. The matching Pkl
 classes (`Account`, `AccountService`, `AccountHost`, `AccountCatalogue`) are in
 `pkl/SecretRegistry.pkl`.
 
+`secret_manager_schema::rotation::RotationCatalogue` decodes manual rotation
+guides: a title, numbered steps, provider URLs, the command that stores the new
+value, and an optional cadence. `for_secret(path)` finds the guide for a
+store-relative secret path, and `validate` re-checks the key slug and that
+every URL starts with `https://` — the URLs are handed to a browser launcher.
+The matching Pkl classes (`RotationGuide`, `RotationCatalogue`) are in
+`pkl/SecretRegistry.pkl`.
+
 # Library API
 
 The `secret_manager` library provides the building blocks used by the CLI.
@@ -42,6 +50,7 @@ migration, including GitHub environment ownership.
 | `add`    | CLI argument types and plan-building for all secret types                                                     |
 | `env`    | `StoreEnv` trait for host validation and user resolution                                                      |
 | `gpg`    | `GpgCmd` / `PublishArgs`: validate and publish public account signing keys on Forgejo/GitHub                  |
+| `guide`  | Rotation guides: load a catalogue, render one guide, and open its provider pages                              |
 | `io`     | File I/O, temp dirs, editor integration, validation                                                           |
 | `legacy` | Legacy workflows (WireGuard, Rauthy, Gerrit cookies)                                                          |
 | `plan`   | Plan execution engine — source prep, module writing, rekey                                                    |

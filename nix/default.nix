@@ -359,14 +359,17 @@ nix-manager-core.lib.mkManagerOutputs {
               crates/secret-manager/src/rbw.rs \
               crates/secret-manager/tests/rbw_import.rs \
               crates/secret-manager/tests/github_environment_sync.rs \
+              crates/secret-manager/tests/guide.rs \
               --replace-fail '#!/bin/sh' '#!${pkgs.runtimeShell}'
           '';
-          # Crane's Cargo filter omits the public signing-key test fixture.
+          # Crane's Cargo filter omits the text fixtures the tests read.
           src = lib.cleanSourceWith {
             src = ../.;
             filter = path: type:
               cargo.craneLib.filterCargoSources path type
-              || path == "${toString ../.}/crates/secret-manager/tests/fixtures/gpg-public.asc";
+              || path == "${toString ../.}/crates/secret-manager/tests/fixtures/gpg-public.asc"
+              || path == "${toString ../.}/crates/secret-manager/tests/fixtures/rotation-catalogue.pkl"
+              || path == "${toString ../.}/pkl/SecretRegistry.pkl";
           };
         };
     in

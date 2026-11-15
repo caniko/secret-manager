@@ -13,6 +13,7 @@ readme = "README.md"
 
 [workspace.dependencies]
 nix-manager-core = "0.4.5"
+caniko-secret-manager-schema = { version = "0.4.7", path = "crates/secret-manager-schema" }
 anyhow = "1"
 base64 = "0.23"
 clap = { version = "4", features = ["derive"] }
