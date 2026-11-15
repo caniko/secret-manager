@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-15
+
+### Changed
+
+- Breaking for Rust callers: `RotationGuide` gains the public `expiry` and
+  `provider` fields, so exhaustive struct literals and patterns must add them.
+  Catalogues are unaffected: both fields are optional and absent means
+  `cadence`.
+
 ### Added
 
 - Rotation guides name their expiry kind. `RotationGuide` gains
@@ -271,7 +280,8 @@ runner-env add`), and Pkl evaluation via nix-pklx.
 - Corrected "foregejo" typos to "forgejo" in Nix module paths and source
   references.
 
-[Unreleased]: https://github.com/caniko/secret-manager/compare/0.4.8...HEAD
+[Unreleased]: https://github.com/caniko/secret-manager/compare/0.5.0...HEAD
+[0.5.0]: https://github.com/caniko/secret-manager/compare/0.4.8...0.5.0
 [0.4.8]: https://github.com/caniko/secret-manager/compare/0.4.7...0.4.8
 [0.4.7]: https://github.com/caniko/secret-manager/compare/0.4.6...0.4.7
 [0.4.6]: https://github.com/caniko/secret-manager/compare/0.4.5...0.4.6

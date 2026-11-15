@@ -5,7 +5,7 @@ repositories can decode them without the engine:
 
 ```toml
 [dependencies]
-secret-manager-schema = { package = "caniko-secret-manager-schema", version = "0.4.8" }
+secret-manager-schema = { package = "caniko-secret-manager-schema", version = "0.5.0" }
 ```
 
 `secret_manager_schema::accounts::AccountCatalogue` decodes switchable service
