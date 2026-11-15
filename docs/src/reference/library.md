@@ -18,11 +18,14 @@ classes (`Account`, `AccountService`, `AccountHost`, `AccountCatalogue`) are in
 
 `secret_manager_schema::rotation::RotationCatalogue` decodes manual rotation
 guides: a title, numbered steps, provider URLs, the command that stores the new
-value, and an optional cadence. `for_secret(path)` finds the guide for a
-store-relative secret path, and `validate` re-checks the key slug and that
-every URL starts with `https://` — the URLs are handed to a browser launcher.
-The matching Pkl classes (`RotationGuide`, `RotationCatalogue`) are in
-`pkl/SecretRegistry.pkl`.
+value, and an expiry kind (`Expiry::Cadence` by default, `Never` for a value
+created without an end date, `Provider` with the id of the provider that
+reports the expiry). `for_secret(path)` finds the guide for a store-relative
+secret path, and `validate` re-checks the key slug, that every URL starts with
+`https://` — the URLs are handed to a browser launcher — and that `provider` is
+set exactly for `Expiry::Provider` and the cadence fields are unset for
+`Expiry::Never`. The matching Pkl classes (`RotationGuide`, `RotationCatalogue`)
+are in `pkl/SecretRegistry.pkl`.
 
 # Library API
 

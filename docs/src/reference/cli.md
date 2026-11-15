@@ -428,6 +428,14 @@ with `https://` (the URLs reach the opener, so this is a trust boundary).
 Opening a page is best effort: a missing `xdg-open` never fails the command,
 and the URLs are printed either way.
 
+A guide's `expiry` says how the credential ends. `cadence` (the default) prints
+the replacement interval, `never` prints `expiry: never expires` for a value
+created without an end date, and `provider` prints
+`expiry: provider-reported (<id>)` for a credential whose provider reports its
+own expiry. `provider` is required exactly when `expiry = "provider"`, and
+`cadenceDays`/`warnDays` are unset for `never`; validation rejects the other
+combinations.
+
 ## Global flags
 
 | Flag              | Description   |

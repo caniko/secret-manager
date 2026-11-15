@@ -71,6 +71,28 @@ fn catalogue_renders_the_expected_text() {
          command:\n    \
          secret-manager hm text --name dockerhub-pat\n"
     );
+    let (key, guide) = catalogue
+        .guides
+        .get_key_value("internal-metrics-key")
+        .unwrap();
+    assert_eq!(
+        render(key, guide),
+        "internal-metrics-key: Internal metrics key\n  \
+         1. Mint a key in the internal console; it has no end date.\n  \
+         expiry: never expires\n"
+    );
+    let (key, guide) = catalogue
+        .guides
+        .get_key_value("cloudflare-pages-token")
+        .unwrap();
+    assert_eq!(
+        render(key, guide),
+        "cloudflare-pages-token: Cloudflare Pages deploy token\n  \
+         1. Create an account-scoped API token with the Pages edit permission.\n  \
+         pages:\n    \
+         https://dash.cloudflare.com/profile/api-tokens\n  \
+         expiry: provider-reported (cloudflare-account-token)\n"
+    );
 }
 
 #[test]
@@ -150,6 +172,28 @@ fn browser_opens_every_url_in_order() {
 }
 
 #[test]
+fn cli_prints_the_expiry_kind() {
+    let dir = tempfile::tempdir().unwrap();
+    let stub = stub_dir(dir.path());
+    let out = run(
+        &stub,
+        &[
+            "guide",
+            "--catalogue",
+            fixture().to_str().unwrap(),
+            "internal-metrics-key",
+            "--no-browser",
+        ],
+    );
+    assert!(out.status.success(), "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("expiry: never expires"), "{stdout}");
+    assert!(!stdout.contains("cadence:"), "{stdout}");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(!stub.join("log").exists(), "no-browser must spawn nothing");
+}
+
+#[test]
 fn listing_and_unknown_keys() {
     let dir = tempfile::tempdir().unwrap();
     let out = run(
@@ -164,6 +208,14 @@ fn listing_and_unknown_keys() {
     );
     assert!(
         stdout.contains("github-token: GitHub personal access token"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("internal-metrics-key: Internal metrics key"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("cloudflare-pages-token: Cloudflare Pages deploy token"),
         "{stdout}"
     );
 

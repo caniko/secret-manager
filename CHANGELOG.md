@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- Rotation guides name their expiry kind. `RotationGuide` gains
+  `expiry: "cadence"|"never"|"provider"` (default `cadence`, so existing
+  catalogues keep their meaning) and `provider: String?`. `never` is an
+  explicit kind for a credential created without an end date, distinct from an
+  undeclared expiry; `provider` names the provider that reports the expiry.
+  `validate` requires `provider` exactly for `provider` and rejects
+  `cadenceDays`/`warnDays` on `never`, and `secret-manager guide` prints
+  `expiry: never expires` or `expiry: provider-reported (<id>)` for the two new
+  kinds.
+
 ## [0.4.8] - 2026-11-15
 
 ### Added
