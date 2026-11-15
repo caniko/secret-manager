@@ -14,6 +14,7 @@ pub mod env;
 pub mod github_app;
 pub mod github_token;
 pub mod gpg;
+pub mod guide;
 pub mod io;
 pub mod legacy;
 pub mod pkl;

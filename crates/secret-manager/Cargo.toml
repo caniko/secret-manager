@@ -26,6 +26,7 @@ path = "src/lib.rs"
 
 [dependencies]
 nix-manager-core.workspace = true
+caniko-secret-manager-schema.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 clap.workspace = true

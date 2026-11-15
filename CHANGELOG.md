@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- Rotation guides: `pkl/SecretRegistry.pkl` gains the `RotationGuide` and
+  `RotationCatalogue` classes (title, store-relative secret, `https://` provider
+  URLs, steps, storing command, cadence), mirrored by the new
+  `secret_manager_schema::rotation` module. `validate` re-checks the key slug
+  and the URLs, and `for_secret` maps a secret path to its guide.
+- `secret-manager guide --catalogue FILE [KEY] [--no-browser]` prints one
+  guide's numbered steps, pages and command, and opens the pages with
+  `xdg-open` unless `--no-browser` is given. Without a key it lists the
+  catalogue. A missing browser never fails the command.
+
 ## [0.4.7] - 2026-11-12
 
 ### Fixed

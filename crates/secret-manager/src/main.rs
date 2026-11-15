@@ -1,7 +1,9 @@
 use clap::{Parser, Subcommand};
 
 use secret_manager::env::LocalEnv;
-use secret_manager::{add, claude_token, github_app, gpg, legacy, push, registry, rotate, sync};
+use secret_manager::{
+    add, claude_token, github_app, gpg, guide, legacy, push, registry, rotate, sync,
+};
 
 #[derive(Parser)]
 #[command(
@@ -82,6 +84,10 @@ enum Command {
     /// if regeneration fails.
     #[command(name = "rotate", arg_required_else_help = true)]
     Rotate(rotate::RotateArgs),
+
+    /// Print how to replace one credential by hand and open its provider
+    /// pages; without a key, list the catalogue.
+    Guide(guide::GuideArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -103,6 +109,7 @@ fn main() -> anyhow::Result<()> {
         Command::RauthyEnv(args) => legacy::rauthy_env(&args),
         Command::GerritCookies(args) => legacy::gerrit_cookies(&args),
         Command::Rotate(args) => args.run(),
+        Command::Guide(args) => args.run(),
     }
 }
 

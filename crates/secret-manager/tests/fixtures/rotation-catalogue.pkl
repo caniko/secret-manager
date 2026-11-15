@@ -1,0 +1,33 @@
+// Fixture rotation catalogue for `crates/secret-manager/tests/guide.rs`.
+// Mirrors what a data repository writes: `guides` at module level, typed by
+// the shared schema.
+import "../../../../pkl/SecretRegistry.pkl" as S
+
+guides: Mapping<String, S.RotationGuide> = new {
+  ["github-token"] {
+    title = "GitHub personal access token"
+    secret = "age/secrets/users/can/github.age"
+    urls {
+      "https://github.com/settings/tokens"
+      "https://docs.github.com/authentication"
+    }
+    steps {
+      "Revoke the old token on the settings page."
+      "Create a fine-grained token with the repo scope."
+      "Store it with the command below."
+    }
+    command = "secret-manager github token --out age/secrets/users/can/github.age"
+    cadenceDays = 90
+    warnDays = 14
+  }
+  ["dockerhub-pat"] {
+    title = "Docker Hub access token"
+    urls {
+      "https://hub.docker.com/settings/security"
+    }
+    steps {
+      "Create a read/write token."
+    }
+    command = "secret-manager hm text --name dockerhub-pat"
+  }
+}
