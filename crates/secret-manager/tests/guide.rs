@@ -1,7 +1,6 @@
 //! `secret-manager guide`: catalogue loading, rendering, and the browser
 //! launcher. The launcher spawns `xdg-open`, so the CLI runs with a PATH that
-//! holds only a recording stub — an accidental spawn is visible in its log,
-//! and `--no-browser` with an empty PATH proves nothing is required.
+//! holds only a recording stub — an accidental spawn is visible in its log.
 
 use std::fs;
 use std::path::Path;
@@ -20,6 +19,20 @@ fn fixture() -> &'static Path {
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/rotation-catalogue.pkl"
     ))
+}
+
+/// A PATH directory holding only the recording `xdg-open` stub.
+fn stub_dir(dir: &Path) -> std::path::PathBuf {
+    let stub = dir.join("bin");
+    fs::create_dir(&stub).unwrap();
+    let opener = stub.join("xdg-open");
+    fs::write(&opener, STUB_XDG_OPEN).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&opener, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    stub
 }
 
 fn run(path: &Path, args: &[&str]) -> Output {
@@ -77,8 +90,7 @@ fn validation_rejects_http_file_and_bad_keys() {
 #[test]
 fn no_browser_opens_nothing_but_still_prints_the_pages() {
     let dir = tempfile::tempdir().unwrap();
-    let stub = dir.path().join("bin");
-    fs::create_dir(&stub).unwrap();
+    let stub = stub_dir(dir.path());
 
     let args = [
         "guide",
@@ -87,7 +99,6 @@ fn no_browser_opens_nothing_but_still_prints_the_pages() {
         "github-token",
         "--no-browser",
     ];
-    // An empty PATH: a spawn would fail, and success proves none was needed.
     let out = run(&stub, &args);
     assert!(out.status.success(), "{out:?}");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -96,21 +107,16 @@ fn no_browser_opens_nothing_but_still_prints_the_pages() {
         "{stdout}"
     );
     assert!(stdout.contains("cadence: every 90 days"), "{stdout}");
+    // A spawned stub writes asynchronously; give it the same window the
+    // browser test allows before asserting it never ran.
+    std::thread::sleep(std::time::Duration::from_millis(500));
     assert!(!stub.join("log").exists(), "no-browser must spawn nothing");
 }
 
 #[test]
 fn browser_opens_every_url_in_order() {
     let dir = tempfile::tempdir().unwrap();
-    let stub = dir.path().join("bin");
-    fs::create_dir(&stub).unwrap();
-    let opener = stub.join("xdg-open");
-    fs::write(&opener, STUB_XDG_OPEN).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&opener, fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    let stub = stub_dir(dir.path());
 
     let out = run(
         &stub,
