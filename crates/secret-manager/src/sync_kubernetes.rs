@@ -595,7 +595,6 @@ struct LiveMetadata {
     managed_fields: Vec<serde_json::Value>,
 }
 
-#[derive(PartialEq)]
 struct Hidden(Zeroizing<String>);
 
 impl<'de> Deserialize<'de> for Hidden {
@@ -784,24 +783,101 @@ fn ownership_handoff(applied: &LiveSecret, manager: &str) -> Option<String> {
     })
 }
 
-/// A dockerconfigjson document, normalized: registry to field to value, every
-/// value zeroized. Anything else (another top-level key, a non-string field)
-/// fails to parse and so compares `different`.
-#[derive(Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-struct DockerConfig {
-    auths: BTreeMap<String, BTreeMap<String, Hidden>>,
+/// A dockerconfigjson document, normalized: registry to field to value.
+type Auths<'a> = BTreeMap<&'a str, BTreeMap<&'a str, &'a str>>;
+
+/// Equal as documents, ignoring key order and whitespace. Parsing borrows every
+/// string from the zeroized inputs, so no value is copied, and its errors never
+/// carry one. serde_json unescapes through a scratch buffer it never wipes, so
+/// a document with any escape is compared byte for byte instead; Docker PATs,
+/// user names and base64 `auth` values need none.
+fn dockerconfig_equal(declared: &[u8], live: &[u8]) -> bool {
+    if declared.contains(&b'\\') || live.contains(&b'\\') {
+        return declared == live;
+    }
+    match (parse_dockerconfig(declared), parse_dockerconfig(live)) {
+        (Some(declared), Some(live)) => declared == live,
+        _ => false,
+    }
 }
 
-/// Equal as documents, ignoring key order and whitespace. Parse errors are
-/// discarded unread.
-fn dockerconfig_equal(declared: &[u8], live: &[u8]) -> bool {
-    match (
-        serde_json::from_slice::<DockerConfig>(declared),
-        serde_json::from_slice::<DockerConfig>(live),
-    ) {
-        (Ok(declared), Ok(live)) => declared == live,
-        _ => false,
+/// `{"auths": {registry: {field: string}}}` and nothing else.
+fn parse_dockerconfig(bytes: &[u8]) -> Option<Auths<'_>> {
+    let Borrowed(mut top) =
+        serde_json::from_slice::<Borrowed<Borrowed<Borrowed<Str>>>>(bytes).ok()?;
+    let auths = top.remove("auths").filter(|_| top.is_empty())?;
+    Some(
+        auths
+            .0
+            .into_iter()
+            .map(|(registry, Borrowed(fields))| {
+                (
+                    registry,
+                    fields
+                        .into_iter()
+                        .map(|(field, Str(value))| (field, value))
+                        .collect(),
+                )
+            })
+            .collect(),
+    )
+}
+
+/// A JSON string borrowed from the input. A string serde_json would have to
+/// unescape, and any error, carries no value.
+struct Str<'a>(&'a str);
+
+impl<'de> Deserialize<'de> for Str<'de> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = Str<'de>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a string")
+            }
+            fn visit_borrowed_str<E: serde::de::Error>(
+                self,
+                value: &'de str,
+            ) -> Result<Self::Value, E> {
+                Ok(Str(value))
+            }
+            fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Self::Value, E> {
+                Err(E::custom("unborrowable string"))
+            }
+        }
+        // `deserialize_any`: serde_json then hands every token to this visitor
+        // instead of building a type error that quotes the value.
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
+/// A JSON object with borrowed keys. A string in its place is refused without
+/// naming it (serde's default error would quote the value).
+struct Borrowed<'a, V>(BTreeMap<&'a str, V>);
+
+impl<'de, V: Deserialize<'de>> Deserialize<'de> for Borrowed<'de, V> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor<V>(std::marker::PhantomData<V>);
+        impl<'de, V: Deserialize<'de>> serde::de::Visitor<'de> for Visitor<V> {
+            type Value = Borrowed<'de, V>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("an object")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut entries = BTreeMap::new();
+                while let Some((Str(key), value)) = map.next_entry::<Str<'de>, V>()? {
+                    entries.insert(key, value);
+                }
+                Ok(Borrowed(entries))
+            }
+            fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Self::Value, E> {
+                Err(E::custom("a string where an object belongs"))
+            }
+        }
+        deserializer.deserialize_any(Visitor(std::marker::PhantomData))
     }
 }
 
@@ -1159,6 +1235,22 @@ username = "robot"
         ] {
             assert!(!dockerconfig_equal(declared, different));
         }
+        // Escaped values never reach serde_json: byte equality only.
+        let escaped = br#"{"auths":{"r":{"username":"u","password":"p\"q"}}}"#;
+        assert!(dockerconfig_equal(escaped, escaped));
+        let reordered = br#"{"auths":{"r":{"password":"p\"q","username":"u"}}}"#;
+        assert!(!dockerconfig_equal(escaped, reordered));
+        // A string where an object belongs is refused without quoting it.
+        let error = serde_json::from_slice::<Borrowed<Str>>(br#""hunter2-value""#)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(!error.contains("hunter2"), "{error}");
+        let error = serde_json::from_slice::<Borrowed<Str>>(br#"{"k":"hunter2\u0041"}"#)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(!error.contains("hunter2"), "{error}");
         // An explicit `fieldManager = "secret-manager"` is the implicit default.
         let records = desired_records(&doc(serde_json::json!({
             "a": {"secret":"age/a.age","name":"A","kubernetes":[member("api","a",serde_json::json!({}))]},
