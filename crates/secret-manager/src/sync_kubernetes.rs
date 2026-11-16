@@ -823,6 +823,26 @@ fn parse_dockerconfig(bytes: &[u8]) -> Option<Auths<'_>> {
     )
 }
 
+/// Value-free handlers for every scalar serde_json hands a visitor: serde's
+/// defaults quote the value (`invalid type: integer `1234``) into an error
+/// string that is freed unwiped, even when the error is discarded.
+macro_rules! refuse_scalars {
+    () => {
+        fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Self::Value, E> {
+            Err(E::custom("unexpected scalar"))
+        }
+        fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<Self::Value, E> {
+            Err(E::custom("unexpected scalar"))
+        }
+        fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<Self::Value, E> {
+            Err(E::custom("unexpected scalar"))
+        }
+        fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Self::Value, E> {
+            Err(E::custom("unexpected scalar"))
+        }
+    };
+}
+
 /// A JSON string borrowed from the input. A string serde_json would have to
 /// unescape, and any error, carries no value.
 struct Str<'a>(&'a str);
@@ -844,6 +864,7 @@ impl<'de> Deserialize<'de> for Str<'de> {
             fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Self::Value, E> {
                 Err(E::custom("unborrowable string"))
             }
+            refuse_scalars!();
         }
         // `deserialize_any`: serde_json then hands every token to this visitor
         // instead of building a type error that quotes the value.
@@ -876,6 +897,7 @@ impl<'de, V: Deserialize<'de>> Deserialize<'de> for Borrowed<'de, V> {
             fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Self::Value, E> {
                 Err(E::custom("a string where an object belongs"))
             }
+            refuse_scalars!();
         }
         deserializer.deserialize_any(Visitor(std::marker::PhantomData))
     }
@@ -1251,6 +1273,14 @@ username = "robot"
             .unwrap()
             .to_string();
         assert!(!error.contains("hunter2"), "{error}");
+        // Neither does a number where a string or an object belongs.
+        for document in [&br#"{"k":73924680246801}"#[..], b"73924680246801"] {
+            let error = serde_json::from_slice::<Borrowed<Str>>(document)
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(!error.contains("7392468"), "{error}");
+        }
         // An explicit `fieldManager = "secret-manager"` is the implicit default.
         let records = desired_records(&doc(serde_json::json!({
             "a": {"secret":"age/a.age","name":"A","kubernetes":[member("api","a",serde_json::json!({}))]},
