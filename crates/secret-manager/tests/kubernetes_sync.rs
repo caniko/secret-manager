@@ -114,6 +114,7 @@ impl Fixture {
             &bin.join("age-plugin-test"),
             &format!(
                 "#!/bin/sh\n\
+                 echo session >> \"$KUBECTL_CALLS/plugin-sessions\"\n\
                  while IFS= read -r line; do [ \"$line\" = '-> done' ] && break; done\nread -r _\n\
                  printf -- '-> file-key 0\\n{opaque}\\n'; read -r _; read -r _\n\
                  printf -- '-> file-key 1\\n{docker}\\n'; read -r _; read -r _\n\
@@ -352,6 +353,66 @@ fn failing_kubectl_echoing_its_input_is_redacted() {
 }
 
 #[test]
+fn multi_key_secret_is_one_apply_after_one_unlock() {
+    if !protection_available() {
+        eprintln!(
+            "SKIPPED: credential sync needs a no-swap systemd user scope and a logind inhibitor"
+        );
+        return;
+    }
+    let fixture = Fixture::new();
+    // Both sources fill keys of one Secret; the second is hashed.
+    fs::write(
+        fixture.root.join("targets.json"),
+        serde_json::json!({"hosts":[{"targets":{
+            "app":{"secret":"age/a-opaque.age","name":"APP","kubernetes":[
+                {"context":"nrp","namespace":"syndb","secret":"auth","format":"opaque","key":"app"}
+            ]},
+            "hash":{"secret":"age/b-docker.age","name":"HASH","kubernetes":[
+                {"context":"nrp","namespace":"syndb","secret":"auth","format":"opaque",
+                 "key":"hash_sha256","render":"sha256-hex"}
+            ]}
+        }}]})
+        .to_string(),
+    )
+    .unwrap();
+    let output = fixture.sync(&["--target", "app"], false);
+    assert!(output.status.success(), "{}", text(&output));
+    let printed = text(&output);
+    assert_eq!(leaks(&printed), Vec::<&str>::new(), "{printed}");
+    assert!(printed.contains("also selecting `hash`"), "{printed}");
+    // One hardware unlock for the run, one apply for the whole Secret.
+    let sessions = fs::read_to_string(fixture.calls.join("plugin-sessions")).unwrap();
+    assert_eq!(sessions.lines().count(), 1, "{sessions}");
+    let manifests = fixture.recorded("stdin");
+    assert_eq!(manifests.len(), 1);
+    let manifest: serde_json::Value = serde_json::from_str(&manifests[0]).unwrap();
+    let data = manifest["data"].as_object().unwrap();
+    assert_eq!(data.keys().collect::<Vec<_>>(), ["app", "hash_sha256"]);
+    let hash = STANDARD
+        .decode(data["hash_sha256"].as_str().unwrap())
+        .unwrap();
+    let expected: String = ring_free_sha256_hex(DOCKER_VALUE.as_bytes());
+    assert_eq!(String::from_utf8(hash).unwrap(), expected);
+    let state = fs::read_to_string(fixture.root.join("state.toml")).unwrap();
+    assert!(state.starts_with("version = 2"), "{state}");
+    assert_eq!(state.matches("[[managed]]").count(), 1, "{state}");
+    assert_eq!(state.matches("[[managed.members]]").count(), 2, "{state}");
+}
+
+/// SHA-256 hex via the system `sha256sum`, independent of the code under test.
+fn ring_free_sha256_hex(value: &[u8]) -> String {
+    let mut child = Command::new("sha256sum")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(value).unwrap();
+    let output = child.wait_with_output().unwrap();
+    String::from_utf8(output.stdout).unwrap()[..64].to_string()
+}
+
+#[test]
 fn dry_run_names_destinations_and_keys_but_no_values() {
     let fixture = Fixture::new();
     let output = fixture.sync(&["--dry-run"], false);
@@ -457,4 +518,311 @@ fn nix_module_json_with_null_options_deserializes_with_defaults() {
         label.contains("syndb/registry-pull key .dockerconfigjson"),
         "{label}"
     );
+}
+
+/// etcd plus kube-apiserver on loopback, envtest-style: no kubelet, no
+/// controllers. Killed on drop.
+struct ApiServer {
+    children: Vec<std::process::Child>,
+    kubeconfig: PathBuf,
+}
+
+impl Drop for ApiServer {
+    fn drop(&mut self) {
+        for child in &mut self.children {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+impl ApiServer {
+    /// `None` unless `SECRET_MANAGER_TEST_KUBE_APISERVER` and
+    /// `SECRET_MANAGER_TEST_ETCD` name the binaries.
+    fn start(dir: &Path) -> Option<Self> {
+        let apiserver = std::env::var_os("SECRET_MANAGER_TEST_KUBE_APISERVER")?;
+        let etcd = std::env::var_os("SECRET_MANAGER_TEST_ETCD")?;
+        let (client, peer, secure) = (free_port(), free_port(), free_port());
+        let quiet = || std::process::Stdio::null();
+        let mut server = ApiServer {
+            children: Vec::new(),
+            kubeconfig: dir.join("kubeconfig"),
+        };
+        server.children.push(
+            Command::new(etcd)
+                .arg(format!("--data-dir={}", dir.join("etcd").display()))
+                .arg(format!("--listen-client-urls=http://127.0.0.1:{client}"))
+                .arg(format!("--advertise-client-urls=http://127.0.0.1:{client}"))
+                .arg(format!("--listen-peer-urls=http://127.0.0.1:{peer}"))
+                .arg(format!(
+                    "--initial-advertise-peer-urls=http://127.0.0.1:{peer}"
+                ))
+                .arg(format!("--initial-cluster=default=http://127.0.0.1:{peer}"))
+                .stdout(quiet())
+                .stderr(quiet())
+                .spawn()
+                .unwrap(),
+        );
+        // ECDSA service-account key pair: PKCS#8 signs, SubjectPublicKeyInfo verifies.
+        let pkcs8 = ring::signature::EcdsaKeyPair::generate_pkcs8(
+            &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+            &ring::rand::SystemRandom::new(),
+        )
+        .unwrap();
+        let key = dir.join("sa.pem");
+        fs::write(
+            &key,
+            format!(
+                "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
+                STANDARD.encode(pkcs8.as_ref())
+            ),
+        )
+        .unwrap();
+        let pair = ring::signature::EcdsaKeyPair::from_pkcs8(
+            &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+            pkcs8.as_ref(),
+            &ring::rand::SystemRandom::new(),
+        )
+        .unwrap();
+        // DER prefix of a P-256 SubjectPublicKeyInfo, followed by the 65-byte point.
+        let mut spki = b"\x30\x59\x30\x13\x06\x07\x2a\x86\x48\xce\x3d\x02\x01\x06\x08\x2a\x86\x48\xce\x3d\x03\x01\x07\x03\x42\x00".to_vec();
+        spki.extend_from_slice(ring::signature::KeyPair::public_key(&pair).as_ref());
+        let public = dir.join("sa.pub");
+        fs::write(
+            &public,
+            format!(
+                "-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----\n",
+                STANDARD.encode(&spki)
+            ),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("tokens.csv"),
+            "envtest-token,admin,1,system:masters\n",
+        )
+        .unwrap();
+        server.children.push(
+            Command::new(apiserver)
+                .arg(format!("--etcd-servers=http://127.0.0.1:{client}"))
+                .arg(format!("--cert-dir={}", dir.join("certs").display()))
+                .arg(format!("--secure-port={secure}"))
+                .args(["--bind-address=127.0.0.1", "--advertise-address=127.0.0.1"])
+                .arg("--service-cluster-ip-range=10.0.0.0/24")
+                .arg(format!(
+                    "--service-account-issuer=https://127.0.0.1:{secure}"
+                ))
+                .arg(format!("--service-account-key-file={}", public.display()))
+                .arg(format!(
+                    "--service-account-signing-key-file={}",
+                    key.display()
+                ))
+                .arg(format!(
+                    "--token-auth-file={}",
+                    dir.join("tokens.csv").display()
+                ))
+                .arg("--authorization-mode=AlwaysAllow")
+                // Loopback has no endpoint reconciliation: no kubernetes Service.
+                .arg("--endpoint-reconciler-type=none")
+                .stdout(quiet())
+                .stderr(fs::File::create(dir.join("apiserver.log")).unwrap())
+                .spawn()
+                .unwrap(),
+        );
+        fs::write(
+            &server.kubeconfig,
+            format!(
+                "apiVersion: v1\nkind: Config\ncurrent-context: envtest\n\
+                 clusters: [{{name: envtest, cluster: {{server: 'https://127.0.0.1:{secure}', insecure-skip-tls-verify: true}}}}]\n\
+                 users: [{{name: admin, user: {{token: envtest-token}}}}]\n\
+                 contexts: [{{name: envtest, context: {{cluster: envtest, user: admin}}}}]\n"
+            ),
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+        while !server
+            .kubectl(&["get", "--raw", "/readyz"], None)
+            .status
+            .success()
+        {
+            let exited = server
+                .children
+                .iter_mut()
+                .any(|child| !matches!(child.try_wait(), Ok(None)));
+            assert!(
+                !exited && std::time::Instant::now() < deadline,
+                "kube-apiserver not ready: {}",
+                fs::read_to_string(dir.join("apiserver.log")).unwrap_or_default()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        Some(server)
+    }
+
+    fn kubectl(&self, args: &[&str], stdin: Option<&str>) -> Output {
+        let mut command = Command::new("kubectl");
+        command
+            .args(["--context", "envtest"])
+            .args(args)
+            .env("KUBECONFIG", &self.kubeconfig)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stdin.unwrap_or("").as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    }
+
+    fn secret(&self, name: &str) -> serde_json::Value {
+        let output = self.kubectl(
+            &[
+                "-n",
+                "syndb",
+                "get",
+                "secret",
+                name,
+                "-o",
+                "json",
+                "--show-managed-fields",
+            ],
+            None,
+        );
+        assert!(output.status.success(), "{}", text(&output));
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
+}
+
+fn data_owners(secret: &serde_json::Value) -> Vec<String> {
+    secret["metadata"]["managedFields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["fieldsV1"].get("f:data").is_some())
+        .map(|entry| entry["manager"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn apiserver_adoption_hands_off_ownership_and_member_removal_deletes_the_key() {
+    if !protection_available() {
+        eprintln!(
+            "SKIPPED: credential sync needs a no-swap systemd user scope and a logind inhibitor"
+        );
+        return;
+    }
+    let fixture = Fixture::new();
+    let Some(api) = ApiServer::start(&fixture.root) else {
+        eprintln!(
+            "SKIPPED: set SECRET_MANAGER_TEST_KUBE_APISERVER and SECRET_MANAGER_TEST_ETCD to run \
+             against a real apiserver"
+        );
+        return;
+    };
+    // The real kubectl, talking to the test apiserver.
+    fs::remove_file(fixture.root.join("bin/kubectl")).unwrap();
+    let sync = |extra: &[&str]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_secret-manager"));
+        command
+            .args(["sync", "--no-flake", "--config"])
+            .arg(fixture.root.join("targets.json"))
+            .arg("--state")
+            .arg(fixture.root.join("state.toml"))
+            .args(extra)
+            .env("SECRET_MANAGER_STORE", &fixture.root)
+            .env_remove("SECRET_MANAGER_SYNC_REPLAY")
+            .env_remove("SECRET_MANAGER_AGE_IDENTITIES")
+            .env("PATH", &fixture.path)
+            .env("KUBECTL_CALLS", &fixture.calls)
+            .env("KUBECONFIG", &api.kubeconfig)
+            .current_dir(&fixture.root);
+        command.output().unwrap()
+    };
+    let targets = |b_secret: &str| {
+        fs::write(
+            fixture.root.join("targets.json"),
+            serde_json::json!({"hosts":[{"targets":{
+                "a":{"secret":"age/a-opaque.age","name":"A","kubernetes":[
+                    {"context":"envtest","namespace":"syndb","secret":"api","format":"opaque","key":"a"}]},
+                "b":{"secret":"age/b-docker.age","name":"B","kubernetes":[
+                    {"context":"envtest","namespace":"syndb","secret":b_secret,"format":"opaque","key":"b"}]}
+            }}]})
+            .to_string(),
+        )
+        .unwrap();
+    };
+    assert!(
+        api.kubectl(&["create", "namespace", "syndb"], None)
+            .status
+            .success()
+    );
+    // Seed through a foreign manager, as the legacy writer did.
+    let seeded = api.kubectl(
+        &[
+            "-n",
+            "syndb",
+            "create",
+            "secret",
+            "generic",
+            "api",
+            &format!("--from-literal=a={OPAQUE_VALUE}"),
+            &format!("--from-literal=b={DOCKER_VALUE}"),
+        ],
+        None,
+    );
+    assert!(seeded.status.success(), "{}", text(&seeded));
+    assert_eq!(data_owners(&api.secret("api")), ["kubectl-create"]);
+
+    // A6: server-side apply honours a stale resourceVersion as a precondition.
+    let stale = api.kubectl(
+        &["apply", "--server-side", "--field-manager", "probe", "-f", "-"],
+        Some(r#"{"apiVersion":"v1","kind":"Secret","metadata":{"name":"api","namespace":"syndb","resourceVersion":"1"},"data":{}}"#),
+    );
+    assert!(!stale.status.success(), "stale resourceVersion was applied");
+    assert!(text(&stale).contains("modified"), "{}", text(&stale));
+
+    targets("api");
+    let verified = sync(&["--verify"]);
+    assert!(verified.status.success(), "{}", text(&verified));
+    let printed = text(&verified);
+    assert!(printed.contains("secret/api key a: equal"), "{printed}");
+    assert!(printed.contains("secret/api key b: equal"), "{printed}");
+    assert!(
+        printed.contains("foreign-manager kubectl-create"),
+        "{printed}"
+    );
+    assert_eq!(leaks(&printed), Vec::<&str>::new(), "{printed}");
+
+    let adopted = sync(&["--adopt"]);
+    assert!(adopted.status.success(), "{}", text(&adopted));
+    assert_eq!(leaks(&text(&adopted)), Vec::<&str>::new());
+    assert_eq!(data_owners(&api.secret("api")), ["secret-manager"]);
+    let confirmed = text(&sync(&["--verify"]));
+    assert!(!confirmed.contains("foreign-manager"), "{confirmed}");
+
+    // Moving member b to another Secret drops key b from `api`; the Secret stays.
+    targets("other");
+    let moved = sync(&[]);
+    assert!(moved.status.success(), "{}", text(&moved));
+    let live = api.secret("api");
+    let keys: Vec<&String> = live["data"].as_object().unwrap().keys().collect();
+    assert_eq!(keys, ["a"]);
+    assert_eq!(
+        STANDARD
+            .decode(live["data"]["a"].as_str().unwrap())
+            .unwrap(),
+        OPAQUE_VALUE.as_bytes()
+    );
+    assert!(api.secret("other")["data"].get("b").is_some());
 }

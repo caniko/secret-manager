@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/secret-manager", "crates/secret-manager-schema"]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -13,7 +13,7 @@ readme = "README.md"
 
 [workspace.dependencies]
 nix-manager-core = "0.4.5"
-caniko-secret-manager-schema = { version = "0.5.0", path = "crates/secret-manager-schema" }
+caniko-secret-manager-schema = { version = "0.6.0", path = "crates/secret-manager-schema" }
 anyhow = "1"
 base64 = "0.23"
 clap = { version = "4", features = ["derive"] }

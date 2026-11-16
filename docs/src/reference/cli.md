@@ -372,7 +372,22 @@ managed but no longer appear in the collected config are reported as stale.
 They are only deleted from their configured forge when `--prune` is passed.
 `--target` only narrows which targets are pushed: staleness is always judged
 against the complete collected config, and `--prune` cannot be combined with
-`--target`.
+`--target`. A Kubernetes Secret is applied whole, so `--target` also selects
+every target that writes a Secret a selected target writes.
+
+The state file is version 2. A version 1 file upgrades when read and is
+rewritten after the next successful sync; a version 1 binary refuses a
+version 2 file, so upgrade every workstation that syncs.
+
+Three Kubernetes-only modes take over existing live Secrets. Each is exclusive
+with `--check`, `--dry-run`, `--prune` and the others, and refuses non-Kubernetes
+targets:
+
+| Flag       | Effect                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--verify` | Decrypts, reads each live Secret and prints `equal`, `different`, `missing-live` or `undeclared-live` per key, plus `foreign-manager <name>` for any other field manager owning `data`. Exits non-zero unless every declared key is `equal` and nothing is undeclared. Applies nothing                                                                                                                              |
+| `--import` | For each `raw` opaque member whose source file is missing, encrypts the live key to the master recipients at the declared path, creating its directory. Never overwrites, needs no hardware key and prints key names only. Needs `SECRET_MANAGER_AGE_ENCRYPTOR` (an embedding frontend may pass the encryptor instead). Not available for `render` members or `dockerconfigjson`                                    |
+| `--adopt`  | Re-verifies, then applies under the read `resourceVersion` (a Secret changed since the read is a conflict and nothing is applied), then removes every other field manager's `data` ownership with one JSON patch that tests the new `resourceVersion`. Afterwards this field manager is the only data owner, so removing a member later deletes its key. Refuses unless every key is `equal` and none is undeclared |
 
 ### `decrypt` — Decrypt to stdout
 

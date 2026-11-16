@@ -6,10 +6,14 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::sync_targets::{
-    KubernetesDestination, KubernetesFormat, Provider, SyncDocument, SyncValue,
+    KubernetesDestination, KubernetesFormat, KubernetesObject, KubernetesRender, Provider,
+    SyncDocument, SyncValue,
 };
 
-pub const STATE_VERSION: u32 = 1;
+/// Version 2 groups every Kubernetes destination of one Secret into one record
+/// with `members`. Version 1 files upgrade on read; a version 1 binary refuses
+/// a version 2 file, so every workstation that syncs must run version 2.
+pub const STATE_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncState {
@@ -37,10 +41,38 @@ pub struct ManagedRecord {
     pub target: String,
     pub source: String,
     /// Kubernetes only: `host` is the kubectl context, `owner` the namespace
-    /// and `repo` and `name` the Secret name. The data key is not part of the
-    /// identity, so renaming it never schedules the live Secret for pruning.
+    /// and `repo` and `name` the Secret name. The data keys are not part of the
+    /// identity, so renaming or removing one never schedules the live Secret
+    /// for pruning. The destination holds the object-level fields; `key`,
+    /// `render` and `allowEmpty` live on each member.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kubernetes: Option<KubernetesDestination>,
+    /// Kubernetes only, sorted by key: every declared data key of the Secret.
+    /// `target` and `source` above mirror the first member, for display.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<KubernetesMember>,
+}
+
+/// One declared data key of a Kubernetes Secret and the source that fills it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct KubernetesMember {
+    pub key: String,
+    pub target: String,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render: Option<KubernetesRender>,
+    #[serde(
+        default,
+        rename = "allowEmpty",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub allow_empty: bool,
+}
+
+impl KubernetesMember {
+    pub fn render(&self) -> KubernetesRender {
+        self.render.unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -99,13 +131,20 @@ impl ManagedRecord {
         };
         match self.scope {
             Scope::Namespace => format!(
-                "{provider}/{} secret {}/{} key {}",
+                "{provider}/{} secret {}/{} key{} {}",
                 self.host,
                 self.owner.as_deref().unwrap_or("<missing-namespace>"),
                 self.repo.as_deref().unwrap_or("<missing-secret>"),
-                self.kubernetes
-                    .as_ref()
-                    .map_or("<missing-key>", |kube| kube.data_key(""))
+                if self.members.len() > 1 { "s" } else { "" },
+                if self.members.is_empty() {
+                    "<missing-key>".to_string()
+                } else {
+                    self.members
+                        .iter()
+                        .map(|member| member.key.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                }
             ),
             Scope::Repo => format!(
                 "{provider}/{} repo  {}/{}",
@@ -171,13 +210,16 @@ impl SyncState {
             .with_context(|| format!("reading sync state {}", path.display()))?;
         let mut state: Self = toml::from_str(&raw)
             .with_context(|| format!("parsing sync state {}", path.display()))?;
-        if state.version != STATE_VERSION {
-            bail!(
-                "unsupported sync state version {} in {} (expected {})",
-                state.version,
+        match state.version {
+            1 => {
+                state.managed = state.managed.into_iter().map(upgrade_v1_record).collect();
+                state.version = STATE_VERSION;
+            }
+            STATE_VERSION => {}
+            version => bail!(
+                "unsupported sync state version {version} in {} (expected {STATE_VERSION} or 1)",
                 path.display(),
-                STATE_VERSION
-            );
+            ),
         }
         state.managed = normalize_records(state.managed);
         Ok(Some(state))
@@ -207,7 +249,7 @@ impl SyncState {
 
 pub fn desired_records(doc: &SyncDocument) -> Result<Vec<ManagedRecord>> {
     let mut records = Vec::new();
-    let mut kube_secrets = BTreeSet::new();
+    let mut kube_secrets = BTreeMap::new();
     for (_, target_key, target) in doc.iter_targets() {
         let kind = match &target.value {
             SyncValue::Secret(_) => ManagedKind::Secret,
@@ -230,6 +272,7 @@ pub fn desired_records(doc: &SyncDocument) -> Result<Vec<ManagedRecord>> {
                 target: target_key.to_string(),
                 source: source.clone(),
                 kubernetes: None,
+                members: Vec::new(),
             });
         }
 
@@ -252,6 +295,7 @@ pub fn desired_records(doc: &SyncDocument) -> Result<Vec<ManagedRecord>> {
                 target: target_key.to_string(),
                 source: source.clone(),
                 kubernetes: None,
+                members: Vec::new(),
             });
         }
 
@@ -272,6 +316,7 @@ pub fn desired_records(doc: &SyncDocument) -> Result<Vec<ManagedRecord>> {
                 target: target_key.to_string(),
                 source: source.clone(),
                 kubernetes: None,
+                members: Vec::new(),
             });
         }
 
@@ -282,37 +327,13 @@ pub fn desired_records(doc: &SyncDocument) -> Result<Vec<ManagedRecord>> {
                 );
             }
             destination.validate(&target.name)?;
-            if !kube_secrets.insert((
-                destination.context.clone(),
-                destination.namespace.clone(),
-                destination.secret.clone(),
-            )) {
-                bail!(
-                    "sync target `{target_key}`: Kubernetes Secret {}/{}/{} is declared more than once; \
-                     server-side apply by one field manager would drop the other keys",
-                    destination.context,
-                    destination.namespace,
-                    destination.secret
-                );
-            }
-            records.push(ManagedRecord {
-                provider: Provider::Kubernetes,
-                host: destination.context.clone(),
-                scope: Scope::Namespace,
-                owner: Some(destination.namespace.clone()),
-                repo: Some(destination.secret.clone()),
-                org: None,
-                environment: None,
-                kind,
-                name: destination.secret.clone(),
-                target: target_key.to_string(),
-                source: source.clone(),
-                kubernetes: Some(KubernetesDestination {
-                    key: (destination.format == KubernetesFormat::Opaque)
-                        .then(|| destination.data_key(&target.name).to_string()),
-                    ..destination.clone()
-                }),
-            });
+            add_kubernetes_member(
+                &mut kube_secrets,
+                target_key,
+                &target.name,
+                &source,
+                destination,
+            )?;
         }
 
         if target.codeberg_user {
@@ -329,10 +350,112 @@ pub fn desired_records(doc: &SyncDocument) -> Result<Vec<ManagedRecord>> {
                 target: target_key.to_string(),
                 source,
                 kubernetes: None,
+                members: Vec::new(),
             });
         }
     }
+    records.extend(kube_secrets.into_values().map(|mut record| {
+        record.members.sort();
+        record.target = record.members[0].target.clone();
+        record.source = record.members[0].source.clone();
+        record
+    }));
     Ok(normalize_records(records))
+}
+
+/// Add one destination to the record of the Secret it writes. Members of one
+/// Secret are applied as one manifest by one field manager, so they must agree
+/// on format and manager, use distinct keys, and a `dockerconfigjson` Secret
+/// has exactly one member.
+fn add_kubernetes_member(
+    objects: &mut BTreeMap<KubernetesObject, ManagedRecord>,
+    target_key: &str,
+    target_name: &str,
+    source: &str,
+    destination: &KubernetesDestination,
+) -> Result<()> {
+    let member = KubernetesMember {
+        key: destination.data_key(target_name).to_string(),
+        target: target_key.to_string(),
+        source: source.to_string(),
+        render: destination.render,
+        allow_empty: destination.allows_empty(),
+    };
+    let object_destination = KubernetesDestination {
+        key: None,
+        render: None,
+        allow_empty: None,
+        ..destination.clone()
+    };
+    let object = destination.object();
+    let Some(record) = objects.get_mut(&object) else {
+        objects.insert(
+            object,
+            ManagedRecord {
+                provider: Provider::Kubernetes,
+                host: destination.context.clone(),
+                scope: Scope::Namespace,
+                owner: Some(destination.namespace.clone()),
+                repo: Some(destination.secret.clone()),
+                org: None,
+                environment: None,
+                kind: ManagedKind::Secret,
+                name: destination.secret.clone(),
+                target: member.target.clone(),
+                source: member.source.clone(),
+                kubernetes: Some(object_destination),
+                members: vec![member],
+            },
+        );
+        return Ok(());
+    };
+    if record.kubernetes.as_ref() != Some(&object_destination) {
+        bail!(
+            "sync target `{target_key}`: Kubernetes Secret {object} is declared with a different \
+             format, fieldManager, registry or username by target `{}`; one Secret is one manifest",
+            record.target
+        );
+    }
+    if destination.format == KubernetesFormat::Dockerconfigjson {
+        bail!(
+            "sync target `{target_key}`: Kubernetes `dockerconfigjson` Secret {object} is also \
+             declared by target `{}`; it holds exactly one member",
+            record.target
+        );
+    }
+    if let Some(other) = record.members.iter().find(|other| other.key == member.key) {
+        bail!(
+            "sync target `{target_key}`: Kubernetes Secret {object} key `{}` is also declared by \
+             target `{}`",
+            member.key,
+            other.target
+        );
+    }
+    record.members.push(member);
+    Ok(())
+}
+
+/// A version 1 Kubernetes record named one Secret with its key on the
+/// destination. It becomes a one-member record, the key taken through
+/// [`KubernetesDestination::data_key`] (`.dockerconfigjson` for that format).
+fn upgrade_v1_record(mut record: ManagedRecord) -> ManagedRecord {
+    if record.provider != Provider::Kubernetes || !record.members.is_empty() {
+        return record;
+    }
+    if let Some(destination) = record.kubernetes.take() {
+        record.members.push(KubernetesMember {
+            key: destination.data_key(&record.name).to_string(),
+            target: record.target.clone(),
+            source: record.source.clone(),
+            render: None,
+            allow_empty: false,
+        });
+        record.kubernetes = Some(KubernetesDestination {
+            key: None,
+            ..destination
+        });
+    }
+    record
 }
 
 pub fn stale_records(previous: &[ManagedRecord], desired: &[ManagedRecord]) -> Vec<ManagedRecord> {
@@ -462,7 +585,7 @@ mod tests {
         let rendered = toml::to_string_pretty(&state).unwrap();
         let reparsed: SyncState = toml::from_str(&rendered).unwrap();
         assert_eq!(reparsed, state);
-        assert!(rendered.contains("version = 1"));
+        assert!(rendered.contains("version = 2"));
         assert!(rendered.contains("provider = \"forgejo\""));
         assert!(rendered.contains("scope = \"repo\""));
         assert!(rendered.contains("scope = \"org\""));
@@ -590,6 +713,7 @@ source = 'age/public/quote" and ü.txt'
             target: target.to_string(),
             source: "age/secrets/token.age".to_string(),
             kubernetes: None,
+            members: Vec::new(),
         }
     }
 
@@ -611,6 +735,7 @@ source = 'age/public/quote" and ü.txt'
             target: target.to_string(),
             source: "age/secrets/token.age".to_string(),
             kubernetes: None,
+            members: Vec::new(),
         }
     }
 }

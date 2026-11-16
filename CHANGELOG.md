@@ -2,6 +2,47 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-16
+
+### Changed
+
+- Breaking: the sync state file is version 2. Kubernetes destinations naming
+  one `(context, namespace, secret)` are one record with `members` (key, target,
+  source). A version 1 file upgrades when read (each Kubernetes record becomes a
+  one-member record, key from `KubernetesDestination::data_key`) and is
+  rewritten after the next successful sync; a version 1 binary refuses a
+  version 2 file, so upgrade every workstation that syncs.
+- Breaking for Rust callers: `ManagedRecord` gains `members`,
+  `KubernetesDestination` gains `render` and `allowEmpty`, and `SyncArgs` gains
+  `verify`, `import`, `adopt` and `encryptor`; exhaustive struct literals must
+  add them.
+- A Kubernetes Secret may now be declared by several destinations, across
+  targets: its members are decrypted in one unlock and applied as one
+  server-side apply, so a failure applies nothing and the Secret holds exactly
+  the declared keys. Members need distinct keys and one format and field
+  manager; a `dockerconfigjson` Secret has one member. `--target` selects every
+  target sharing a Secret with a selected one. Removing a member keeps the
+  Secret and drops the key.
+
+### Added
+
+- `render = "raw" | "sha256-hex"` and `allowEmpty` on `opaque` Kubernetes
+  destinations, in the Rust schema, the NixOS module and `SecretRegistry.pkl`.
+  An empty decrypted value is refused unless `allowEmpty` is set.
+- `sync --verify`: prints `equal`, `different`, `missing-live` or
+  `undeclared-live` per key and `foreign-manager` for other data owners; key
+  names only, nothing applied.
+- `sync --import`: encrypts a live key into a missing `raw` opaque source at
+  its declared path, creating the directory; never overwrites, no hardware key.
+  `StreamEncryptor::encrypt_new_allowing_empty` backs `allowEmpty` members.
+- `sync --adopt`: re-verifies, applies under the read `resourceVersion`, then
+  hands `data` ownership to this field manager with a `resourceVersion`-tested
+  JSON patch of `managedFields`.
+- An apiserver integration test (etcd + kube-apiserver, envtest-style) covering
+  adoption, the ownership handoff, the `resourceVersion` precondition and member
+  removal. It runs when `SECRET_MANAGER_TEST_KUBE_APISERVER` and
+  `SECRET_MANAGER_TEST_ETCD` name the binaries.
+
 ## [0.5.0] - 2026-11-15
 
 ### Changed
@@ -280,7 +321,8 @@ runner-env add`), and Pkl evaluation via nix-pklx.
 - Corrected "foregejo" typos to "forgejo" in Nix module paths and source
   references.
 
-[Unreleased]: https://github.com/caniko/secret-manager/compare/0.5.0...HEAD
+[Unreleased]: https://github.com/caniko/secret-manager/compare/0.6.0...HEAD
+[0.6.0]: https://github.com/caniko/secret-manager/compare/0.5.0...0.6.0
 [0.5.0]: https://github.com/caniko/secret-manager/compare/0.4.8...0.5.0
 [0.4.8]: https://github.com/caniko/secret-manager/compare/0.4.7...0.4.8
 [0.4.7]: https://github.com/caniko/secret-manager/compare/0.4.6...0.4.7

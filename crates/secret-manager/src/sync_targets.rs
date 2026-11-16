@@ -142,6 +142,17 @@ pub enum KubernetesFormat {
     Dockerconfigjson,
 }
 
+/// How an `opaque` member's decrypted value is written to its `data` key.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum KubernetesRender {
+    /// The decrypted value itself.
+    #[default]
+    Raw,
+    /// Lowercase hex SHA-256 of the decrypted value.
+    Sha256Hex,
+}
+
 pub const DEFAULT_DOCKER_REGISTRY: &str = "https://index.docker.io/v1/";
 pub const DEFAULT_FIELD_MANAGER: &str = "secret-manager";
 pub const DOCKERCONFIGJSON_KEY: &str = ".dockerconfigjson";
@@ -170,6 +181,30 @@ pub struct KubernetesDestination {
         skip_serializing_if = "Option::is_none"
     )]
     pub field_manager: Option<String>,
+    /// `opaque` only; defaults to [`KubernetesRender::Raw`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render: Option<KubernetesRender>,
+    /// `opaque` only: accept an empty decrypted value. Defaults to `false`.
+    #[serde(
+        default,
+        rename = "allowEmpty",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub allow_empty: Option<bool>,
+}
+
+/// Identity of one live Secret: `(context, namespace, name)`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct KubernetesObject {
+    pub context: String,
+    pub namespace: String,
+    pub secret: String,
+}
+
+impl std::fmt::Display for KubernetesObject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}/{}", self.context, self.namespace, self.secret)
+    }
 }
 
 fn is_rfc1123_subdomain(name: &str) -> bool {
@@ -200,6 +235,24 @@ impl KubernetesDestination {
         match self.format {
             KubernetesFormat::Dockerconfigjson => DOCKERCONFIGJSON_KEY,
             KubernetesFormat::Opaque => self.key.as_deref().unwrap_or(target_name),
+        }
+    }
+
+    pub fn render(&self) -> KubernetesRender {
+        self.render.unwrap_or_default()
+    }
+
+    pub fn allows_empty(&self) -> bool {
+        self.allow_empty.unwrap_or(false)
+    }
+
+    /// The Secret object this destination writes: members sharing it are
+    /// applied together as one manifest.
+    pub fn object(&self) -> KubernetesObject {
+        KubernetesObject {
+            context: self.context.clone(),
+            namespace: self.namespace.clone(),
+            secret: self.secret.clone(),
         }
     }
 
@@ -238,6 +291,11 @@ impl KubernetesDestination {
                 }
             }
             KubernetesFormat::Dockerconfigjson => {
+                if self.render.is_some() || self.allow_empty.is_some() {
+                    bail!(
+                        "Kubernetes `dockerconfigjson` secrets do not take `render` or `allowEmpty`"
+                    );
+                }
                 if self.key.is_some() {
                     bail!(
                         "Kubernetes `dockerconfigjson` secrets always use `{DOCKERCONFIGJSON_KEY}`; remove `key`"
