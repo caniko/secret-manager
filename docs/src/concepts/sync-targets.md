@@ -146,7 +146,6 @@ services.secretSync.targets."registry-pull" = {
 | `username`     | `dockerconfigjson` | Required; must not contain `:`                                     |
 | `fieldManager` | both               | Server-side apply manager; defaults to `secret-manager`            |
 | `render`       | `opaque`           | `raw` (default) or `sha256-hex`: the value's lowercase hex SHA-256 |
-| `allowEmpty`   | `opaque`           | Deliver an empty value instead of refusing it; defaults to `false` |
 
 `opaque` stores the value base64-encoded under `key` with `type: Opaque`.
 `dockerconfigjson` stores `{"auths":{"<registry>":{"username","password","auth"}}}`

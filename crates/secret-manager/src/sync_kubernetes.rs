@@ -264,13 +264,18 @@ fn import_member(
             member.source
         );
     }
-    if value.is_empty() && !member.allow_empty {
-        bail!("live value is empty; set `allowEmpty` to import it");
+    if value.is_empty() {
+        bail!("the live value is empty; empty keys cannot be imported");
     }
     let path = root.join(relative);
     let parent = path.parent().context("source has no parent directory")?;
     std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-    encryptor.encrypt_new_allowing_empty(&path, value)
+    // Decryption strips one trailing newline, so store one: every value,
+    // including one that itself ends in a newline, then round-trips exactly.
+    let mut plaintext = Zeroizing::new(Vec::with_capacity(value.len() + 1));
+    plaintext.extend_from_slice(value);
+    plaintext.push(b'\n');
+    encryptor.encrypt_new(&path, &plaintext)
 }
 
 fn destination(record: &ManagedRecord) -> Result<&KubernetesDestination> {
@@ -417,9 +422,8 @@ fn redact_text(text: &[u8], needles: &[Zeroizing<String>]) -> String {
     format!("{}…", &line[..end])
 }
 
-/// Render every member of the record, refusing empty values without
-/// `allowEmpty` and unclean dockerconfigjson passwords. Values are in member
-/// order.
+/// Render every member of the record, refusing empty values and unclean
+/// dockerconfigjson passwords. Values are in member order.
 fn render(record: &ManagedRecord, values: &[Zeroizing<String>]) -> Result<Object> {
     let destination = destination(record)?;
     if record.members.is_empty() || values.len() != record.members.len() {
@@ -430,10 +434,9 @@ fn render(record: &ManagedRecord, values: &[Zeroizing<String>]) -> Result<Object
     match destination.format {
         KubernetesFormat::Opaque => {
             for (member, value) in record.members.iter().zip(values) {
-                if value.is_empty() && !member.allow_empty {
+                if value.is_empty() {
                     bail!(
-                        "refusing to sync kubernetes {}/{}/secret/{} key {}: the decrypted value \
-                         is empty; set `allowEmpty` to deliver an empty key",
+                        "refusing to sync kubernetes {}/{}/secret/{} key {}: the decrypted value is empty",
                         destination.context,
                         destination.namespace,
                         destination.secret,
@@ -592,6 +595,7 @@ struct LiveMetadata {
     managed_fields: Vec<serde_json::Value>,
 }
 
+#[derive(PartialEq)]
 struct Hidden(Zeroizing<String>);
 
 impl<'de> Deserialize<'de> for Hidden {
@@ -704,10 +708,7 @@ fn compare(record: &ManagedRecord, object: &Object, live: Option<&LiveSecret>) -
             Some(encoded) => {
                 let live_bytes = decode(&encoded.0).unwrap_or_default();
                 let equal = if destination.format == KubernetesFormat::Dockerconfigjson {
-                    // ponytail: normalized documents are compared as serde_json
-                    // values, which are not zeroized; dockerconfigjson Secrets
-                    // hold one small document, so the window is one comparison.
-                    json_equal(&item.bytes, &live_bytes)
+                    dockerconfig_equal(&item.bytes, &live_bytes)
                 } else {
                     item.bytes[..] == live_bytes[..]
                 };
@@ -783,10 +784,21 @@ fn ownership_handoff(applied: &LiveSecret, manager: &str) -> Option<String> {
     })
 }
 
-fn json_equal(declared: &[u8], live: &[u8]) -> bool {
+/// A dockerconfigjson document, normalized: registry to field to value, every
+/// value zeroized. Anything else (another top-level key, a non-string field)
+/// fails to parse and so compares `different`.
+#[derive(Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct DockerConfig {
+    auths: BTreeMap<String, BTreeMap<String, Hidden>>,
+}
+
+/// Equal as documents, ignoring key order and whitespace. Parse errors are
+/// discarded unread.
+fn dockerconfig_equal(declared: &[u8], live: &[u8]) -> bool {
     match (
-        serde_json::from_slice::<serde_json::Value>(declared),
-        serde_json::from_slice::<serde_json::Value>(live),
+        serde_json::from_slice::<DockerConfig>(declared),
+        serde_json::from_slice::<DockerConfig>(live),
     ) {
         (Ok(declared), Ok(live)) => declared == live,
         _ => false,
@@ -1095,11 +1107,11 @@ username = "robot"
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         // A stand-in for lib.mkAgenixStreamEncryptor: emits a fixed age header
-        // and records only the plaintext length.
+        // and records the synthetic plaintext it was handed.
         let script = dir.path().join("encryptor");
         std::fs::write(
             &script,
-            "#!/bin/sh\n[ \"$1\" = encrypt ] || exit 2\nwc -c > \"$0.len\"\n\
+            "#!/bin/sh\n[ \"$1\" = encrypt ] || exit 2\ncat > \"$0.plain\"\n\
              printf 'age-encryption.org/v1\\n-> X25519 fixture\\n%064d\\n--- end\\n' 0\n",
         )
         .unwrap();
@@ -1112,26 +1124,49 @@ username = "robot"
             target: "clickhouse".into(),
             source: "age/secrets/home/can/app/syndb_clickhouse_password.age".into(),
             render: None,
-            allow_empty: false,
         };
         import_member(&root, &member, b"live-value", &encryptor).unwrap();
         let written = std::fs::read(root.join(&member.source)).unwrap();
         assert!(written.starts_with(b"age-encryption.org/v1\n"));
-        assert_eq!(
-            std::fs::read_to_string(script.with_extension("len"))
-                .unwrap()
-                .trim(),
-            "10"
-        );
+        // Decryption strips exactly one trailing newline, so the stored
+        // plaintext carries one more than the live value, even when the value
+        // itself ends in a newline.
+        let plain = || std::fs::read(script.with_extension("plain")).unwrap();
+        assert_eq!(plain(), b"live-value\n");
+        member.source = "age/secrets/home/can/app/syndb_with_newline.age".into();
+        import_member(&root, &member, b"pem\n", &encryptor).unwrap();
+        assert_eq!(plain(), b"pem\n\n");
         // Never overwrites an existing source.
         assert!(import_member(&root, &member, b"other", &encryptor).is_err());
-        // Empty only with allowEmpty; paths stay inside the store.
+        // Empty values are refused; paths stay inside the store.
         member.source = "age/secrets/home/can/oauth/syndb_oa_gitlab_secret.age".into();
         assert!(import_member(&root, &member, b"", &encryptor).is_err());
-        member.allow_empty = true;
-        import_member(&root, &member, b"", &encryptor).unwrap();
         member.source = "../escape.age".into();
         assert!(import_member(&root, &member, b"x", &encryptor).is_err());
+    }
+
+    #[test]
+    fn dockerconfig_compares_as_documents_and_default_manager_groups() {
+        let declared = br#"{"auths":{"r":{"username":"u","password":"p","auth":"dTpw"}}}"#;
+        let reordered =
+            br#"{ "auths": { "r": { "auth": "dTpw", "password": "p", "username": "u" } } }"#;
+        assert!(dockerconfig_equal(declared, reordered));
+        for different in [
+            &br#"{"auths":{"r":{"username":"u","password":"q","auth":"dTpx"}}}"#[..],
+            br#"{"auths":{"r":{"auth":"dTpw"}}}"#,
+            br#"{"auths":{"r":{"username":"u","password":"p","auth":"dTpw"}},"credsStore":"x"}"#,
+            b"not json",
+        ] {
+            assert!(!dockerconfig_equal(declared, different));
+        }
+        // An explicit `fieldManager = "secret-manager"` is the implicit default.
+        let records = desired_records(&doc(serde_json::json!({
+            "a": {"secret":"age/a.age","name":"A","kubernetes":[member("api","a",serde_json::json!({}))]},
+            "b": {"secret":"age/b.age","name":"B","kubernetes":[
+                member("api","b",serde_json::json!({"fieldManager":"secret-manager"}))]},
+        })))
+        .unwrap();
+        assert_eq!(records[0].members.len(), 2);
     }
 
     #[test]

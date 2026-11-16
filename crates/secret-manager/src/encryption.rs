@@ -51,23 +51,7 @@ impl StreamEncryptor {
     /// in memory before encryption. No plaintext file or command argument.
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
         ensure!(
-            !plaintext.is_empty(),
-            "credential payload must be nonempty and at most 512 KiB"
-        );
-        self.encrypt_bytes(plaintext)
-    }
-
-    /// [`Self::encrypt_new`] for a value declared `allowEmpty`, such as an
-    /// optional key imported from a live Kubernetes Secret.
-    pub fn encrypt_new_allowing_empty(&self, path: &Path, plaintext: &[u8]) -> Result<()> {
-        require_missing(path)?;
-        let ciphertext = self.encrypt_bytes(plaintext)?;
-        persist(path, &ciphertext, None)
-    }
-
-    fn encrypt_bytes(&self, plaintext: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
-        ensure!(
-            plaintext.len() <= MAX_BYTES / 2,
+            !plaintext.is_empty() && plaintext.len() <= MAX_BYTES / 2,
             "credential payload must be nonempty and at most 512 KiB"
         );
         disable_core_dumps()?;

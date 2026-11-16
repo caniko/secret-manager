@@ -321,7 +321,6 @@ impl SyncArgs {
                             &store,
                             &record_value(record),
                             decrypt_session.as_ref(),
-                            false,
                         )?;
                         push_managed_record(record, &value)
                     },
@@ -1015,7 +1014,6 @@ fn crow_secret_args(action: &str, repo: &str, name: &str, with_value: bool) -> V
 }
 
 /// The decrypted value of every member of a Kubernetes record, in member order.
-/// Emptiness is judged per member against `allowEmpty` when rendering.
 fn member_values(
     cache: &mut SyncValueCache,
     store: &Store,
@@ -1025,14 +1023,7 @@ fn member_values(
     record
         .members
         .iter()
-        .map(|member| {
-            cache.get(
-                store,
-                &SyncValue::Secret(member.source.clone()),
-                session,
-                true,
-            )
-        })
+        .map(|member| cache.get(store, &SyncValue::Secret(member.source.clone()), session))
         .collect()
 }
 
@@ -1047,13 +1038,13 @@ impl SyncValueCache {
         store: &Store,
         value: &SyncValue,
         decrypt_session: Option<&age::DecryptSession>,
-        allow_empty: bool,
     ) -> Result<zeroize::Zeroizing<String>> {
         match value {
             SyncValue::Secret(secret) => {
                 let path = validated_secret_path(store, secret)?;
                 let key = SyncValueCacheKey::new(SyncValueCacheKind::Secret, path.clone());
-                let value = self.get_or_load(key, || {
+                // Rejects an empty payload and strips one trailing newline.
+                self.get_or_load(key, || {
                     let session = decrypt_session.ok_or_else(|| {
                         anyhow!(
                             "encrypted sync target {} requires an age decrypt session",
@@ -1061,11 +1052,7 @@ impl SyncValueCache {
                         )
                     })?;
                     age::decrypt_with_session(&path, session)
-                })?;
-                if value.is_empty() && !allow_empty {
-                    bail!("decrypted payload of {} is empty", path.display());
-                }
-                Ok(value)
+                })
             }
             SyncValue::Source(source) => {
                 let path = validated_source_path(store, source)?;
@@ -2018,12 +2005,7 @@ mod tests {
         let mut cache = SyncValueCache::default();
 
         let got = cache
-            .get(
-                &store,
-                &SyncValue::Source("public.asc".to_string()),
-                None,
-                false,
-            )
+            .get(&store, &SyncValue::Source("public.asc".to_string()), None)
             .unwrap();
 
         assert_eq!(got.as_str(), content);

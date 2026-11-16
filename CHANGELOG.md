@@ -13,7 +13,7 @@
   rewritten after the next successful sync; a version 1 binary refuses a
   version 2 file, so upgrade every workstation that syncs.
 - Breaking for Rust callers: `ManagedRecord` gains `members`,
-  `KubernetesDestination` gains `render` and `allowEmpty`, and `SyncArgs` gains
+  `KubernetesDestination` gains `render`, and `SyncArgs` gains
   `verify`, `import`, `adopt` and `encryptor`; exhaustive struct literals must
   add them.
 - A Kubernetes Secret may now be declared by several destinations, across
@@ -26,15 +26,16 @@
 
 ### Added
 
-- `render = "raw" | "sha256-hex"` and `allowEmpty` on `opaque` Kubernetes
-  destinations, in the Rust schema, the NixOS module and `SecretRegistry.pkl`.
-  An empty decrypted value is refused unless `allowEmpty` is set.
+- `render = "raw" | "sha256-hex"` on `opaque` Kubernetes destinations, in the
+  Rust schema, the NixOS module and `SecretRegistry.pkl`. Empty values are
+  refused.
 - `sync --verify`: prints `equal`, `different`, `missing-live` or
   `undeclared-live` per key and `foreign-manager` for other data owners; key
   names only, nothing applied.
 - `sync --import`: encrypts a live key into a missing `raw` opaque source at
   its declared path, creating the directory; never overwrites, no hardware key.
-  `StreamEncryptor::encrypt_new_allowing_empty` backs `allowEmpty` members.
+  The stored plaintext ends in one newline, which decryption strips, so a live
+  value that itself ends in a newline verifies `equal`.
 - `sync --adopt`: re-verifies, applies under the read `resourceVersion`, then
   hands `data` ownership to this field manager with a `resourceVersion`-tested
   JSON patch of `managedFields`.

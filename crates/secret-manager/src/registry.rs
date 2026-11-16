@@ -575,9 +575,6 @@ fn render_sync(out: &mut String, sync: &SyncTarget, level: usize) {
                     };
                     render_string_field(out, "render", render, level + 3);
                 }
-                if let Some(allow_empty) = destination.allow_empty {
-                    render_bool_field(out, "allowEmpty", allow_empty, level + 3);
-                }
                 indent(out, level + 2);
                 out.push_str("}\n");
             }

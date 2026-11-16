@@ -43,8 +43,8 @@ pub struct ManagedRecord {
     /// Kubernetes only: `host` is the kubectl context, `owner` the namespace
     /// and `repo` and `name` the Secret name. The data keys are not part of the
     /// identity, so renaming or removing one never schedules the live Secret
-    /// for pruning. The destination holds the object-level fields; `key`,
-    /// `render` and `allowEmpty` live on each member.
+    /// for pruning. The destination holds the object-level fields; `key` and
+    /// `render` live on each member.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kubernetes: Option<KubernetesDestination>,
     /// Kubernetes only, sorted by key: every declared data key of the Secret.
@@ -61,12 +61,6 @@ pub struct KubernetesMember {
     pub source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub render: Option<KubernetesRender>,
-    #[serde(
-        default,
-        rename = "allowEmpty",
-        skip_serializing_if = "std::ops::Not::not"
-    )]
-    pub allow_empty: bool,
 }
 
 impl KubernetesMember {
@@ -379,12 +373,15 @@ fn add_kubernetes_member(
         target: target_key.to_string(),
         source: source.to_string(),
         render: destination.render,
-        allow_empty: destination.allows_empty(),
     };
     let object_destination = KubernetesDestination {
         key: None,
         render: None,
-        allow_empty: None,
+        // An explicit default is the implicit one: members compare equal.
+        field_manager: destination
+            .field_manager
+            .clone()
+            .filter(|manager| manager != crate::sync_targets::DEFAULT_FIELD_MANAGER),
         ..destination.clone()
     };
     let object = destination.object();
@@ -448,7 +445,6 @@ fn upgrade_v1_record(mut record: ManagedRecord) -> ManagedRecord {
             target: record.target.clone(),
             source: record.source.clone(),
             render: None,
-            allow_empty: false,
         });
         record.kubernetes = Some(KubernetesDestination {
             key: None,
