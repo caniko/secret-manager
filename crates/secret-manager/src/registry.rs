@@ -568,6 +568,13 @@ fn render_sync(out: &mut String, sync: &SyncTarget, level: usize) {
                         render_string_field(out, name, value, level + 3);
                     }
                 }
+                if let Some(render) = destination.render {
+                    let render = match render {
+                        crate::sync_targets::KubernetesRender::Raw => "raw",
+                        crate::sync_targets::KubernetesRender::Sha256Hex => "sha256-hex",
+                    };
+                    render_string_field(out, "render", render, level + 3);
+                }
                 indent(out, level + 2);
                 out.push_str("}\n");
             }

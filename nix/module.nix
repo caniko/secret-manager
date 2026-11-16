@@ -144,14 +144,21 @@
               default = null;
               description = "Server-side apply field manager. Defaults to `secret-manager`.";
             };
+            render = lib.mkOption {
+              type = lib.types.nullOr (lib.types.enum ["raw" "sha256-hex"]);
+              default = null;
+              description = "`opaque` only: `raw` (default) writes the value, `sha256-hex` its lowercase hex SHA-256.";
+            };
           };
         });
         default = [];
         description = ''
           Kubernetes Secret destinations for encrypted `secret` sources. The
           value is applied with `kubectl apply --server-side`, passed on
-          stdin only. Each Secret may be declared once, because server-side
-          apply by a single field manager would drop sibling keys.
+          stdin only. Destinations naming the same context, namespace and
+          Secret, across targets, are members of one Secret: they are applied
+          together as one manifest, need distinct keys and one format and
+          field manager, and a `dockerconfigjson` Secret has one member.
         '';
         example = [
           {

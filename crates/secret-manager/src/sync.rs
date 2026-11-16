@@ -68,11 +68,65 @@ pub struct SyncArgs {
     /// Defaults to `<secret-store>/.secret-manager/sync-state.toml`.
     #[arg(long, value_name = "PATH")]
     pub state: Option<PathBuf>,
+
+    /// Kubernetes only: decrypt, read each live Secret and print per key
+    /// `equal`, `different`, `missing-live` or `undeclared-live`, plus any
+    /// `foreign-manager` owning data. Names keys only; applies nothing.
+    #[arg(long)]
+    pub verify: bool,
+
+    /// Kubernetes only: for each `raw` opaque member whose source file is
+    /// missing, encrypt the live key to the master recipients at the declared
+    /// path. Never overwrites and needs no hardware key.
+    #[arg(long)]
+    pub import: bool,
+
+    /// Kubernetes only: verify, then apply under the read resourceVersion and
+    /// hand data ownership to this field manager. Refuses unless every key is
+    /// `equal` and no live key is undeclared.
+    #[arg(long)]
+    pub adopt: bool,
+
+    /// `lib.mkAgenixStreamEncryptor` executable for `--import`; defaults to
+    /// `SECRET_MANAGER_AGE_ENCRYPTOR`. Set by embedding frontends.
+    #[arg(skip)]
+    pub encryptor: Option<PathBuf>,
+}
+
+/// What a run does with the selected records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Push,
+    Plan,
+    Verify,
+    Import,
+    Adopt,
 }
 
 impl SyncArgs {
+    fn mode(&self) -> Result<Mode> {
+        let modes = [
+            (self.dry_run || self.check, Mode::Plan, "--check"),
+            (self.verify, Mode::Verify, "--verify"),
+            (self.import, Mode::Import, "--import"),
+            (self.adopt, Mode::Adopt, "--adopt"),
+        ];
+        let chosen: Vec<_> = modes.iter().filter(|(on, _, _)| *on).collect();
+        match chosen.as_slice() {
+            [] => Ok(Mode::Push),
+            [(_, mode, flag)] => {
+                if self.prune && *mode != Mode::Plan {
+                    bail!("--prune cannot be combined with {flag}");
+                }
+                Ok(*mode)
+            }
+            [(_, _, first), (_, _, second), ..] => bail!("{first} and {second} are exclusive"),
+        }
+    }
+
     pub fn run(self) -> Result<()> {
         validate_target_prune_args(&self.targets, self.prune)?;
+        self.mode()?;
         let doc = self.load_document()?;
         // The original stdin may already be consumed. Replay the complete
         // public document; the child reapplies the preserved --target
@@ -99,14 +153,36 @@ impl SyncArgs {
         // narrows which targets are pushed.
         let declared_state = desired_records(&doc)?;
         let doc = filter_document_targets(doc, &self.targets)?;
+        let added: Vec<String> = doc
+            .iter_targets()
+            .map(|(_, name, _)| name.to_string())
+            .filter(|name| !self.targets.is_empty() && !self.targets.contains(name))
+            .collect();
         let total = doc.total_targets();
         let desired_state = desired_records(&doc)?;
+        let mode = self.mode()?;
+        if matches!(mode, Mode::Verify | Mode::Import | Mode::Adopt)
+            && let Some(record) = desired_state
+                .iter()
+                .find(|record| record.provider != Provider::Kubernetes)
+        {
+            bail!(
+                "--verify, --import and --adopt act on Kubernetes targets only; `{}` is not one \
+                 (select targets with --target)",
+                record.target
+            );
+        }
         let needs_decrypt = records_need_decrypt_session(&desired_state);
         with_sync_protection(
-            needs_decrypt && !(self.dry_run || self.check),
+            needs_decrypt && mode != Mode::Plan,
             enter_scope,
             acquire,
             || {
+                for name in &added {
+                    ui::info(format!(
+                        "also selecting `{name}`: it writes a Kubernetes Secret a selected target writes"
+                    ));
+                }
                 ui::step("discovering secret store");
                 let store = Store::discover()?;
                 if self.verbose {
@@ -133,7 +209,7 @@ impl SyncArgs {
                     ));
                 }
 
-                if self.dry_run || self.check {
+                if mode == Mode::Plan {
                     if self.check {
                         println!("Planned pushes (--check):");
                     } else {
@@ -145,6 +221,9 @@ impl SyncArgs {
                         println!("  kind:   {}", kind_label(record.kind));
                         println!("  source: {}", record.source);
                         println!("  name:   {}", record.name);
+                        for member in record.members.iter().skip(1) {
+                            println!("  member: {} from {}", member.target, member.source);
+                        }
                         println!("  → {}", record.destination_label());
                     }
                     print_stale_records(&stale, self.prune);
@@ -153,13 +232,36 @@ impl SyncArgs {
                     return Ok(());
                 }
 
+                if mode == Mode::Import {
+                    let encryptor = match &self.encryptor {
+                        Some(path) => crate::encryption::StreamEncryptor::new(path.clone())?,
+                        None => crate::encryption::StreamEncryptor::from_env()?,
+                    };
+                    let complete = crate::encryption::with_store_write_lock(&store.root, || {
+                        let mut complete = true;
+                        for record in &desired_state {
+                            complete &=
+                                crate::sync_kubernetes::import(record, &store.root, &encryptor)?;
+                        }
+                        Ok(complete)
+                    })?;
+                    if !complete {
+                        bail!("some declared keys were not imported; see the report above");
+                    }
+                    ui::success("import complete; verify, then stage the new sources");
+                    return Ok(());
+                }
+
+                // All members of every selected Secret are decrypted up front,
+                // in one plugin session: one hardware touch per run.
                 let decrypt_session = if needs_decrypt {
                     let identities = store.resolve_identities(&self.identities)?;
                     let session = age::DecryptSession::from_identities(&identities)?;
                     let secrets: Vec<PathBuf> = desired_state
                         .iter()
                         .filter(|record| record.kind == ManagedKind::Secret)
-                        .filter_map(|record| validated_secret_path(&store, &record.source).ok())
+                        .flat_map(crate::sync_kubernetes::record_sources)
+                        .filter_map(|source| validated_secret_path(&store, source).ok())
                         .collect();
                     session.prefetch(&secrets)?;
                     Some(session)
@@ -167,6 +269,26 @@ impl SyncArgs {
                     None
                 };
                 let mut value_cache = SyncValueCache::default();
+                if mode == Mode::Verify {
+                    let mut clean = true;
+                    for record in &desired_state {
+                        clean &= crate::sync_kubernetes::verify(
+                            record,
+                            &member_values(
+                                &mut value_cache,
+                                &store,
+                                record,
+                                decrypt_session.as_ref(),
+                            )?,
+                        )?;
+                    }
+                    if !clean {
+                        bail!("live Secrets differ from their declarations; see the report above");
+                    }
+                    ui::success("every declared key is equal");
+                    return Ok(());
+                }
+
                 push_and_commit(
                     &desired_state,
                     &previous_state.managed,
@@ -181,6 +303,19 @@ impl SyncArgs {
                         ));
                         if self.verbose {
                             ui::info(format!("destination: {}", record.destination_label()));
+                        }
+                        if record.provider == Provider::Kubernetes {
+                            let values = member_values(
+                                &mut value_cache,
+                                &store,
+                                record,
+                                decrypt_session.as_ref(),
+                            )?;
+                            return if mode == Mode::Adopt {
+                                crate::sync_kubernetes::adopt(record, &values)
+                            } else {
+                                crate::sync_kubernetes::push(record, &values)
+                            };
                         }
                         let value = value_cache.get(
                             &store,
@@ -532,10 +667,12 @@ fn filter_document_targets(mut doc: SyncDocument, targets: &[String]) -> Result<
         return Ok(doc);
     }
     let requested = targets.iter().cloned().collect::<BTreeSet<_>>();
+    // Kubernetes Secrets are applied whole: selecting one member selects all.
+    let selected = crate::sync_kubernetes::expand_selection(&doc, &requested);
     let mut found = BTreeSet::new();
     for host in &mut doc.hosts {
         host.targets.retain(|name, _| {
-            let keep = requested.contains(name);
+            let keep = selected.contains(name);
             if keep {
                 found.insert(name.clone());
             }
@@ -644,7 +781,7 @@ fn push_managed_record(record: &ManagedRecord, value: &str) -> Result<()> {
         Provider::Forgejo => push_forgejo_record(record, value),
         Provider::Github => push_github_record(record, value),
         Provider::Crow => push_crow_record(record, value),
-        Provider::Kubernetes => crate::sync_kubernetes::push(record, value),
+        Provider::Kubernetes => bail!("Kubernetes records are applied as whole Secrets"),
     }
 }
 
@@ -876,6 +1013,20 @@ fn crow_secret_args(action: &str, repo: &str, name: &str, with_value: bool) -> V
     args
 }
 
+/// The decrypted value of every member of a Kubernetes record, in member order.
+fn member_values(
+    cache: &mut SyncValueCache,
+    store: &Store,
+    record: &ManagedRecord,
+    session: Option<&age::DecryptSession>,
+) -> Result<Vec<zeroize::Zeroizing<String>>> {
+    record
+        .members
+        .iter()
+        .map(|member| cache.get(store, &SyncValue::Secret(member.source.clone()), session))
+        .collect()
+}
+
 #[derive(Default)]
 struct SyncValueCache {
     values: HashMap<SyncValueCacheKey, zeroize::Zeroizing<String>>,
@@ -892,6 +1043,7 @@ impl SyncValueCache {
             SyncValue::Secret(secret) => {
                 let path = validated_secret_path(store, secret)?;
                 let key = SyncValueCacheKey::new(SyncValueCacheKind::Secret, path.clone());
+                // Rejects an empty payload and strips one trailing newline.
                 self.get_or_load(key, || {
                     let session = decrypt_session.ok_or_else(|| {
                         anyhow!(
@@ -899,7 +1051,7 @@ impl SyncValueCache {
                             path.display()
                         )
                     })?;
-                    decrypt_sync_secret(&path, session)
+                    age::decrypt_with_session(&path, session)
                 })
             }
             SyncValue::Source(source) => {
@@ -968,14 +1120,6 @@ fn validated_source_path(store: &Store, source: &str) -> Result<PathBuf> {
 fn canonical_source_path(path: &Path) -> Result<PathBuf> {
     path.canonicalize()
         .with_context(|| format!("canonicalizing {}", path.display()))
-}
-
-fn decrypt_sync_secret(path: &Path, session: &age::DecryptSession) -> Result<String> {
-    let value = age::decrypt_with_session(path, session)?;
-    if value.is_empty() {
-        bail!("decrypted payload is empty");
-    }
-    Ok(value)
 }
 
 fn read_plaintext_source_path(source_path: &Path) -> Result<String> {
@@ -1338,6 +1482,10 @@ mod tests {
             prune: false,
             verbose: false,
             state: Some(state.clone()),
+            verify: false,
+            import: false,
+            adopt: false,
+            encryptor: None,
         };
         let scoped = Cell::new(0);
         args()
@@ -1582,6 +1730,10 @@ mod tests {
             prune: false,
             verbose: false,
             state: None,
+            verify: false,
+            import: false,
+            adopt: false,
+            encryptor: None,
         };
         // Just verify load_document succeeds — dry-run doesn't need a store
         let doc = args.load_document().unwrap();
@@ -1817,6 +1969,10 @@ mod tests {
             prune: false,
             verbose: false,
             state: None,
+            verify: false,
+            import: false,
+            adopt: false,
+            encryptor: None,
         };
         let err = args.load_document().unwrap_err();
         assert!(err.to_string().contains("no input"));
@@ -1998,6 +2154,7 @@ mod tests {
             target: "token".to_string(),
             source: "age/secrets/token.age".to_string(),
             kubernetes: None,
+            members: Vec::new(),
         }
     }
 
@@ -2015,6 +2172,7 @@ mod tests {
             target: "token".to_string(),
             source: "age/secrets/token.age".to_string(),
             kubernetes: None,
+            members: Vec::new(),
         }
     }
 
@@ -2032,6 +2190,7 @@ mod tests {
             target: "token".to_string(),
             source: "age/secrets/token.age".to_string(),
             kubernetes: None,
+            members: Vec::new(),
         }
     }
 }

@@ -145,23 +145,53 @@ services.secretSync.targets."registry-pull" = {
 | `registry`     | `dockerconfigjson` | Registry key in `auths`; defaults to `https://index.docker.io/v1/` |
 | `username`     | `dockerconfigjson` | Required; must not contain `:`                                     |
 | `fieldManager` | both               | Server-side apply manager; defaults to `secret-manager`            |
+| `render`       | `opaque`           | `raw` (default) or `sha256-hex`: the value's lowercase hex SHA-256 |
 
 `opaque` stores the value base64-encoded under `key` with `type: Opaque`.
 `dockerconfigjson` stores `{"auths":{"<registry>":{"username","password","auth"}}}`
 under `.dockerconfigjson` with `type: kubernetes.io/dockerconfigjson`, using the
 decrypted value as the password. Invalid names, mixed fields (for example
-`registry` on an `opaque` destination), plaintext `source` values and a Secret
-declared twice are rejected before any decryption or `kubectl` call. Server-side
-apply by one field manager owns the whole `data` map, so one Secret has exactly
-one declaration. `--prune` deletes a Secret that is no longer declared.
+`registry` on an `opaque` destination) and plaintext `source` values are
+rejected before any decryption or `kubectl` call.
+
+### Multi-key Secrets
+
+Destinations that name the same `context`, `namespace` and `secret`, in one
+target or across targets, are the members of one Secret:
+
+```nix
+targets.clickhouse-app = {
+  secret = "age/secrets/home/can/app/syndb_clickhouse_password.age";
+  name = "clickhouse_password";
+  kubernetes = [
+    { context = "nautilus"; namespace = "syndb"; secret = "syndb-api-secrets"; format = "opaque"; key = "clickhouse_password"; }
+    { context = "nautilus"; namespace = "syndb"; secret = "syndb-clickhouse-auth"; format = "opaque"; key = "app_password_sha256"; render = "sha256-hex"; }
+  ];
+};
+```
+
+Members of one Secret need distinct keys and share one `format` and
+`fieldManager`; a `dockerconfigjson` Secret has exactly one member. All members
+are decrypted first, in one unlock, then applied as one server-side apply: a
+failure applies nothing, and the Secret holds exactly the declared keys.
+Selecting one member with `--target` selects the whole Secret. Removing a member
+keeps the Secret and drops that key on the next apply, once this field manager
+is the only data owner (see `--adopt` in the [CLI reference](../reference/cli.md)).
+`--prune` deletes a Secret only when none of its members is declared.
 
 ### Leak guarantees
 
 The decrypted value is only ever in zeroized buffers and in the manifest piped to
 `kubectl` on stdin. Specifically:
 
-- It is never in `kubectl`'s argv or environment, and `-o`/`--output` and
-  `-v`/`--v` are never passed, so `kubectl` has nothing verbose to echo.
+- It is never in `kubectl`'s argv or environment, and `-v`/`--v` is never
+  passed, so `kubectl` has nothing verbose to echo. `-o json` is passed only to
+  `get` (for `--verify`, `--import` and `--adopt`) and to the `--adopt` apply;
+  that stdout carries live values, is parsed in memory into zeroized buffers and
+  is never part of a report, so only stderr is reported for those calls.
+- `--verify`, `--import` and `--adopt` print key names and states only, never a
+  value, hash or length. The ownership handoff patch carries managed field
+  names, never values.
 - `kubectl`'s stdout and stderr are captured through the same bounded private
   pipes as the other credential helpers (1 MiB cap, 90 s deadline, no core
   dumps, inherited sleep inhibitor, process-group cleanup). Nothing is forwarded
@@ -174,7 +204,8 @@ The decrypted value is only ever in zeroized buffers and in the manifest piped t
 - On success the only output is `kubernetes <context>/<namespace>/secret/<name>:
 applied`. `--dry-run` and `--check` print the destination and the data key
   names only, and never decrypt.
-- The sync state file records destination metadata (context, namespace, Secret
+- The sync state file (version 2: one record per Secret with its `members`)
+  records destination metadata (context, namespace, Secret
   name, key, registry, username) and never a value.
 
 Redaction is a backstop, not the control: the value is kept out of every channel
