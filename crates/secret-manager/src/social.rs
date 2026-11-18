@@ -39,6 +39,10 @@ const BLUESKY: &[Input] = &[
         name: "password",
         secret: true,
     },
+    Input {
+        name: "pds",
+        secret: false,
+    },
 ];
 const MASTODON: &[Input] = &[
     Input {
@@ -123,6 +127,7 @@ pub static PLATFORMS: &[Platform] = &[
 pub struct Identity {
     pub account_id: String,
     pub handle: String,
+    pub origin: Option<String>,
 }
 
 /// Look up a platform by its CLI name.
@@ -155,6 +160,14 @@ pub fn render(
 
 /// Parse a successful provider response, rejecting incomplete identities.
 pub fn parse_identity(p: &Platform, body: &Value) -> Result<Identity> {
+    if p.name == "facebook-page" {
+        ensure!(
+            body.get("category")
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.is_empty()),
+            "provider response is not a Facebook Page"
+        );
+    }
     let (id, handle) = match p.name {
         "bluesky" => ("did", "handle"),
         "mastodon" => ("id", "acct"),
@@ -180,7 +193,83 @@ pub fn parse_identity(p: &Platform, body: &Value) -> Result<Identity> {
             id.to_owned()
         },
         handle: handle.to_owned(),
+        origin: None,
     })
+}
+
+fn origin(value: &str) -> Result<String> {
+    let url = url::Url::parse(value).map_err(|_| anyhow::anyhow!("invalid origin"))?;
+    ensure!(
+        url.scheme() == "https"
+            && url.host_str().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+            && url.path() == "/",
+        "must be an HTTPS origin"
+    );
+    Ok(url.origin().ascii_serialization())
+}
+
+fn did_url(did: &str) -> Result<String> {
+    if let Some(id) = did.strip_prefix("did:plc:") {
+        ensure!(
+            !id.is_empty()
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()),
+            "invalid PLC DID"
+        );
+        Ok(format!("https://plc.directory/{did}"))
+    } else if let Some(host) = did.strip_prefix("did:web:") {
+        ensure!(
+            !host.is_empty()
+                && host
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-'),
+            "unsupported web DID"
+        );
+        Ok(format!("https://{host}/.well-known/did.json"))
+    } else {
+        bail!("unsupported DID method")
+    }
+}
+
+fn check_pds(did: &str, pds: &str, doc: &Value) -> Result<()> {
+    ensure!(
+        doc.get("id").and_then(Value::as_str) == Some(did),
+        "DID document identity mismatch"
+    );
+    let endpoint = doc
+        .get("service")
+        .and_then(Value::as_array)
+        .and_then(|services| {
+            services.iter().find(|s| {
+                s.get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id == "#atproto_pds" || id == format!("{did}#atproto_pds"))
+            })
+        })
+        .and_then(|s| s.get("serviceEndpoint"))
+        .and_then(Value::as_str)
+        .context("DID document missing PDS")?;
+    ensure!(
+        origin(endpoint)? == pds,
+        "account PDS does not match requested origin"
+    );
+    Ok(())
+}
+
+fn response_json(response: reqwest::blocking::Response) -> Result<Value> {
+    ensure!(
+        response.status().is_success(),
+        "provider rejected request (HTTP {})",
+        response.status().as_u16()
+    );
+    response
+        .json()
+        .map_err(|_| anyhow::anyhow!("invalid provider response"))
 }
 
 /// Verify once against the provider. Errors never include request URLs or bodies.
@@ -190,16 +279,67 @@ pub fn verify(p: &Platform, values: &BTreeMap<String, Zeroizing<String>>) -> Res
         .timeout(Duration::from_secs(30))
         .build()
         .context("could not initialize HTTP client")?;
+    let mut verified_origin = None;
+    let mut expected_did = None;
     let request = match p.name {
-        "bluesky" => client.post("https://bsky.social/xrpc/com.atproto.server.createSession").json(&json!({"identifier": input(values, "handle")?, "password": input(values, "password")?})),
-        "mastodon" => {
-            let url = url::Url::parse(input(values, "instance")?).map_err(|_| anyhow::anyhow!("invalid instance URL"))?;
-            ensure!(url.scheme() == "https" && url.host_str().is_some() && url.username().is_empty() && url.password().is_none() && url.query().is_none() && url.fragment().is_none() && (url.path() == "/" || url.path().is_empty()), "instance must be an HTTPS origin");
-            client.get(url.join("/api/v1/accounts/verify_credentials").map_err(|_| anyhow::anyhow!("invalid instance URL"))?).bearer_auth(input(values, "token")?)
+        "bluesky" => {
+            let pds = origin(
+                values
+                    .get("pds")
+                    .map_or("https://bsky.social", |v| v.as_str()),
+            )?;
+            let handle = input(values, "handle")?;
+            let did = if handle.starts_with("did:") {
+                handle.to_owned()
+            } else {
+                let mut url = url::Url::parse(
+                    "https://public.api.bsky.app/xrpc/com.atproto.identity.resolveHandle",
+                )?;
+                url.query_pairs_mut().append_pair("handle", handle);
+                let body = response_json(
+                    client
+                        .get(url)
+                        .send()
+                        .map_err(|_| anyhow::anyhow!("handle resolution failed"))?,
+                )?;
+                body.get("did")
+                    .and_then(Value::as_str)
+                    .context("handle resolution missing DID")?
+                    .to_owned()
+            };
+            let doc = response_json(
+                client
+                    .get(did_url(&did)?)
+                    .send()
+                    .map_err(|_| anyhow::anyhow!("DID resolution failed"))?,
+            )?;
+            check_pds(&did, &pds, &doc)?;
+            expected_did = Some(did);
+            verified_origin = Some(pds.clone());
+            client
+                .post(format!("{pds}/xrpc/com.atproto.server.createSession"))
+                .json(&json!({"identifier": handle, "password": input(values, "password")?}))
         }
-        "linkedin" => client.get("https://api.linkedin.com/v2/userinfo").bearer_auth(input(values, "token")?),
-        "threads" => client.get("https://graph.threads.net/v1.0/me?fields=id,username").bearer_auth(input(values, "token")?),
-        "facebook-page" => client.get("https://graph.facebook.com/v21.0/me?fields=id,name").bearer_auth(input(values, "token")?),
+        "mastodon" => {
+            let normalized = origin(input(values, "instance")?)?;
+            let url = url::Url::parse(&normalized)?;
+            verified_origin = Some(normalized);
+            client
+                .get(
+                    url.join("/api/v1/accounts/verify_credentials")
+                        .map_err(|_| anyhow::anyhow!("invalid instance URL"))?,
+                )
+                .bearer_auth(input(values, "token")?)
+        }
+        "linkedin" => client
+            .get("https://api.linkedin.com/v2/userinfo")
+            .bearer_auth(input(values, "token")?),
+        "threads" => client
+            .get("https://graph.threads.net/v1.0/me?fields=id,username")
+            .bearer_auth(input(values, "token")?),
+        "facebook-page" => client
+            .get("https://graph.facebook.com/v21.0/me?fields=id,name,category")
+            .bearer_auth(input(values, "token")?),
         _ => bail!("unsupported platform"),
     };
     let response = request
@@ -213,12 +353,43 @@ pub fn verify(p: &Platform, values: &BTreeMap<String, Zeroizing<String>>) -> Res
     let body: Value = response
         .json()
         .map_err(|_| anyhow::anyhow!("invalid provider response"))?;
-    parse_identity(p, &body)
+    let mut identity = parse_identity(p, &body)?;
+    if let Some(did) = expected_did {
+        ensure!(
+            identity.account_id == did,
+            "session DID does not match resolved account"
+        );
+    }
+    identity.origin = verified_origin;
+    Ok(identity)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recorded_pds_and_page_responses() {
+        let doc = json!({"id":"did:plc:abc", "service":[{"id":"#atproto_pds", "serviceEndpoint":"https://PDS.example:443/"}]});
+        assert!(check_pds("did:plc:abc", "https://pds.example", &doc).is_ok());
+        assert!(check_pds("did:plc:abc", "https://other.example", &doc).is_err());
+        assert!(
+            parse_identity(
+                platform("facebook-page").unwrap(),
+                &json!({"id":"123","name":"User"})
+            )
+            .is_err()
+        );
+        assert_eq!(
+            origin("https://EXAMPLE.com:443/").unwrap(),
+            "https://example.com"
+        );
+        assert_eq!(
+            origin("https://EXAMPLE.com:8443/").unwrap(),
+            "https://example.com:8443"
+        );
+        assert!(origin("https://example.com/path").is_err());
+    }
 
     #[test]
     fn recorded_responses_and_rendering() {
@@ -235,7 +406,11 @@ mod tests {
                 "urn:li:person:abc",
             ),
             ("threads", r#"{"id":"123","username":"alice"}"#, "123"),
-            ("facebook-page", r#"{"id":"456","name":"Page"}"#, "456"),
+            (
+                "facebook-page",
+                r#"{"id":"456","name":"Page","category":"Community"}"#,
+                "456",
+            ),
         ] {
             let p = platform(name).unwrap();
             assert_eq!(
