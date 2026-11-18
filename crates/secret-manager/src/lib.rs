@@ -25,6 +25,7 @@ pub mod rbw;
 pub mod registry;
 pub mod render;
 pub mod rotate;
+pub mod social;
 pub mod store;
 pub mod sync;
 mod sync_kubernetes;
