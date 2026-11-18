@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-18
+
+### Added
+
+- `social` module: a platform registry for social publishing credentials
+  (`platform`, `render` of n8n credentials) and identity verification
+  (`verify`, `parse_identity`). Bluesky resolves the account's PDS and
+  `did:web` documents only at public addresses and sends an app password only
+  to an approved, pinned PDS.
+
+### Fixed
+
+- `StreamEncryptor::encrypt_new` removes the new ciphertext when the
+  post-install directory sync fails, instead of leaving an unsynced source.
+
 ## [0.6.0] - 2026-11-16
 
 ### Changed
@@ -322,7 +337,8 @@ runner-env add`), and Pkl evaluation via nix-pklx.
 - Corrected "foregejo" typos to "forgejo" in Nix module paths and source
   references.
 
-[Unreleased]: https://github.com/caniko/secret-manager/compare/0.6.0...HEAD
+[Unreleased]: https://github.com/caniko/secret-manager/compare/0.6.1...HEAD
+[0.6.1]: https://github.com/caniko/secret-manager/compare/0.6.0...0.6.1
 [0.6.0]: https://github.com/caniko/secret-manager/compare/0.5.0...0.6.0
 [0.5.0]: https://github.com/caniko/secret-manager/compare/0.4.8...0.5.0
 [0.4.8]: https://github.com/caniko/secret-manager/compare/0.4.7...0.4.8
