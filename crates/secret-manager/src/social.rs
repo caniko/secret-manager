@@ -323,6 +323,17 @@ fn pinned_client(host: &str, port: u16) -> Result<reqwest::blocking::Client> {
         .context("could not initialize HTTP client")
 }
 
+/// A client for an approved IP-literal origin: public only, never proxied.
+fn literal_client(ip: std::net::IpAddr) -> Result<reqwest::blocking::Client> {
+    ensure!(is_public(ip), "{ip} is not a public address");
+    reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(30))
+        .no_proxy()
+        .build()
+        .context("could not initialize HTTP client")
+}
+
 /// Whether the app password may go to `pds`: a Bluesky-hosted PDS, or the
 /// origin the operator approved with `--input pds=…`. A DID document alone
 /// never decides where a password is sent.
@@ -416,10 +427,13 @@ pub fn verify(p: &Platform, values: &BTreeMap<String, Zeroizing<String>>) -> Res
                 "the account is hosted at {pds}; re-run with --input pds={pds} to approve sending its app password there"
             );
             let pds_url = url::Url::parse(&pds)?;
-            let session = pinned_client(
-                pds_url.host_str().context("PDS has no host")?,
-                pds_url.port_or_known_default().unwrap_or(443),
-            )?;
+            let port = pds_url.port_or_known_default().unwrap_or(443);
+            let session = match pds_url.host().context("PDS has no host")? {
+                url::Host::Domain(host) => pinned_client(host, port)?,
+                // An IP literal needs no lookup: check it, never proxy it.
+                url::Host::Ipv4(ip) => literal_client(ip.into())?,
+                url::Host::Ipv6(ip) => literal_client(ip.into())?,
+            };
             expected_did = Some(did);
             verified_origin = Some(pds.clone());
             session
