@@ -301,24 +301,53 @@ fn is_public(ip: std::net::IpAddr) -> bool {
     }
 }
 
-/// A client that reaches `host` only at an address checked public now, so a
-/// did:web document cannot point the request at an internal service.
-fn pinned_client(host: &str) -> Result<reqwest::blocking::Client> {
+/// A client that reaches `host:port` only at the addresses checked public
+/// now and never through a proxy (which would resolve the name itself), so a
+/// DID document or PDS endpoint cannot point a request at an internal service.
+fn pinned_client(host: &str, port: u16) -> Result<reqwest::blocking::Client> {
     use std::net::ToSocketAddrs;
-    let addrs: Vec<_> = (host, 443)
+    let addrs: Vec<_> = (host, port)
         .to_socket_addrs()
-        .map_err(|_| anyhow::anyhow!("could not resolve the DID host"))?
+        .map_err(|_| anyhow::anyhow!("could not resolve {host}"))?
         .collect();
     ensure!(
         !addrs.is_empty() && addrs.iter().all(|a| is_public(a.ip())),
-        "the DID host does not resolve to public addresses only"
+        "{host} does not resolve to public addresses only"
     );
     reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(30))
-        .resolve(host, addrs[0])
+        .no_proxy()
+        .resolve_to_addrs(host, &addrs)
         .build()
         .context("could not initialize HTTP client")
+}
+
+/// Whether the app password may go to `pds`: a Bluesky-hosted PDS, or the
+/// origin the operator approved with `--input pds=…`. A DID document alone
+/// never decides where a password is sent.
+fn pds_approved(pds: &str, requested: Option<&str>) -> Result<bool> {
+    if let Some(requested) = requested {
+        return Ok(origin(requested)? == pds);
+    }
+    let host = url::Url::parse(pds)?
+        .host_str()
+        .map(str::to_owned)
+        .unwrap_or_default();
+    Ok(host.ends_with(".host.bsky.network"))
+}
+
+/// The DID document must claim the handle back (`alsoKnownAs: at://HANDLE`),
+/// so a resolver answer alone cannot bind a handle to someone else's DID.
+fn claims_handle(doc: &Value, handle: &str) -> bool {
+    let expected = format!("at://{}", handle.to_ascii_lowercase());
+    doc.get("alsoKnownAs")
+        .and_then(Value::as_array)
+        .is_some_and(|aka| {
+            aka.iter()
+                .filter_map(Value::as_str)
+                .any(|a| a.to_ascii_lowercase() == expected)
+        })
 }
 
 fn response_json(response: reqwest::blocking::Response) -> Result<Value> {
@@ -364,7 +393,7 @@ pub fn verify(p: &Platform, values: &BTreeMap<String, Zeroizing<String>>) -> Res
             };
             // did:web names an arbitrary host: fetch it only at a public address.
             let resolver = match did.strip_prefix("did:web:") {
-                Some(host) => pinned_client(host)?,
+                Some(host) => pinned_client(host, 443)?,
                 None => client.clone(),
             };
             let doc = response_json(
@@ -374,15 +403,26 @@ pub fn verify(p: &Platform, values: &BTreeMap<String, Zeroizing<String>>) -> Res
                     .map_err(|_| anyhow::anyhow!("DID resolution failed"))?,
             )?;
             let pds = discovered_pds(&did, &doc)?;
-            if let Some(requested) = values.get("pds").filter(|v| !v.is_empty()) {
-                ensure!(
-                    origin(requested)? == pds,
-                    "the account's PDS is {pds}, not the requested origin"
-                );
-            }
+            ensure!(
+                handle.starts_with("did:") || claims_handle(&doc, handle),
+                "the DID document does not claim the handle {handle}"
+            );
+            let requested = values
+                .get("pds")
+                .map(|v| v.as_str())
+                .filter(|v| !v.is_empty());
+            ensure!(
+                pds_approved(&pds, requested)?,
+                "the account is hosted at {pds}; re-run with --input pds={pds} to approve sending its app password there"
+            );
+            let pds_url = url::Url::parse(&pds)?;
+            let session = pinned_client(
+                pds_url.host_str().context("PDS has no host")?,
+                pds_url.port_or_known_default().unwrap_or(443),
+            )?;
             expected_did = Some(did);
             verified_origin = Some(pds.clone());
-            client
+            session
                 .post(format!("{pds}/xrpc/com.atproto.server.createSession"))
                 .json(&json!({"identifier": handle, "password": input(values, "password")?}))
         }
@@ -433,6 +473,19 @@ pub fn verify(p: &Platform, values: &BTreeMap<String, Zeroizing<String>>) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn passwords_go_only_to_approved_pds_and_claimed_handles() {
+        let hosted = "https://morel.us-east.host.bsky.network";
+        assert!(pds_approved(hosted, None).unwrap());
+        assert!(!pds_approved("https://evil.example", None).unwrap());
+        assert!(pds_approved("https://pds.example", Some("https://pds.example/")).unwrap());
+        assert!(!pds_approved("https://pds.example", Some("https://other.example")).unwrap());
+        let doc = json!({"alsoKnownAs": ["at://Four.Example"]});
+        assert!(claims_handle(&doc, "four.example"));
+        assert!(!claims_handle(&doc, "five.example"));
+        assert!(!claims_handle(&json!({}), "four.example"));
+    }
 
     #[test]
     fn only_public_addresses_pass() {
