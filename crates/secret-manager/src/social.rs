@@ -8,6 +8,8 @@ use zeroize::Zeroizing;
 pub struct Input {
     pub name: &'static str,
     pub secret: bool,
+    /// May be left out; the platform then discovers it.
+    pub optional: bool,
 }
 
 /// An n8n credential and its single secret field.
@@ -29,29 +31,35 @@ pub struct Platform {
 const TOKEN: &[Input] = &[Input {
     name: "token",
     secret: true,
+    optional: false,
 }];
 const BLUESKY: &[Input] = &[
     Input {
         name: "handle",
         secret: false,
+        optional: false,
     },
     Input {
         name: "password",
         secret: true,
+        optional: false,
     },
     Input {
         name: "pds",
         secret: false,
+        optional: true,
     },
 ];
 const MASTODON: &[Input] = &[
     Input {
         name: "instance",
         secret: false,
+        optional: false,
     },
     Input {
         name: "token",
         secret: true,
+        optional: false,
     },
 ];
 
@@ -236,29 +244,81 @@ fn did_url(did: &str) -> Result<String> {
     }
 }
 
-fn check_pds(did: &str, pds: &str, doc: &Value) -> Result<()> {
+/// The account's PDS origin from its DID document: the `#atproto_pds`
+/// service of type `AtprotoPersonalDataServer`. `bsky.social` is only an
+/// entryway, so the document, not a default, names where the account lives.
+fn discovered_pds(did: &str, doc: &Value) -> Result<String> {
     ensure!(
         doc.get("id").and_then(Value::as_str) == Some(did),
         "DID document identity mismatch"
     );
-    let endpoint = doc
-        .get("service")
-        .and_then(Value::as_array)
-        .and_then(|services| {
-            services.iter().find(|s| {
-                s.get("id")
-                    .and_then(Value::as_str)
-                    .is_some_and(|id| id == "#atproto_pds" || id == format!("{did}#atproto_pds"))
+    let endpoint =
+        doc.get("service")
+            .and_then(Value::as_array)
+            .and_then(|services| {
+                services.iter().find(|s| {
+                    s.get("id").and_then(Value::as_str).is_some_and(|id| {
+                        id == "#atproto_pds" || id == format!("{did}#atproto_pds")
+                    }) && s.get("type").and_then(Value::as_str) == Some("AtprotoPersonalDataServer")
+                })
             })
-        })
-        .and_then(|s| s.get("serviceEndpoint"))
-        .and_then(Value::as_str)
-        .context("DID document missing PDS")?;
+            .and_then(|s| s.get("serviceEndpoint"))
+            .and_then(Value::as_str)
+            .context("DID document missing PDS")?;
+    origin(endpoint)
+}
+
+/// Whether an address is on the public internet: not loopback, private,
+/// link-local, CGNAT, multicast, documentation, unspecified or ULA.
+fn is_public(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v) => {
+            let [a, b, ..] = v.octets();
+            !(v.is_private()
+                || v.is_loopback()
+                || v.is_link_local()
+                || v.is_broadcast()
+                || v.is_documentation()
+                || v.is_unspecified()
+                || v.is_multicast()
+                || a == 0
+                || (a == 100 && (b & 0xc0) == 64))
+        }
+        IpAddr::V6(v) => {
+            let first = v.segments()[0];
+            match v.to_ipv4_mapped() {
+                Some(mapped) => is_public(IpAddr::V4(mapped)),
+                None => {
+                    !(v.is_loopback()
+                        || v.is_unspecified()
+                        || v.is_multicast()
+                        || (first & 0xfe00) == 0xfc00
+                        || (first & 0xffc0) == 0xfe80)
+                }
+            }
+        }
+    }
+}
+
+/// A client that reaches `host` only at an address checked public now, so a
+/// did:web document cannot point the request at an internal service.
+fn pinned_client(host: &str) -> Result<reqwest::blocking::Client> {
+    use std::net::ToSocketAddrs;
+    let addrs: Vec<_> = (host, 443)
+        .to_socket_addrs()
+        .map_err(|_| anyhow::anyhow!("could not resolve the DID host"))?
+        .collect();
     ensure!(
-        origin(endpoint)? == pds,
-        "account PDS does not match requested origin"
+        !addrs.is_empty() && addrs.iter().all(|a| is_public(a.ip())),
+        "the DID host does not resolve to public addresses only"
     );
-    Ok(())
+    reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(30))
+        .resolve(host, addrs[0])
+        .build()
+        .context("could not initialize HTTP client")
 }
 
 fn response_json(response: reqwest::blocking::Response) -> Result<Value> {
@@ -283,11 +343,6 @@ pub fn verify(p: &Platform, values: &BTreeMap<String, Zeroizing<String>>) -> Res
     let mut expected_did = None;
     let request = match p.name {
         "bluesky" => {
-            let pds = origin(
-                values
-                    .get("pds")
-                    .map_or("https://bsky.social", |v| v.as_str()),
-            )?;
             let handle = input(values, "handle")?;
             let did = if handle.starts_with("did:") {
                 handle.to_owned()
@@ -307,13 +362,24 @@ pub fn verify(p: &Platform, values: &BTreeMap<String, Zeroizing<String>>) -> Res
                     .context("handle resolution missing DID")?
                     .to_owned()
             };
+            // did:web names an arbitrary host: fetch it only at a public address.
+            let resolver = match did.strip_prefix("did:web:") {
+                Some(host) => pinned_client(host)?,
+                None => client.clone(),
+            };
             let doc = response_json(
-                client
+                resolver
                     .get(did_url(&did)?)
                     .send()
                     .map_err(|_| anyhow::anyhow!("DID resolution failed"))?,
             )?;
-            check_pds(&did, &pds, &doc)?;
+            let pds = discovered_pds(&did, &doc)?;
+            if let Some(requested) = values.get("pds").filter(|v| !v.is_empty()) {
+                ensure!(
+                    origin(requested)? == pds,
+                    "the account's PDS is {pds}, not the requested origin"
+                );
+            }
             expected_did = Some(did);
             verified_origin = Some(pds.clone());
             client
@@ -369,10 +435,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_public_addresses_pass() {
+        for ip in ["93.184.216.34", "2606:2800:220:1::1"] {
+            assert!(is_public(ip.parse().unwrap()), "{ip}");
+        }
+        for ip in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.1.1",
+            "100.64.0.1",
+            "0.0.0.0",
+            "224.0.0.1",
+            "::1",
+            "fd00::1",
+            "fe80::1",
+            "::ffff:10.0.0.1",
+        ] {
+            assert!(!is_public(ip.parse().unwrap()), "{ip}");
+        }
+    }
+
+    #[test]
     fn recorded_pds_and_page_responses() {
-        let doc = json!({"id":"did:plc:abc", "service":[{"id":"#atproto_pds", "serviceEndpoint":"https://PDS.example:443/"}]});
-        assert!(check_pds("did:plc:abc", "https://pds.example", &doc).is_ok());
-        assert!(check_pds("did:plc:abc", "https://other.example", &doc).is_err());
+        let doc = json!({"id":"did:plc:abc", "service":[{"id":"#atproto_pds", "type":"AtprotoPersonalDataServer", "serviceEndpoint":"https://PDS.example:443/"}]});
+        assert_eq!(
+            discovered_pds("did:plc:abc", &doc).unwrap(),
+            "https://pds.example"
+        );
+        // Another DID's document, or a service of the wrong type, names no PDS.
+        assert!(discovered_pds("did:plc:other", &doc).is_err());
+        let untyped = json!({"id":"did:plc:abc", "service":[{"id":"#atproto_pds", "serviceEndpoint":"https://pds.example"}]});
+        assert!(discovered_pds("did:plc:abc", &untyped).is_err());
         assert!(
             parse_identity(
                 platform("facebook-page").unwrap(),
