@@ -139,7 +139,14 @@ fn persist(path: &Path, ciphertext: &[u8], previous: Option<&[u8]>) -> Result<()
             anyhow::anyhow!("cannot install ciphertext without replacing an existing source")
         })?;
     }
-    fs::File::open(parent)?.sync_all()?;
+    if let Err(error) = fs::File::open(parent).and_then(|dir| dir.sync_all()) {
+        if previous.is_none() {
+            fs::remove_file(path).context(
+                "failed to remove newly installed ciphertext after directory sync failure",
+            )?;
+        }
+        return Err(error.into());
+    }
     Ok(())
 }
 
