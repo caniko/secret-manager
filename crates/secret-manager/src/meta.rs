@@ -117,15 +117,21 @@ impl Metadata {
     }
 
     /// Missing sidecars have unknown metadata; malformed sidecars fail closed.
+    /// A sidecar is read only as a regular file, and a parse error names the
+    /// problem without quoting the input, so a sidecar pointed at a source
+    /// cannot echo it.
     pub fn load(source: &Path) -> Result<Self> {
         let path = sidecar_path(source);
+        if std::fs::symlink_metadata(&path).is_ok_and(|meta| !meta.is_file()) {
+            bail!("{} is not a regular file", path.display());
+        }
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
             Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
         };
-        let metadata: Self =
-            toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        let metadata: Self = toml::from_str(&text)
+            .map_err(|error| anyhow::anyhow!("parsing {}: {}", path.display(), error.message()))?;
         metadata.validate()?;
         Ok(metadata)
     }
@@ -201,6 +207,17 @@ pub fn stamp_rotation(source: &Path, expires: Option<&str>) -> Result<()> {
     if let Some(expires) = expires {
         metadata.expiry = Some(expires.to_owned());
     }
+    metadata.save(source)
+}
+
+/// Record `--expires` for a value that was adopted, not written: its age is
+/// unknown, so `rotated_at` is left alone. Without an expiry, nothing changes.
+pub fn record_expiry(source: &Path, expires: Option<&str>) -> Result<()> {
+    let Some(expires) = expires else {
+        return Ok(());
+    };
+    let mut metadata = Metadata::load(source)?;
+    metadata.expiry = Some(expires.to_owned());
     metadata.save(source)
 }
 
@@ -298,6 +315,32 @@ mod tests {
             Metadata::load(&source).unwrap().expiry.as_deref(),
             Some("never")
         );
+
+        // An adopted value: expiry recorded, rotation date untouched.
+        let adopted = dir.path().join("adopted.age");
+        std::fs::write(&adopted, b"ciphertext").unwrap();
+        record_expiry(&adopted, None).unwrap();
+        assert!(!sidecar_path(&adopted).exists(), "no expiry, no sidecar");
+        record_expiry(&adopted, Some("2027-02-13")).unwrap();
+        let recorded = Metadata::load(&adopted).unwrap();
+        assert_eq!(recorded.expiry.as_deref(), Some("2027-02-13"));
+        assert_eq!(recorded.rotated_at, None);
+    }
+
+    #[test]
+    fn sidecars_never_echo_what_they_point_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("token.age");
+        std::fs::write(&source, b"SECRETVALUE = [").unwrap();
+        std::os::unix::fs::symlink(&source, sidecar_path(&source)).unwrap();
+        let error = format!("{:#}", Metadata::load(&source).unwrap_err());
+        assert!(error.contains("not a regular file"), "{error}");
+        assert!(!error.contains("SECRETVALUE"), "{error}");
+
+        let other = dir.path().join("other.age");
+        std::fs::write(sidecar_path(&other), "SECRETVALUE = [").unwrap();
+        let error = format!("{:#}", Metadata::load(&other).unwrap_err());
+        assert!(!error.contains("SECRETVALUE"), "{error}");
     }
 
     #[test]

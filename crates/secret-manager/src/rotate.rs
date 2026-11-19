@@ -93,6 +93,11 @@ pub struct RotateArgs {
     /// children; only the explicit staging calls in this command stage.
     #[arg(long, default_value_t = false)]
     pub no_stage: bool,
+
+    /// Record when the new value expires, `YYYY-MM-DD` or `never`, in the
+    /// source's `.meta.toml` sidecar. Every rotation also stamps `rotated_at`.
+    #[arg(long, value_name = "YYYY-MM-DD|never", value_parser = crate::meta::parse_expires)]
+    pub expires: Option<String>,
 }
 
 impl RotateArgs {
@@ -167,10 +172,28 @@ impl RotateArgs {
             create_backup(secret_path, &backup_path, repo_root)?;
         }
 
+        // The sidecar records this rotation; it is restored with the source when
+        // anything after the stamp fails, so it never claims a rotation that
+        // did not happen.
+        let sidecar = crate::meta::sidecar_path(secret_path);
+        let sidecar_before = fs::read(&sidecar).ok();
+        let sidecar_rel = crate::meta::sidecar_path(rel);
         let outcome = regenerate(repo_root, rel, existed)
             .and_then(|()| validate_fresh(repo_root, secret_path))
-            .and_then(|()| stage_source(repo_root, rel, self.no_stage));
+            .and_then(|()| crate::meta::stamp_rotation(secret_path, self.expires.as_deref()))
+            .and_then(|()| stage_source(repo_root, rel, self.no_stage))
+            .and_then(|()| stage_source(repo_root, &sidecar_rel, self.no_stage));
         if let Err(e) = outcome {
+            let _ = match &sidecar_before {
+                Some(bytes) => fs::write(&sidecar, bytes),
+                None => fs::remove_file(&sidecar).or_else(|error| {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        Ok(())
+                    } else {
+                        Err(error)
+                    }
+                }),
+            };
             // Name the recovery only once it has actually happened.
             if existed {
                 // Keep the original failure visible when recovery fails

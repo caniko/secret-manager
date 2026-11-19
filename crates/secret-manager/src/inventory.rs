@@ -100,19 +100,40 @@ impl std::fmt::Display for Violation {
 }
 
 /// Files under `age/secrets`, store-relative, sorted; symlinks included.
-fn store_files(root: &Path) -> Vec<(PathBuf, bool)> {
-    let mut files: Vec<(PathBuf, bool)> = walkdir::WalkDir::new(root.join(STORE))
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| !entry.file_type().is_dir())
-        .filter_map(|entry| {
-            let rel = entry.path().strip_prefix(root).ok()?.to_path_buf();
-            Some((rel, entry.path_is_symlink()))
-        })
-        .collect();
+/// A directory that cannot be read is returned as an error, never skipped:
+/// an inventory missing a category would read as "nothing there".
+fn store_files(root: &Path) -> (Vec<(PathBuf, bool)>, Vec<Violation>) {
+    let mut files = Vec::new();
+    let mut errors = Vec::new();
+    if !root.join(STORE).exists() {
+        return (files, errors);
+    }
+    for entry in walkdir::WalkDir::new(root.join(STORE)).follow_links(false) {
+        match entry {
+            Ok(entry) if entry.file_type().is_dir() => {}
+            Ok(entry) => {
+                if let Ok(rel) = entry.path().strip_prefix(root) {
+                    files.push((rel.to_path_buf(), entry.path_is_symlink()));
+                }
+            }
+            Err(error) => errors.push(Violation {
+                path: error
+                    .path()
+                    .and_then(|p| p.strip_prefix(root).ok())
+                    .unwrap_or(Path::new(STORE))
+                    .display()
+                    .to_string(),
+                reason: format!(
+                    "unreadable: {}",
+                    error
+                        .io_error()
+                        .map_or_else(|| error.to_string(), ToString::to_string)
+                ),
+            }),
+        }
+    }
     files.sort();
-    files
+    (files, errors)
 }
 
 fn is_source(path: &Path) -> bool {
@@ -124,7 +145,8 @@ fn is_source(path: &Path) -> bool {
 pub fn check(root: &Path) -> Vec<Violation> {
     let mut violations = Vec::new();
     let mut names: BTreeMap<(String, String), BTreeSet<PathBuf>> = BTreeMap::new();
-    let files = store_files(root);
+    let (files, errors) = store_files(root);
+    violations.extend(errors);
     let sources: BTreeSet<&PathBuf> = files
         .iter()
         .filter(|(path, _)| is_source(path))
@@ -220,7 +242,11 @@ fn custodian(id: &layout::SourceId, metadata: &Metadata) -> Option<String> {
 /// source is still listed, with unknown metadata.
 pub fn build(root: &Path, consumers: &BTreeMap<String, Value>) -> Result<Value> {
     let mut secrets = Vec::new();
-    for (path, symlink) in store_files(root) {
+    let (files, errors) = store_files(root);
+    if let Some(error) = errors.first() {
+        bail!("cannot list the store: {error}");
+    }
+    for (path, symlink) in files {
         if symlink || !is_source(&path) {
             continue;
         }
@@ -426,6 +452,28 @@ mod tests {
         );
         // The two regicide sources also lack a custodian: 9 in all.
         assert_eq!(violations.len(), 9, "{violations:#?}");
+    }
+
+    #[test]
+    fn an_unreadable_directory_is_reported_not_skipped() {
+        let dir = store();
+        let category = dir.path().join("age/secrets/home/shared/ai");
+        std::fs::set_permissions(&category, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = std::fs::read_dir(&category).is_ok(); // root ignores modes
+        let violations = check(dir.path());
+        let built = build(dir.path(), &BTreeMap::new());
+        std::fs::set_permissions(&category, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if readable {
+            return;
+        }
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.path.ends_with("home/shared/ai") && v.reason.contains("unreadable")),
+            "{violations:#?}"
+        );
+        assert!(built.is_err(), "a partial inventory must not be emitted");
+        assert!(build(tempfile::tempdir().unwrap().path(), &BTreeMap::new()).is_ok());
     }
 
     #[test]

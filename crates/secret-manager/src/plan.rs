@@ -101,7 +101,7 @@ pub fn run_plan(args: &CommonSourceArgs, plan: AddPlan, env: &dyn StoreEnv) -> R
     match &plan.source {
         SourceKind::Generate(generator) => {
             generate_declared_secrets(&repo_root, &modules, &plan.source_only_paths, generator)?;
-            stamp_written_sources(&repo_root, &modules, &plan.source_only_paths, args)?;
+            stamp_written_sources(&repo_root, &modules, &plan.source_only_paths, args, true)?;
             finish_generate(
                 &repo_root,
                 &modules,
@@ -112,7 +112,14 @@ pub fn run_plan(args: &CommonSourceArgs, plan: AddPlan, env: &dyn StoreEnv) -> R
             print_generated_summary(&repo_root, &modules, &plan.source_only_paths);
         }
         SourceKind::Plaintext | SourceKind::FromAge(_) | SourceKind::Rbw { .. } => {
-            stamp_written_sources(&repo_root, &modules, &plan.source_only_paths, args)?;
+            let wrote_value = !matches!(plan.source, SourceKind::FromAge(_));
+            stamp_written_sources(
+                &repo_root,
+                &modules,
+                &plan.source_only_paths,
+                args,
+                wrote_value,
+            )?;
             let paths = touched_paths(&repo_root, &modules, &plan.source_only_paths, true);
             let refs = paths.iter().map(PathBuf::as_path).collect::<Vec<_>>();
             stage_and_rekey(&repo_root, &refs, args.no_stage, args.no_rekey)?;
@@ -123,16 +130,23 @@ pub fn run_plan(args: &CommonSourceArgs, plan: AddPlan, env: &dyn StoreEnv) -> R
     Ok(())
 }
 
-/// Record the rotation date (and `--expires`) beside every source this run
-/// wrote. Sidecars are staged with their sources by `touched_paths`.
+/// Record `--expires` beside every source this run placed, and the rotation
+/// date when it wrote a new value. An adopted `--from-age` value keeps its
+/// unknown age. Sidecars are staged with their sources by `touched_paths`.
 fn stamp_written_sources(
     repo_root: &Path,
     modules: &[RenderedModule],
     source_only_paths: &[PathBuf],
     args: &CommonSourceArgs,
+    wrote_value: bool,
 ) -> Result<()> {
     for path in planned_secret_paths(modules, source_only_paths) {
-        crate::meta::stamp_rotation(&repo_root.join(path), args.expires.as_deref())?;
+        let source = repo_root.join(path);
+        if wrote_value {
+            crate::meta::stamp_rotation(&source, args.expires.as_deref())?;
+        } else {
+            crate::meta::record_expiry(&source, args.expires.as_deref())?;
+        }
     }
     Ok(())
 }
@@ -336,7 +350,11 @@ pub fn run_forgejo_gpg_key_pair_plan(
         );
     }
     if should_write_private {
-        crate::meta::stamp_rotation(&secret_path, expires)?;
+        if matches!(plan.source, GpgKeyPairSource::FromAge(_)) {
+            crate::meta::record_expiry(&secret_path, expires)?;
+        } else {
+            crate::meta::stamp_rotation(&secret_path, expires)?;
+        }
     }
 
     let private_key = view_age_secret(&plan.secret_path)?;

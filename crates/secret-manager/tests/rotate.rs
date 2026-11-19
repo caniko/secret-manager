@@ -251,13 +251,28 @@ fn rotate_replaces_source_and_leaves_no_backup() {
     let repo = TempRepo::new();
     fs::create_dir_all(repo.repo().join("age/secrets/hosts/atlas")).unwrap();
     fs::write(repo.repo().join(REL), "old-material\n").unwrap();
-    let out = repo.run(&["rotate", "--force", REL], &[]);
+    let out = repo.run(&["rotate", "--force", "--expires", "2027-01-01", REL], &[]);
     assert!(
         out.status.success(),
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(read(&repo, REL), STUB_MATERIAL);
+    let sidecar = REL.replace(".age", ".meta.toml");
+    let meta = read(&repo, &sidecar);
+    assert!(meta.contains("expiry = \"2027-01-01\""), "{meta}");
+    let today = secret_manager::meta::today();
+    assert!(
+        meta.contains(&format!("rotated_at = \"{today}\"")),
+        "{meta}"
+    );
+    assert!(
+        repo.cached_names()
+            .iter()
+            .any(|name| name.ends_with("token.meta.toml")),
+        "sidecar must be staged: {:?}",
+        repo.cached_names()
+    );
     assert!(
         !repo.repo().join(format!("{REL}.rotbak")).exists(),
         "backup must be dropped on success"
@@ -277,6 +292,10 @@ fn generate_failure_preserves_bytes_and_index() {
     repo.marker("fail-generate");
     let out = repo.run(&["rotate", "--force", REL], &[]);
     assert!(!out.status.success(), "generate failure must fail");
+    assert!(
+        !repo.repo().join(REL.replace(".age", ".meta.toml")).exists(),
+        "a failed rotation must not record one"
+    );
     assert_eq!(
         read(&repo, REL),
         "old-material\n",
