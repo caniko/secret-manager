@@ -214,38 +214,39 @@ fn run_rbw_plan_with<G>(
     let encryptor = env.stream_encryptor(root)?;
     crate::protection::with_protection(enter_scope, acquire, || {
         let payload = source.payload()?;
-        let _guard = crate::rotate::acquire_lock(root)?;
-        if validate()? != previous {
-            bail!("encrypted source changed during vault lookup; refusing replacement");
-        }
-        if rotate {
-            encryptor.encrypt_replace(&destination, &payload)?;
-        } else {
-            encryptor.encrypt_new(&destination, &payload)?;
-        }
-        drop(payload);
-        crate::meta::stamp_rotation(&destination, args.expires.as_deref())?;
-        if !rotate {
-            write_modules(root, modules)?;
-        }
-        let touched = if rotate {
-            let sidecar = crate::meta::sidecar_path(&destination);
-            vec![destination.clone(), sidecar]
-        } else {
-            touched_paths(root, modules, &plan.source_only_paths, true)
-        };
-        let finish = || -> Result<()> {
-            stage_paths(root, &touched, args.no_stage)?;
-            if !args.no_rekey {
-                crate::rotate::distribute(root, &rel, args.no_stage)?;
-            } else {
-                eprintln!("skipped rekey — run `agenix rekey -a` before deploying.");
+        crate::encryption::with_store_write_lock(root, || {
+            if validate()? != previous {
+                bail!("encrypted source changed during vault lookup; refusing replacement");
             }
+            if rotate {
+                encryptor.encrypt_replace(&destination, &payload)?;
+            } else {
+                encryptor.encrypt_new(&destination, &payload)?;
+            }
+            drop(payload);
+            crate::meta::stamp_rotation(&destination, args.expires.as_deref())?;
+            if !rotate {
+                write_modules(root, modules)?;
+            }
+            let touched = if rotate {
+                let sidecar = crate::meta::sidecar_path(&destination);
+                vec![destination.clone(), sidecar]
+            } else {
+                touched_paths(root, modules, &plan.source_only_paths, true)
+            };
+            let finish = || -> Result<()> {
+                stage_paths(root, &touched, args.no_stage)?;
+                if !args.no_rekey {
+                    crate::rotate::distribute(root, &rel, args.no_stage)?;
+                } else {
+                    eprintln!("skipped rekey — run `agenix rekey -a` before deploying.");
+                }
+                Ok(())
+            };
+            finish().map_err(|error| anyhow!("encrypted rbw source is saved; distribution is incomplete. Retry staging/rekeying: {error}"))?;
+            print_written_summary(root, modules, &plan.source_only_paths);
             Ok(())
-        };
-        finish().map_err(|error| anyhow!("encrypted rbw source is saved; distribution is incomplete. Retry staging/rekeying: {error}"))?;
-        print_written_summary(root, modules, &plan.source_only_paths);
-        Ok(())
+        })
     })
 }
 
@@ -616,7 +617,8 @@ fn stage_paths(repo_root: &Path, paths: &[PathBuf], no_stage: bool) -> Result<()
         .iter()
         .map(|p| display_rel(repo_root, p))
         .collect::<Vec<_>>();
-    exec::run(
+    crate::rotate::run_child(
+        repo_root,
         "git",
         std::iter::once("add").chain(rels.iter().map(String::as_str)),
     )

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Unrelated subprocesses no longer inherit the store write lock. Rotation,
+  staging, and encryption helpers still retain it if the caller exits early.
+
 ## [0.7.0] - 2026-11-19
 
 Additive for the command line: without `--category`, every writer produces the

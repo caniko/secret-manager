@@ -5,13 +5,13 @@ use std::{
     io::{Read, Write},
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
-    process::Command,
     time::Duration,
 };
 use tempfile::NamedTempFile;
 use zeroize::Zeroizing;
 
 use crate::credential_process::{MAX_BYTES, capture_with_timeout, disable_core_dumps};
+use crate::rotate::{store_command, with_lock};
 
 /// Executable produced by `lib.mkAgenixStreamEncryptor`, accepting `encrypt`
 /// followed by native age arguments. It carries public policy, never plaintext.
@@ -24,9 +24,11 @@ pub struct StreamEncryptor {
 /// Serialize source installation and distribution with the same store lock as
 /// generated-secret rotation. Prepare public encryption policy and retrieve
 /// vault data before entering this closure; hold it through staging/rekey.
+/// Secret-manager store helpers invoked on this thread inherit the lock so
+/// it survives an interrupted caller. Commands spawned by the embedding
+/// application do not inherit it; wait for those before returning.
 pub fn with_store_write_lock<T>(root: &Path, operation: impl FnOnce() -> Result<T>) -> Result<T> {
-    let _guard = crate::rotate::acquire_lock(root)?;
-    operation()
+    with_lock(root, operation)
 }
 
 impl StreamEncryptor {
@@ -56,7 +58,7 @@ impl StreamEncryptor {
         );
         disable_core_dumps()?;
         let encrypted = capture_with_timeout(
-            Command::new(&self.executable).arg("encrypt"),
+            store_command(&self.executable).arg("encrypt"),
             Some(plaintext),
             self.timeout,
         )
@@ -153,6 +155,7 @@ fn persist(path: &Path, ciphertext: &[u8], previous: Option<&[u8]>) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
     use std::os::unix::fs::PermissionsExt;
 
     fn backend(root: &Path, script: &str) -> StreamEncryptor {
