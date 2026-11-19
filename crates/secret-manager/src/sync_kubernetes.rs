@@ -296,7 +296,7 @@ fn field_manager(record: &ManagedRecord) -> Result<&str> {
 }
 
 fn kubectl<const N: usize>(destination: &KubernetesDestination, tail: [&str; N]) -> Command {
-    let mut command = Command::new("kubectl");
+    let mut command = crate::rotate::store_command("kubectl");
     command
         .args(["--context", &destination.context])
         .args(["--namespace", &destination.namespace])

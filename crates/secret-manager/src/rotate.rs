@@ -21,7 +21,7 @@
 //!    (temp file plus rename). Fresh
 //!    output must parse as an age file (binary header plus plausible body,
 //!    or armored output with both delimiters), not merely be non-empty.
-//!    A repo-local kernel lock — inherited by spawned children so it
+//!    A repo-local kernel lock — inherited only by store helpers so it
 //!    outlives a killed wrapper until orphans finish — serializes whole
 //!    runs; existence is re-read under the lock, and preserve mode refuses
 //!    ambiguous interrupted state instead of blessing it.
@@ -33,14 +33,18 @@
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::Args;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Write;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
-
-use nix_manager_core::exec;
+use std::process::Command;
+use std::sync::Arc;
 
 use crate::io::display_rel;
 
@@ -113,14 +117,19 @@ impl RotateArgs {
         // the moment another rotation starts. The lock file itself is a
         // persistent anchor and is never unlinked; the kernel releases the
         // lock when the holder exits, including on crash or kill.
-        let _guard = acquire_lock(&repo_root)?;
+        with_lock(&repo_root, || {
+            self.ensure_or_rotate(&repo_root, &rel, &secret_path)
+        })
+    }
+
+    fn ensure_or_rotate(&self, repo_root: &Path, rel: &Path, secret_path: &Path) -> Result<()> {
         // Re-read under the lock: a concurrent run may have created,
         // replaced, or removed the source since any earlier observation.
-        let existed = try_is_regular_file(&secret_path)?;
+        let existed = try_is_regular_file(secret_path)?;
         if !existed && secret_path.symlink_metadata().is_ok() {
             bail!(
                 "refusing to rotate {}: not a regular file",
-                display_rel(&repo_root, &secret_path)
+                display_rel(repo_root, secret_path)
             );
         }
 
@@ -131,23 +140,23 @@ impl RotateArgs {
             // is good), and a source without an age header is already
             // damaged. Reporting either as "preserved" would bless an
             // unknown state as healthy.
-            let backup_path = backup_path_for(&secret_path);
+            let backup_path = backup_path_for(secret_path);
             if backup_path.exists() {
                 bail!(
                     "refusing to preserve {}: leftover backup {} means a previous rotation was interrupted; inspect both files, restore or remove the backup manually, then retry",
-                    display_rel(&repo_root, &secret_path),
-                    display_rel(&repo_root, &backup_path)
+                    display_rel(repo_root, secret_path),
+                    display_rel(repo_root, &backup_path)
                 );
             }
-            validate_usable(&repo_root, &secret_path).map_err(|e| {
+            validate_usable(repo_root, secret_path).map_err(|e| {
                 anyhow!(
                     "refusing to preserve {}: {e}\n  pass --force to replace it, or restore a known-good copy first",
-                    display_rel(&repo_root, &secret_path)
+                    display_rel(repo_root, secret_path)
                 )
             })?;
             eprintln!(
                 "preserved {} (already exists; pass --force to rotate)",
-                display_rel(&repo_root, &secret_path)
+                display_rel(repo_root, secret_path)
             );
             eprintln!(
                 "distribution untouched; run `agenix rekey -a` if recipients may be out of date."
@@ -155,7 +164,7 @@ impl RotateArgs {
             return Ok(());
         }
 
-        self.run_locked(&repo_root, &rel, &secret_path, existed)
+        self.run_locked(repo_root, rel, secret_path, existed)
     }
 
     fn run_locked(
@@ -373,8 +382,74 @@ pub(crate) fn ensure_parent(repo_root: &Path, rel: &Path) -> Result<PathBuf> {
 /// orphaned child may still be mutating the repo. A competing run then
 /// keeps refusing until the orphan finishes. Dropping the guard in the
 /// wrapper only closes our own fd.
-pub(crate) struct RotationLock {
-    _file: fs::File,
+struct RotationLock {
+    file: Arc<fs::File>,
+    may_be_inherited: Cell<bool>,
+}
+
+impl RotationLock {
+    fn inherit_in(&self, command: &mut Command) {
+        self.may_be_inherited.set(true);
+        let file = Arc::clone(&self.file);
+        // SAFETY: the command owns a reference to the file, so the descriptor
+        // cannot close or be reused before fork. The child only reads the fd
+        // number, calls async-signal-safe fcntl, and reads errno on failure.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::fcntl(file.as_raw_fd(), libc::F_SETFD, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+}
+
+impl Drop for RotationLock {
+    fn drop(&mut self) {
+        // LOCK_UN affects the shared open file description, not just our fd.
+        // Even a reaped child might have left a descendant with the fd. Once
+        // inheritance is possible, only close and let the last close unlock.
+        if !self.may_be_inherited.get() {
+            // SAFETY: self.file owns the live descriptor for this lock.
+            unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+        }
+    }
+}
+
+thread_local! {
+    // Scope only the commands that explicitly opt in on this thread. This
+    // also covers library helpers inside the public with_store_write_lock
+    // callback without changing that API. A callback can lock another store.
+    static ACTIVE_LOCKS: RefCell<Vec<RotationLock>> = const { RefCell::new(Vec::new()) };
+}
+
+pub(crate) fn with_lock<T>(repo_root: &Path, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+    struct Scope;
+
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            ACTIVE_LOCKS.with_borrow_mut(|locks| {
+                locks.pop();
+            });
+        }
+    }
+
+    let lock = acquire_lock(repo_root)?;
+    ACTIVE_LOCKS.with_borrow_mut(|locks| locks.push(lock));
+    let _scope = Scope;
+    operation()
+}
+
+/// Construct a short-lived store helper command. Keep it inside the lock scope.
+pub(crate) fn store_command(program: impl AsRef<OsStr>) -> Command {
+    let mut command = Command::new(program);
+    ACTIVE_LOCKS.with_borrow(|locks| {
+        for lock in locks {
+            lock.inherit_in(&mut command);
+        }
+    });
+    command
 }
 
 fn lock_path(repo_root: &Path) -> PathBuf {
@@ -382,9 +457,8 @@ fn lock_path(repo_root: &Path) -> PathBuf {
     // file) get their own private git dir instead of colliding on — or
     // failing to create — a shared anchor. Falls back to the old
     // `.git`-directory probe when Git itself is unavailable.
-    let git_dir = exec::cap_in(repo_root, "git", ["rev-parse", "--absolute-git-dir"]);
-    if git_dir.exit_code == 0 {
-        let dir = PathBuf::from(git_dir.stdout.trim());
+    if let Ok(git_dir) = git_listing(repo_root, ["rev-parse", "--absolute-git-dir"]) {
+        let dir = PathBuf::from(git_dir.trim());
         let abs = if dir.is_absolute() {
             dir
         } else {
@@ -402,9 +476,7 @@ fn lock_path(repo_root: &Path) -> PathBuf {
     }
 }
 
-pub(crate) fn acquire_lock(repo_root: &Path) -> Result<RotationLock> {
-    use std::os::unix::io::AsRawFd;
-
+fn acquire_lock(repo_root: &Path) -> Result<RotationLock> {
     let path = lock_path(repo_root);
     let file = fs::OpenOptions::new()
         .read(true)
@@ -421,19 +493,10 @@ pub(crate) fn acquire_lock(repo_root: &Path) -> Result<RotationLock> {
         })?;
     // Non-blocking: a second rotation fails fast instead of queueing
     // behind a rekey that may wait on a hardware touch.
-    // ponytail: raw libc instead of an flock crate; the call is three
-    // lines and the crate would exist only for this.
-    //
-    // CLOEXEC must stay CLEAR on this fd (Rust leaves inherited fds
-    // alone across spawn): children share the open file description, so
-    // the kernel lock outlives a killed wrapper until its orphaned
-    // children finish mutating. Rust's std sets CLOEXEC on files it
-    // opens, so clear it explicitly. A competing run that only probes
-    // the lock then observes the orphan, not a false free.
-    let rc = unsafe {
-        libc::fcntl(file.as_raw_fd(), libc::F_SETFD, 0);
-        libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB)
-    };
+    // Keep the CLOEXEC that std sets when opening the file. Only the forked
+    // store helpers should clear it, never the parent shared by all threads.
+    // SAFETY: file owns the live descriptor for the duration of the call.
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
     if rc != 0 {
         let e = std::io::Error::last_os_error();
         if e.kind() == std::io::ErrorKind::WouldBlock {
@@ -444,7 +507,10 @@ pub(crate) fn acquire_lock(repo_root: &Path) -> Result<RotationLock> {
         }
         bail!("cannot lock {}: {e}", display_rel(repo_root, &path));
     }
-    Ok(RotationLock { _file: file })
+    Ok(RotationLock {
+        file: Arc::new(file),
+        may_be_inherited: Cell::new(false),
+    })
 }
 
 fn backup_path_for(secret_path: &Path) -> PathBuf {
@@ -496,11 +562,18 @@ fn create_backup(secret_path: &Path, backup_path: &Path, repo_root: &Path) -> Re
 /// honors auto-staging (`AGENIX_REKEY_ADD_TO_GIT`) from the environment, so
 /// rotation always strips it: staging happens only through the explicit
 /// `git add` calls below, on both the default and the `--no-stage` path.
-fn run_child(repo_root: &Path, program: &str, args: &[&str]) -> Result<()> {
+pub(crate) fn run_child<'a>(
+    repo_root: &Path,
+    program: &str,
+    args: impl IntoIterator<Item = &'a str>,
+) -> Result<()> {
+    let args: Vec<_> = args.into_iter().collect();
     eprintln!("$ ({}) {} {}", repo_root.display(), program, args.join(" "));
-    let mut cmd = std::process::Command::new(program);
+    let mut cmd = store_command(program);
     cmd.args(args).current_dir(repo_root);
-    cmd.env_remove(ADD_TO_GIT_ENV);
+    if program == "agenix" {
+        cmd.env_remove(ADD_TO_GIT_ENV);
+    }
     let status = cmd
         .status()
         .map_err(|e| anyhow!("failed to spawn {program} in {}: {e}", repo_root.display()))?;
@@ -529,7 +602,7 @@ fn regenerate(repo_root: &Path, rel: &Path, existed: bool) -> Result<()> {
         args.push("--force-generate");
     }
     args.push(rel);
-    run_child(repo_root, "agenix", &args)
+    run_child(repo_root, "agenix", args)
 }
 
 /// Smallest plausible age file: the 23-byte magic plus one recipient
@@ -628,13 +701,13 @@ pub(crate) fn stage_source(repo_root: &Path, rel: &Path, no_stage: bool) -> Resu
     let rel = rel
         .to_str()
         .ok_or_else(|| anyhow!("non-utf8 secret path"))?;
-    exec::run_in(repo_root, "git", ["add", rel])
+    run_child(repo_root, "git", ["add", rel])
 }
 
 /// Fail when git ignores any of `rels`: staging would then add the others and
 /// leave the index out of step with a rollback.
 fn refuse_ignored(repo_root: &Path, rels: &[&Path]) -> Result<()> {
-    let status = std::process::Command::new("git")
+    let status = store_command("git")
         .args(["check-ignore", "--"])
         .args(rels)
         .current_dir(repo_root)
@@ -655,7 +728,7 @@ fn refuse_ignored(repo_root: &Path, rels: &[&Path]) -> Result<()> {
 /// rather than emulated: replaying its index state is not exact.
 fn refuse_unusual_index(repo_root: &Path, rels: &[&Path]) -> Result<()> {
     let listed = |args: &[&str]| -> Result<String> {
-        let out = std::process::Command::new("git")
+        let out = store_command("git")
             .args(args)
             .arg("--")
             .args(rels)
@@ -708,7 +781,7 @@ fn index_snapshot(repo_root: &Path, rels: &[&Path]) -> Result<IndexSnapshot> {
         absent: Vec::new(),
     };
     for rel in rels {
-        let listed = std::process::Command::new("git")
+        let listed = store_command("git")
             .args(["ls-files", "-s", "-z", "--"])
             .arg(rel)
             .current_dir(repo_root)
@@ -732,7 +805,7 @@ fn index_snapshot(repo_root: &Path, rels: &[&Path]) -> Result<IndexSnapshot> {
 fn restore_index(repo_root: &Path, snapshot: &IndexSnapshot) -> Result<()> {
     use std::io::Write;
     if !snapshot.present.is_empty() {
-        let mut child = std::process::Command::new("git")
+        let mut child = store_command("git")
             .args(["update-index", "-z", "--index-info"])
             .current_dir(repo_root)
             .stdin(std::process::Stdio::piped())
@@ -747,7 +820,7 @@ fn restore_index(repo_root: &Path, snapshot: &IndexSnapshot) -> Result<()> {
         ensure!(status.success(), "git update-index failed ({status})");
     }
     if !snapshot.absent.is_empty() {
-        let status = std::process::Command::new("git")
+        let status = store_command("git")
             .args(["rm", "--cached", "-q", "--ignore-unmatch", "--"])
             .args(&snapshot.absent)
             .current_dir(repo_root)
@@ -767,7 +840,7 @@ fn stage_sources(repo_root: &Path, rels: &[&Path], no_stage: bool) -> Result<()>
         .iter()
         .map(|rel| rel.to_str().ok_or_else(|| anyhow!("non-utf8 secret path")))
         .collect::<Result<Vec<_>>>()?;
-    exec::run_in(repo_root, "git", std::iter::once("add").chain(rels))
+    run_child(repo_root, "git", std::iter::once("add").chain(rels))
 }
 
 /// Content snapshot of status-listed files, keyed by repo-relative path.
@@ -834,7 +907,7 @@ pub(crate) fn distribute(repo_root: &Path, rel: &Path, no_stage: bool) -> Result
     })?;
     // No `-a`, and inherited auto-staging is always stripped in
     // run_child: rekeyed copies are staged explicitly below.
-    if let Err(e) = run_child(repo_root, "agenix", &["rekey"]) {
+    if let Err(e) = run_child(repo_root, "agenix", ["rekey"]) {
         return Err(anyhow!(
             "source {} updated, but distribution is incomplete: {e}\n  retry with `agenix rekey -a` (no new key will be generated)",
             display_rel(repo_root, &repo_root.join(rel))
@@ -865,7 +938,7 @@ pub(crate) fn distribute(repo_root: &Path, rel: &Path, no_stage: bool) -> Result
     fresh.sort();
     if !fresh.is_empty() {
         let refs: Vec<&str> = fresh.iter().filter_map(|p| p.to_str()).collect();
-        exec::run_in(repo_root, "git", std::iter::once("add").chain(refs))?;
+        run_child(repo_root, "git", std::iter::once("add").chain(refs))?;
     }
     Ok(())
 }
@@ -892,7 +965,7 @@ pub(crate) fn distribute_named(
     let before = snapshot().map_err(|e| {
         anyhow!("source {source} updated, but distribution state is unknown: {e}; verify with `git status` and distribute with `agenix rekey -a`")
     })?;
-    if let Err(e) = run_child(repo_root, "agenix", &["rekey"]) {
+    if let Err(e) = run_child(repo_root, "agenix", ["rekey"]) {
         return Err(anyhow!(
             "source {source} updated, but distribution is incomplete: {e}\n  retry with `agenix rekey -a` (no new key will be generated)"
         ));
@@ -913,7 +986,7 @@ pub(crate) fn distribute_named(
     );
     fresh.sort();
     if !no_stage && !fresh.is_empty() {
-        exec::run_in(repo_root, "git", std::iter::once("add").chain(fresh))?;
+        run_child(repo_root, "git", std::iter::once("add").chain(fresh))?;
     }
     Ok(())
 }
@@ -921,15 +994,8 @@ pub(crate) fn distribute_named(
 /// Whether a committed rekeyed copy with this suffix already exists, so an
 /// unchanged redistribution is not mistaken for an undeclared secret.
 fn tracked_copy(repo_root: &Path, suffix: &str) -> Result<bool> {
-    let out = exec::cap_in(repo_root, "git", ["ls-files", "--", REKEYED_DIR]);
-    if out.exit_code != 0 {
-        bail!(
-            "git ls-files failed in {}: {}",
-            repo_root.display(),
-            out.stderr.trim()
-        );
-    }
-    Ok(out.stdout.lines().any(|line| {
+    let paths = git_listing(repo_root, ["ls-files", "--", REKEYED_DIR])?;
+    Ok(paths.lines().any(|line| {
         Path::new(line)
             .file_name()
             .and_then(|name| name.to_str())
@@ -949,9 +1015,8 @@ fn is_copy_of(file_name: &str, suffix: &str) -> bool {
 /// NUL-delimited porcelain output. Git failures propagate: staging on a
 /// guessed file set would be worse than refusing.
 fn status_names(repo_root: &Path) -> Result<BTreeSet<PathBuf>> {
-    let out = exec::cap_in(
+    let output = git_listing(
         repo_root,
-        "git",
         [
             "status",
             "--porcelain=v1",
@@ -960,15 +1025,24 @@ fn status_names(repo_root: &Path) -> Result<BTreeSet<PathBuf>> {
             "--",
             REKEYED_DIR,
         ],
+    )?;
+    Ok(parse_status_z(&output))
+}
+
+fn git_listing<const N: usize>(repo_root: &Path, args: [&str; N]) -> Result<String> {
+    let out = store_command("git")
+        .args(args)
+        .current_dir(repo_root)
+        .output()
+        .with_context(|| format!("running git {} in {}", args[0], repo_root.display()))?;
+    ensure!(
+        out.status.success(),
+        "git {} failed in {}: {}",
+        args[0],
+        repo_root.display(),
+        String::from_utf8_lossy(&out.stderr).trim()
     );
-    if out.exit_code != 0 {
-        bail!(
-            "git status failed in {}: {}",
-            repo_root.display(),
-            out.stderr.trim()
-        );
-    }
-    Ok(parse_status_z(&out.stdout))
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 fn parse_status_z(output: &str) -> BTreeSet<PathBuf> {
@@ -1069,6 +1143,47 @@ mod tests {
     }
 
     #[test]
+    fn unrelated_child_does_not_retain_rotation_lock() {
+        use std::process::Stdio;
+
+        let repo = rooted();
+        let mut unrelated = with_lock(&repo.path, || {
+            // Exercise the close-only path even though the intended helper
+            // has already exited, so LOCK_UN cannot hide inheritance bugs.
+            assert!(store_command("true").status()?.success());
+            std::thread::spawn(|| Command::new("cat").stdin(Stdio::piped()).spawn())
+                .join()
+                .unwrap()
+                .context("start unrelated child")
+        })
+        .unwrap();
+        let reacquired = acquire_lock(&repo.path);
+        assert!(unrelated.wait().unwrap().success());
+        assert!(reacquired.is_ok(), "unrelated child retained the lock");
+    }
+
+    #[test]
+    fn intended_child_retains_rotation_lock_until_exit() {
+        use std::process::Stdio;
+
+        let repo = rooted();
+        let mut child = with_lock(&repo.path, || {
+            store_command("cat")
+                .stdin(Stdio::piped())
+                .spawn()
+                .context("start store helper")
+        })
+        .unwrap();
+        // The parent guard is gone; cat still waits for EOF on its stdin.
+        let while_running = acquire_lock(&repo.path);
+        assert!(child.wait().unwrap().success());
+        assert!(
+            while_running.is_err_and(|e| e.to_string().contains("another rotation is running"))
+        );
+        assert!(acquire_lock(&repo.path).is_ok());
+    }
+
+    #[test]
     fn contained_rel_rejects_escapes_absolutes_and_non_age() {
         let repo = rooted();
         for bad in [
@@ -1133,7 +1248,7 @@ mod tests {
         let missing = validate_fresh(&repo.path, &repo.path.join("none.age")).unwrap_err();
         assert!(missing.to_string().contains("generator"), "{missing:?}");
         // An agenix failure (e.g. a failed FIDO2 assertion) is not a missing generator.
-        let failed = run_child(&repo.path, "false", &[]).unwrap_err();
+        let failed = run_child(&repo.path, "false", []).unwrap_err();
         assert!(!failed.to_string().contains("generator"), "{failed:?}");
     }
 
