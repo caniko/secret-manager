@@ -362,6 +362,27 @@ fn a_partial_git_add_restores_the_index_entries() {
 }
 
 #[test]
+fn an_intent_to_add_source_is_refused_before_any_change() {
+    let repo = TempRepo::new();
+    fs::create_dir_all(repo.repo().join("age/secrets/hosts/atlas")).unwrap();
+    fs::write(repo.repo().join(REL), "old-material\n").unwrap();
+    let added = Command::new("git")
+        .args(["add", "-N", "--", REL])
+        .current_dir(repo.repo())
+        .status()
+        .unwrap();
+    assert!(added.success());
+    let out = repo.run(&["rotate", "--force", REL], &[]);
+    assert!(!out.status.success(), "an intent-to-add source must refuse");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("intent-to-add"));
+    assert_eq!(read(&repo, REL), "old-material\n");
+    assert!(
+        !repo.log().contains("--force-generate"),
+        "nothing may be regenerated"
+    );
+}
+
+#[test]
 fn generate_failure_preserves_bytes_and_index() {
     let repo = TempRepo::new();
     fs::create_dir_all(repo.repo().join("age/secrets/hosts/atlas")).unwrap();

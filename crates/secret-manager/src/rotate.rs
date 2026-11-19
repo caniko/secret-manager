@@ -185,6 +185,7 @@ impl RotateArgs {
         // ignored path is refused here, before anything changes.
         if !self.no_stage {
             refuse_ignored(repo_root, &[rel, &sidecar_rel])?;
+            refuse_unusual_index(repo_root, &[rel, &sidecar_rel])?;
         }
 
         let backup_path = backup_path_for(secret_path);
@@ -647,6 +648,50 @@ fn refuse_ignored(repo_root: &Path, rels: &[&Path]) -> Result<()> {
         ),
         _ => bail!("git check-ignore failed ({status})"),
     }
+}
+
+/// Rotation stages, and on failure restores, only ordinary index entries.
+/// An unmerged path or an intent-to-add entry is refused before any change
+/// rather than emulated: replaying its index state is not exact.
+fn refuse_unusual_index(repo_root: &Path, rels: &[&Path]) -> Result<()> {
+    let listed = |args: &[&str]| -> Result<String> {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .arg("--")
+            .args(rels)
+            .current_dir(repo_root)
+            .output()
+            .with_context(|| format!("running git {}", args[0]))?;
+        ensure!(
+            out.status.success(),
+            "git {} failed ({})",
+            args[0],
+            out.status
+        );
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+    };
+    // Unmerged: index stages 1-3. Intent-to-add: the only index entry that
+    // `diff-files` reports as added against the worktree.
+    for (args, state) in [
+        (&["ls-files", "-u"][..], "unmerged"),
+        (
+            &["diff-files", "--name-only", "--diff-filter=A"][..],
+            "intent-to-add",
+        ),
+    ] {
+        let paths = listed(args)?;
+        if !paths.is_empty() {
+            bail!(
+                "{} is {state} in the index; resolve it before rotating (nothing was changed)",
+                paths
+                    .lines()
+                    .next()
+                    .map(|line| line.rsplit('\t').next().unwrap_or(line))
+                    .unwrap_or_default()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// The index entries of some paths, to put back after a failed staging.
