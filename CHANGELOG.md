@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-19
+
 ### Fixed
 
 - Unrelated subprocesses no longer inherit the store write lock. Rotation,
@@ -377,7 +379,8 @@ runner-env add`), and Pkl evaluation via nix-pklx.
 - Corrected "foregejo" typos to "forgejo" in Nix module paths and source
   references.
 
-[Unreleased]: https://github.com/caniko/secret-manager/compare/0.7.0...HEAD
+[Unreleased]: https://github.com/caniko/secret-manager/compare/0.7.1...HEAD
+[0.7.1]: https://github.com/caniko/secret-manager/compare/0.7.0...0.7.1
 [0.7.0]: https://github.com/caniko/secret-manager/compare/0.6.1...0.7.0
 [0.6.1]: https://github.com/caniko/secret-manager/compare/0.6.0...0.6.1
 [0.6.0]: https://github.com/caniko/secret-manager/compare/0.5.0...0.6.0
