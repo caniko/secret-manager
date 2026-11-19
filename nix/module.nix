@@ -149,6 +149,11 @@
               default = null;
               description = "`opaque` only: `raw` (default) writes the value, `sha256-hex` its lowercase hex SHA-256.";
             };
+            allowEmpty = lib.mkOption {
+              type = lib.types.nullOr lib.types.bool;
+              default = null;
+              description = "`opaque` only: deliver an empty decrypted value instead of refusing it.";
+            };
           };
         });
         default = [];

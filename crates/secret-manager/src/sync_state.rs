@@ -61,6 +61,12 @@ pub struct KubernetesMember {
     pub source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub render: Option<KubernetesRender>,
+    #[serde(
+        default,
+        rename = "allowEmpty",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub allow_empty: bool,
 }
 
 impl KubernetesMember {
@@ -373,10 +379,12 @@ fn add_kubernetes_member(
         target: target_key.to_string(),
         source: source.to_string(),
         render: destination.render,
+        allow_empty: destination.allows_empty(),
     };
     let object_destination = KubernetesDestination {
         key: None,
         render: None,
+        allow_empty: None,
         // An explicit default is the implicit one: members compare equal.
         field_manager: destination
             .field_manager
@@ -445,6 +453,7 @@ fn upgrade_v1_record(mut record: ManagedRecord) -> ManagedRecord {
             target: record.target.clone(),
             source: record.source.clone(),
             render: None,
+            allow_empty: false,
         });
         record.kubernetes = Some(KubernetesDestination {
             key: None,

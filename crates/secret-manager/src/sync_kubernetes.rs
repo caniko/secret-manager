@@ -264,8 +264,8 @@ fn import_member(
             member.source
         );
     }
-    if value.is_empty() {
-        bail!("the live value is empty; empty keys cannot be imported");
+    if value.is_empty() && !member.allow_empty {
+        bail!("the live value is empty; set `allowEmpty` to import an empty key");
     }
     let path = root.join(relative);
     let parent = path.parent().context("source has no parent directory")?;
@@ -434,9 +434,9 @@ fn render(record: &ManagedRecord, values: &[Zeroizing<String>]) -> Result<Object
     match destination.format {
         KubernetesFormat::Opaque => {
             for (member, value) in record.members.iter().zip(values) {
-                if value.is_empty() {
+                if value.is_empty() && !member.allow_empty {
                     bail!(
-                        "refusing to sync kubernetes {}/{}/secret/{} key {}: the decrypted value is empty",
+                        "refusing to sync kubernetes {}/{}/secret/{} key {}: the decrypted value is empty; set `allowEmpty` to deliver an empty key",
                         destination.context,
                         destination.namespace,
                         destination.secret,
@@ -1222,6 +1222,7 @@ username = "robot"
             target: "clickhouse".into(),
             source: "age/secrets/home/can/app/syndb_clickhouse_password.age".into(),
             render: None,
+            allow_empty: false,
         };
         import_member(&root, &member, b"live-value", &encryptor).unwrap();
         let written = std::fs::read(root.join(&member.source)).unwrap();
@@ -1236,9 +1237,13 @@ username = "robot"
         assert_eq!(plain(), b"pem\n\n");
         // Never overwrites an existing source.
         assert!(import_member(&root, &member, b"other", &encryptor).is_err());
-        // Empty values are refused; paths stay inside the store.
+        // An empty value only with allowEmpty, stored as one newline that
+        // decryption strips back to empty; paths stay inside the store.
         member.source = "age/secrets/home/can/oauth/syndb_oa_gitlab_secret.age".into();
         assert!(import_member(&root, &member, b"", &encryptor).is_err());
+        member.allow_empty = true;
+        import_member(&root, &member, b"", &encryptor).unwrap();
+        assert_eq!(plain(), b"\n");
         member.source = "../escape.age".into();
         assert!(import_member(&root, &member, b"x", &encryptor).is_err());
     }
@@ -1318,5 +1323,26 @@ username = "robot"
             "empty opaque value accepted"
         );
         assert!(render(api, &values(&["line\n"])).is_ok());
+
+        // allowEmpty delivers the empty key; the rendered manifest holds "".
+        let optional = &desired_records(&doc(serde_json::json!({
+            "gitlab": {"secret":"age/g.age","name":"G","kubernetes":[
+                member("api","oa_gitlab_secret",serde_json::json!({"allowEmpty": true}))]},
+        })))
+        .unwrap()[0];
+        assert!(optional.members[0].allow_empty);
+        let object = render(optional, &values(&[""])).unwrap();
+        let body = manifest(optional, &object, None).unwrap();
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["data"]["oa_gitlab_secret"], "");
+        // dockerconfigjson never takes it.
+        let docker = SyncDocument::from_json(
+            &serde_json::json!({"hosts":[{"targets":{"pull":{"secret":"age/p.age","name":"P",
+                "kubernetes":[{"context":"nrp","namespace":"syndb","secret":"pull",
+                "format":"dockerconfigjson","username":"robot","allowEmpty":true}]}}}]})
+            .to_string(),
+        )
+        .unwrap();
+        assert!(desired_records(&docker).is_err());
     }
 }

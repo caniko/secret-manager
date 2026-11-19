@@ -242,7 +242,10 @@ fn protected_import_rotation_and_failure_preservation_use_only_encrypted_sources
     executable(&encryptor, &encryption_script);
     assert!(run(true).status.success());
     assert_ne!(fs::read(&path).unwrap(), previous);
-    assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+    // The rotated source and its sidecar, which records the rotation; no temp files.
+    assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 2);
+    let stamped = crate::meta::Metadata::load(&path).unwrap();
+    assert_eq!(stamped.rotated_at, Some(crate::meta::today()));
     assert!(
         Command::new("git")
             .arg("init")

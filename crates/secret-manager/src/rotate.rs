@@ -31,7 +31,7 @@
 //!    pretending a multi-file operation was rolled back by restoring one
 //!    file.
 
-use anyhow::{Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::Args;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -93,6 +93,11 @@ pub struct RotateArgs {
     /// children; only the explicit staging calls in this command stage.
     #[arg(long, default_value_t = false)]
     pub no_stage: bool,
+
+    /// Record when the new value expires, `YYYY-MM-DD` or `never`, in the
+    /// source's `.meta.toml` sidecar. Every rotation also stamps `rotated_at`.
+    #[arg(long, value_name = "YYYY-MM-DD|never", value_parser = crate::meta::parse_expires)]
+    pub expires: Option<String>,
 }
 
 impl RotateArgs {
@@ -160,6 +165,29 @@ impl RotateArgs {
         secret_path: &Path,
         existed: bool,
     ) -> Result<()> {
+        // The sidecar records this rotation; it is restored with the source when
+        // anything after the stamp fails, so it never claims a rotation that
+        // did not happen. Snapshot it before any change: only a missing sidecar
+        // counts as absent, so an unreadable one is never deleted on rollback.
+        let sidecar = crate::meta::sidecar_path(secret_path);
+        let sidecar_before = match fs::read(&sidecar) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(anyhow!(
+                    "cannot read {} before rotating: {error}; nothing was changed",
+                    display_rel(repo_root, &sidecar)
+                ));
+            }
+        };
+        let sidecar_rel = crate::meta::sidecar_path(rel);
+        // `git add` stages the paths it can even when another is refused, so an
+        // ignored path is refused here, before anything changes.
+        if !self.no_stage {
+            refuse_ignored(repo_root, &[rel, &sidecar_rel])?;
+            refuse_unusual_index(repo_root, &[rel, &sidecar_rel])?;
+        }
+
         let backup_path = backup_path_for(secret_path);
         // Copy (never move) the working source aside. Exclusive creation
         // fails fast on a leftover backup instead of interleaving with it.
@@ -167,10 +195,36 @@ impl RotateArgs {
             create_backup(secret_path, &backup_path, repo_root)?;
         }
 
+        // `git add` can stage some paths and still fail (sparse-checkout
+        // exclusion, an ignored path): a failure restores these two index
+        // entries exactly, whatever the cause.
+        let index_before = if self.no_stage {
+            None
+        } else {
+            Some(index_snapshot(repo_root, &[rel, &sidecar_rel])?)
+        };
         let outcome = regenerate(repo_root, rel, existed)
             .and_then(|()| validate_fresh(repo_root, secret_path))
-            .and_then(|()| stage_source(repo_root, rel, self.no_stage));
+            .and_then(|()| crate::meta::stamp_rotation(secret_path, self.expires.as_deref()))
+            .and_then(|()| stage_sources(repo_root, &[rel, &sidecar_rel], self.no_stage));
         if let Err(e) = outcome {
+            let e = match &index_before {
+                Some(snapshot) => match restore_index(repo_root, snapshot) {
+                    Ok(()) => e,
+                    Err(r) => anyhow!("{e}\n  and restoring the index entries also failed: {r}"),
+                },
+                None => e,
+            };
+            let _ = match &sidecar_before {
+                Some(bytes) => fs::write(&sidecar, bytes),
+                None => fs::remove_file(&sidecar).or_else(|error| {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        Ok(())
+                    } else {
+                        Err(error)
+                    }
+                }),
+            };
             // Name the recovery only once it has actually happened.
             if existed {
                 // Keep the original failure visible when recovery fails
@@ -575,6 +629,145 @@ pub(crate) fn stage_source(repo_root: &Path, rel: &Path, no_stage: bool) -> Resu
         .to_str()
         .ok_or_else(|| anyhow!("non-utf8 secret path"))?;
     exec::run_in(repo_root, "git", ["add", rel])
+}
+
+/// Fail when git ignores any of `rels`: staging would then add the others and
+/// leave the index out of step with a rollback.
+fn refuse_ignored(repo_root: &Path, rels: &[&Path]) -> Result<()> {
+    let status = std::process::Command::new("git")
+        .args(["check-ignore", "--"])
+        .args(rels)
+        .current_dir(repo_root)
+        .stdout(std::process::Stdio::null())
+        .status()
+        .context("running git check-ignore")?;
+    match status.code() {
+        Some(1) => Ok(()),
+        Some(0) => bail!(
+            "git ignores the source or its .meta.toml sidecar; un-ignore them before rotating (nothing was changed)"
+        ),
+        _ => bail!("git check-ignore failed ({status})"),
+    }
+}
+
+/// Rotation stages, and on failure restores, only ordinary index entries.
+/// An unmerged path or an intent-to-add entry is refused before any change
+/// rather than emulated: replaying its index state is not exact.
+fn refuse_unusual_index(repo_root: &Path, rels: &[&Path]) -> Result<()> {
+    let listed = |args: &[&str]| -> Result<String> {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .arg("--")
+            .args(rels)
+            .current_dir(repo_root)
+            .output()
+            .with_context(|| format!("running git {}", args[0]))?;
+        ensure!(
+            out.status.success(),
+            "git {} failed ({})",
+            args[0],
+            out.status
+        );
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+    };
+    // Unmerged: index stages 1-3. Intent-to-add: the only index entry that
+    // `diff-files` reports as added against the worktree.
+    for (args, state) in [
+        (&["ls-files", "-u"][..], "unmerged"),
+        (
+            &["diff-files", "--name-only", "--diff-filter=A"][..],
+            "intent-to-add",
+        ),
+    ] {
+        let paths = listed(args)?;
+        if !paths.is_empty() {
+            bail!(
+                "{} is {state} in the index; resolve it before rotating (nothing was changed)",
+                paths
+                    .lines()
+                    .next()
+                    .map(|line| line.rsplit('\t').next().unwrap_or(line))
+                    .unwrap_or_default()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The index entries of some paths, to put back after a failed staging.
+struct IndexSnapshot {
+    /// `git ls-files -s -z` records of the paths that had an entry.
+    present: Vec<u8>,
+    /// Paths that had no entry.
+    absent: Vec<PathBuf>,
+}
+
+fn index_snapshot(repo_root: &Path, rels: &[&Path]) -> Result<IndexSnapshot> {
+    let mut snapshot = IndexSnapshot {
+        present: Vec::new(),
+        absent: Vec::new(),
+    };
+    for rel in rels {
+        let listed = std::process::Command::new("git")
+            .args(["ls-files", "-s", "-z", "--"])
+            .arg(rel)
+            .current_dir(repo_root)
+            .output()
+            .context("running git ls-files")?;
+        ensure!(
+            listed.status.success(),
+            "git ls-files failed ({})",
+            listed.status
+        );
+        if listed.stdout.is_empty() {
+            snapshot.absent.push(rel.to_path_buf());
+        } else {
+            snapshot.present.extend_from_slice(&listed.stdout);
+        }
+    }
+    Ok(snapshot)
+}
+
+/// Return the snapshot's paths to exactly their recorded index state.
+fn restore_index(repo_root: &Path, snapshot: &IndexSnapshot) -> Result<()> {
+    use std::io::Write;
+    if !snapshot.present.is_empty() {
+        let mut child = std::process::Command::new("git")
+            .args(["update-index", "-z", "--index-info"])
+            .current_dir(repo_root)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .context("running git update-index")?;
+        child
+            .stdin
+            .take()
+            .context("git update-index stdin")?
+            .write_all(&snapshot.present)?;
+        let status = child.wait()?;
+        ensure!(status.success(), "git update-index failed ({status})");
+    }
+    if !snapshot.absent.is_empty() {
+        let status = std::process::Command::new("git")
+            .args(["rm", "--cached", "-q", "--ignore-unmatch", "--"])
+            .args(&snapshot.absent)
+            .current_dir(repo_root)
+            .status()
+            .context("running git rm --cached")?;
+        ensure!(status.success(), "git rm --cached failed ({status})");
+    }
+    Ok(())
+}
+
+/// Stage several paths in one `git add`.
+fn stage_sources(repo_root: &Path, rels: &[&Path], no_stage: bool) -> Result<()> {
+    if no_stage {
+        return Ok(());
+    }
+    let rels = rels
+        .iter()
+        .map(|rel| rel.to_str().ok_or_else(|| anyhow!("non-utf8 secret path")))
+        .collect::<Result<Vec<_>>>()?;
+    exec::run_in(repo_root, "git", std::iter::once("add").chain(rels))
 }
 
 /// Content snapshot of status-listed files, keyed by repo-relative path.

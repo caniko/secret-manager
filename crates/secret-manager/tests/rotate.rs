@@ -251,13 +251,28 @@ fn rotate_replaces_source_and_leaves_no_backup() {
     let repo = TempRepo::new();
     fs::create_dir_all(repo.repo().join("age/secrets/hosts/atlas")).unwrap();
     fs::write(repo.repo().join(REL), "old-material\n").unwrap();
-    let out = repo.run(&["rotate", "--force", REL], &[]);
+    let out = repo.run(&["rotate", "--force", "--expires", "2027-01-01", REL], &[]);
     assert!(
         out.status.success(),
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(read(&repo, REL), STUB_MATERIAL);
+    let sidecar = REL.replace(".age", ".meta.toml");
+    let meta = read(&repo, &sidecar);
+    assert!(meta.contains("expiry = \"2027-01-01\""), "{meta}");
+    let today = secret_manager::meta::today();
+    assert!(
+        meta.contains(&format!("rotated_at = \"{today}\"")),
+        "{meta}"
+    );
+    assert!(
+        repo.cached_names()
+            .iter()
+            .any(|name| name.ends_with("token.meta.toml")),
+        "sidecar must be staged: {:?}",
+        repo.cached_names()
+    );
     assert!(
         !repo.repo().join(format!("{REL}.rotbak")).exists(),
         "backup must be dropped on success"
@@ -270,6 +285,104 @@ fn rotate_replaces_source_and_leaves_no_backup() {
 }
 
 #[test]
+fn an_ignored_or_unreadable_sidecar_refuses_before_any_change() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = TempRepo::new();
+    fs::create_dir_all(repo.repo().join("age/secrets/hosts/atlas")).unwrap();
+    fs::write(repo.repo().join(REL), "old-material\n").unwrap();
+    let sidecar = repo.repo().join(REL.replace(".age", ".meta.toml"));
+
+    // Ignored sidecar: staging would add the source alone.
+    fs::write(repo.repo().join(".gitignore"), "*.meta.toml\n").unwrap();
+    let out = repo.run(&["rotate", "--force", REL], &[]);
+    assert!(!out.status.success(), "an ignored sidecar must refuse");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("ignores"));
+    assert_eq!(read(&repo, REL), "old-material\n");
+    assert!(!sidecar.exists() && repo.cached_names().is_empty());
+    assert!(
+        !repo.log().contains("--force-generate"),
+        "nothing may be regenerated"
+    );
+    fs::remove_file(repo.repo().join(".gitignore")).unwrap();
+
+    // Unreadable sidecar: never mistaken for absent, never deleted.
+    fs::write(&sidecar, "schema = 1\nproject = \"keep\"\n").unwrap();
+    fs::set_permissions(&sidecar, fs::Permissions::from_mode(0o000)).unwrap();
+    let readable = fs::read(&sidecar).is_ok(); // root ignores modes
+    let out = repo.run(&["rotate", "--force", REL], &[]);
+    fs::set_permissions(&sidecar, fs::Permissions::from_mode(0o644)).unwrap();
+    if !readable {
+        assert!(!out.status.success(), "an unreadable sidecar must refuse");
+        assert_eq!(read(&repo, REL), "old-material\n");
+        assert!(fs::read_to_string(&sidecar).unwrap().contains("keep"));
+        assert!(!repo.log().contains("--force-generate"));
+    }
+}
+
+#[test]
+fn a_partial_git_add_restores_the_index_entries() {
+    // Sparse-checkout exclusion of the sidecar passes check-ignore, yet `git
+    // add` stages the source and fails on the sidecar.
+    let repo = TempRepo::new();
+    fs::create_dir_all(repo.repo().join("age/secrets/hosts/atlas")).unwrap();
+    fs::write(repo.repo().join(REL), "old-material\n").unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(repo.repo())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out.stdout
+    };
+    git(&["add", "--", REL]);
+    let before = git(&["ls-files", "--stage"]);
+    git(&[
+        "sparse-checkout",
+        "set",
+        "--no-cone",
+        "/flake.nix",
+        &format!("/{REL}"),
+    ]);
+    let out = repo.run(&["rotate", "--force", REL], &[]);
+    assert!(!out.status.success(), "the sidecar cannot be staged");
+    assert_eq!(read(&repo, REL), "old-material\n");
+    assert_eq!(
+        git(&["ls-files", "--stage"]),
+        before,
+        "index entries restored"
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("restoring the index entries also failed")
+    );
+}
+
+#[test]
+fn an_intent_to_add_source_is_refused_before_any_change() {
+    let repo = TempRepo::new();
+    fs::create_dir_all(repo.repo().join("age/secrets/hosts/atlas")).unwrap();
+    fs::write(repo.repo().join(REL), "old-material\n").unwrap();
+    let added = Command::new("git")
+        .args(["add", "-N", "--", REL])
+        .current_dir(repo.repo())
+        .status()
+        .unwrap();
+    assert!(added.success());
+    let out = repo.run(&["rotate", "--force", REL], &[]);
+    assert!(!out.status.success(), "an intent-to-add source must refuse");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("intent-to-add"));
+    assert_eq!(read(&repo, REL), "old-material\n");
+    assert!(
+        !repo.log().contains("--force-generate"),
+        "nothing may be regenerated"
+    );
+}
+
+#[test]
 fn generate_failure_preserves_bytes_and_index() {
     let repo = TempRepo::new();
     fs::create_dir_all(repo.repo().join("age/secrets/hosts/atlas")).unwrap();
@@ -277,6 +390,10 @@ fn generate_failure_preserves_bytes_and_index() {
     repo.marker("fail-generate");
     let out = repo.run(&["rotate", "--force", REL], &[]);
     assert!(!out.status.success(), "generate failure must fail");
+    assert!(
+        !repo.repo().join(REL.replace(".age", ".meta.toml")).exists(),
+        "a failed rotation must not record one"
+    );
     assert_eq!(
         read(&repo, REL),
         "old-material\n",

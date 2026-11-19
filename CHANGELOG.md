@@ -2,6 +2,41 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-19
+
+Additive for the command line: without `--category`, every writer produces the
+same paths and Nix as before. Breaking for Rust callers: `render_modules` takes a
+category and returns a `Result`, `CommonSourceArgs` gains `category` and
+`expires`, `KubernetesDestination` gains `allow_empty`, and the Forgejo key-pair
+plan functions take a category and an expiry.
+
+### Added
+
+- `layout`: the canonical source layout,
+  `age/secrets/{home/<user>,home/shared,root/hosts/<host>,root/modules}/<category>/<name>.age`,
+  over nine categories (`signing`, `ssh`, `ai`, `forge`, `registry`, `oauth`,
+  `cloud`, `app`, `system`). `source_path` builds and `parse` recognises these
+  paths; source names may contain dots.
+- `--category` on every writer: the source is placed in the layout and the
+  generated module names it with the category-taking resolver
+  (`secrets.user USER CATEGORY NAME`, `secrets.host HOST CATEGORY NAME`,
+  `secrets.module CATEGORY NAME`).
+- Versioned `<name>.meta.toml` sidecars (`schema = 1`): `expiry` (`YYYY-MM-DD` or
+  `never`; absent is unknown), `rotated_at`, `project`, `custodian`, `kind` and
+  `[rotation]`. Every write stamps `rotated_at`; `--expires` on every writer
+  records the expiry. `sync --import` writes neither, since an imported value's
+  age is unknown.
+- `classify`: edits a sidecar without reading the value.
+- `inventory`: one value-free JSON document of every source in the layout, with
+  tree, scope, category, project, kind, custodian, expiry (`at`, `never` or
+  `unknown`), rotation date and guide, and optional consumers
+  (`--consumers FILE`). `--write PATH --mode OCTAL` replaces a file atomically.
+  `--check` reports sources outside the layout, symlink aliases, orphan
+  sidecars, repeated names, missing custodians and unreadable sidecars; embedders
+  call `inventory::check` warn-only.
+- `allowEmpty` on opaque Kubernetes destinations: an empty value is delivered
+  instead of refused, in the same single-touch decrypt (nix-manager-core 0.4.7).
+
 ## [0.6.1] - 2026-11-18
 
 ### Added
@@ -337,7 +372,8 @@ runner-env add`), and Pkl evaluation via nix-pklx.
 - Corrected "foregejo" typos to "forgejo" in Nix module paths and source
   references.
 
-[Unreleased]: https://github.com/caniko/secret-manager/compare/0.6.1...HEAD
+[Unreleased]: https://github.com/caniko/secret-manager/compare/0.7.0...HEAD
+[0.7.0]: https://github.com/caniko/secret-manager/compare/0.6.1...0.7.0
 [0.6.1]: https://github.com/caniko/secret-manager/compare/0.6.0...0.6.1
 [0.6.0]: https://github.com/caniko/secret-manager/compare/0.5.0...0.6.0
 [0.5.0]: https://github.com/caniko/secret-manager/compare/0.4.8...0.5.0
