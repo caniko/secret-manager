@@ -16,6 +16,7 @@ pub mod github_token;
 pub mod gpg;
 pub mod guide;
 pub mod io;
+pub mod layout;
 pub mod legacy;
 pub mod pkl;
 pub mod plan;
