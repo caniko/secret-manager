@@ -3,6 +3,7 @@
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 
+use anyhow::{Result, bail};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
@@ -65,24 +66,39 @@ pub struct SourceId {
     pub name: String,
 }
 
-/// Construct a source path. Panics if a scope or name is not a valid slug.
-pub fn source_path(owner: Owner<'_>, category: Category, name: &str) -> PathBuf {
-    assert!(validate_slug(name).is_ok(), "invalid source name");
+/// Validate a source name independently of the more restrictive scope slug.
+pub fn validate_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || name.starts_with(['-', '.'])
+        || name.ends_with(['-', '.'])
+        || name.contains("..")
+        || !name
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))
+    {
+        bail!("invalid source name: {name}");
+    }
+    Ok(())
+}
+
+/// Construct a source path after validating its scope and name.
+pub fn source_path(owner: Owner<'_>, category: Category, name: &str) -> Result<PathBuf> {
+    validate_name(name)?;
     let mut path = PathBuf::from("age/secrets");
     match owner {
         Owner::Home(scope) => {
-            assert!(validate_slug(scope).is_ok(), "invalid home scope");
+            validate_slug(scope)?;
             path.extend(["home", scope]);
         }
         Owner::Host(scope) => {
-            assert!(validate_slug(scope).is_ok(), "invalid host scope");
+            validate_slug(scope)?;
             path.extend(["root", "hosts", scope]);
         }
         Owner::Module => path.extend(["root", "modules"]),
     }
     path.push(category.to_string());
     path.push(format!("{name}.age"));
-    path
+    Ok(path)
 }
 
 /// Parse only canonical, relative source paths with valid slug components.
@@ -106,7 +122,7 @@ pub fn parse(rel: &Path) -> Option<SourceId> {
     };
     let name = file.strip_suffix(".age")?;
     validate_slug(scope).ok()?;
-    validate_slug(name).ok()?;
+    validate_name(name).ok()?;
     Some(SourceId {
         tree,
         scope: scope.to_owned(),
@@ -121,6 +137,27 @@ mod tests {
     use std::path::Path;
 
     #[test]
+    fn source_names_accept_real_files_and_reject_unsafe_names() {
+        for name in [
+            "cloudflare_candee_api_token.env",
+            "luks_sbctl_recovery.tar",
+            "github_access_tokens.conf",
+            "instantclone-kick-main",
+        ] {
+            let path = source_path(Owner::Home("can"), Category::Cloud, name).unwrap();
+            assert_eq!(parse(&path).unwrap().name, name);
+        }
+        for name in [
+            "", "-a", "a-", ".a", "a.", "a..b", "a/b", "a\\b", "a b", "é",
+        ] {
+            assert!(validate_name(name).is_err(), "{name}");
+            assert!(source_path(Owner::Home("can"), Category::Cloud, name).is_err());
+            assert!(parse(Path::new(&format!("age/secrets/home/can/cloud/{name}.age"))).is_none());
+        }
+        assert!(source_path(Owner::Home("bad scope"), Category::Cloud, "valid").is_err());
+    }
+
+    #[test]
     fn round_trip_and_reject_invalid_paths() {
         for owner in [
             Owner::Home("can"),
@@ -128,7 +165,7 @@ mod tests {
             Owner::Host("atlas"),
             Owner::Module,
         ] {
-            let path = source_path(owner, Category::Oauth, "client_secret");
+            let path = source_path(owner, Category::Oauth, "client_secret").unwrap();
             let id = parse(&path).unwrap();
             assert_eq!(id.category, Category::Oauth);
             assert_eq!(id.name, "client_secret");
