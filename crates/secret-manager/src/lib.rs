@@ -18,6 +18,7 @@ pub mod guide;
 pub mod io;
 pub mod layout;
 pub mod legacy;
+pub mod meta;
 pub mod pkl;
 pub mod plan;
 pub mod protection;

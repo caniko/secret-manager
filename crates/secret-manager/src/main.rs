@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 
 use secret_manager::env::LocalEnv;
 use secret_manager::{
-    add, claude_token, github_app, gpg, guide, legacy, push, registry, rotate, sync,
+    add, claude_token, github_app, gpg, guide, legacy, meta, push, registry, rotate, sync,
 };
 
 #[derive(Parser)]
@@ -47,6 +47,9 @@ enum Command {
 
     /// List every *.age file tracked in the repo.
     List,
+
+    /// Classify a source without reading its encrypted value.
+    Classify(meta::ClassifyArgs),
 
     /// Read collected sync targets and push each declared value to its
     /// declared forge Actions destinations.
@@ -102,6 +105,7 @@ fn main() -> anyhow::Result<()> {
         Command::Claude(cmd) => cmd.run(),
         Command::Registry(cmd) => cmd.run(),
         Command::List => legacy::list(),
+        Command::Classify(args) => args.run(),
         Command::Sync(args) => args.run(),
         Command::Push(args) => args.run(),
         Command::Decrypt(args) => args.run(),
