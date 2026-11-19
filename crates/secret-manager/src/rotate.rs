@@ -129,7 +129,7 @@ impl RotateArgs {
         if !existed && secret_path.symlink_metadata().is_ok() {
             bail!(
                 "refusing to rotate {}: not a regular file",
-                display_rel(&repo_root, &secret_path)
+                display_rel(repo_root, secret_path)
             );
         }
 
@@ -144,14 +144,14 @@ impl RotateArgs {
             if backup_path.exists() {
                 bail!(
                     "refusing to preserve {}: leftover backup {} means a previous rotation was interrupted; inspect both files, restore or remove the backup manually, then retry",
-                    display_rel(&repo_root, &secret_path),
+                    display_rel(repo_root, secret_path),
                     display_rel(repo_root, &backup_path)
                 );
             }
             validate_usable(repo_root, secret_path).map_err(|e| {
                 anyhow!(
                     "refusing to preserve {}: {e}\n  pass --force to replace it, or restore a known-good copy first",
-                    display_rel(&repo_root, &secret_path)
+                    display_rel(repo_root, secret_path)
                 )
             })?;
             eprintln!(
