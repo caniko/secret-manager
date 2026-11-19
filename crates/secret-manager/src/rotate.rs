@@ -31,7 +31,7 @@
 //!    pretending a multi-file operation was rolled back by restoring one
 //!    file.
 
-use anyhow::{Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::Args;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -165,6 +165,28 @@ impl RotateArgs {
         secret_path: &Path,
         existed: bool,
     ) -> Result<()> {
+        // The sidecar records this rotation; it is restored with the source when
+        // anything after the stamp fails, so it never claims a rotation that
+        // did not happen. Snapshot it before any change: only a missing sidecar
+        // counts as absent, so an unreadable one is never deleted on rollback.
+        let sidecar = crate::meta::sidecar_path(secret_path);
+        let sidecar_before = match fs::read(&sidecar) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(anyhow!(
+                    "cannot read {} before rotating: {error}; nothing was changed",
+                    display_rel(repo_root, &sidecar)
+                ));
+            }
+        };
+        let sidecar_rel = crate::meta::sidecar_path(rel);
+        // `git add` stages the paths it can even when another is refused, so an
+        // ignored path is refused here, before anything changes.
+        if !self.no_stage {
+            refuse_ignored(repo_root, &[rel, &sidecar_rel])?;
+        }
+
         let backup_path = backup_path_for(secret_path);
         // Copy (never move) the working source aside. Exclusive creation
         // fails fast on a leftover backup instead of interleaving with it.
@@ -172,17 +194,11 @@ impl RotateArgs {
             create_backup(secret_path, &backup_path, repo_root)?;
         }
 
-        // The sidecar records this rotation; it is restored with the source when
-        // anything after the stamp fails, so it never claims a rotation that
-        // did not happen.
-        let sidecar = crate::meta::sidecar_path(secret_path);
-        let sidecar_before = fs::read(&sidecar).ok();
-        let sidecar_rel = crate::meta::sidecar_path(rel);
         let outcome = regenerate(repo_root, rel, existed)
             .and_then(|()| validate_fresh(repo_root, secret_path))
             .and_then(|()| crate::meta::stamp_rotation(secret_path, self.expires.as_deref()))
-            .and_then(|()| stage_source(repo_root, rel, self.no_stage))
-            .and_then(|()| stage_source(repo_root, &sidecar_rel, self.no_stage));
+            // One `git add` for both; ignored paths were refused up front.
+            .and_then(|()| stage_sources(repo_root, &[rel, &sidecar_rel], self.no_stage));
         if let Err(e) = outcome {
             let _ = match &sidecar_before {
                 Some(bytes) => fs::write(&sidecar, bytes),
@@ -598,6 +614,37 @@ pub(crate) fn stage_source(repo_root: &Path, rel: &Path, no_stage: bool) -> Resu
         .to_str()
         .ok_or_else(|| anyhow!("non-utf8 secret path"))?;
     exec::run_in(repo_root, "git", ["add", rel])
+}
+
+/// Fail when git ignores any of `rels`: staging would then add the others and
+/// leave the index out of step with a rollback.
+fn refuse_ignored(repo_root: &Path, rels: &[&Path]) -> Result<()> {
+    let status = std::process::Command::new("git")
+        .args(["check-ignore", "--"])
+        .args(rels)
+        .current_dir(repo_root)
+        .stdout(std::process::Stdio::null())
+        .status()
+        .context("running git check-ignore")?;
+    match status.code() {
+        Some(1) => Ok(()),
+        Some(0) => bail!(
+            "git ignores the source or its .meta.toml sidecar; un-ignore them before rotating (nothing was changed)"
+        ),
+        _ => bail!("git check-ignore failed ({status})"),
+    }
+}
+
+/// Stage several paths in one `git add`.
+fn stage_sources(repo_root: &Path, rels: &[&Path], no_stage: bool) -> Result<()> {
+    if no_stage {
+        return Ok(());
+    }
+    let rels = rels
+        .iter()
+        .map(|rel| rel.to_str().ok_or_else(|| anyhow!("non-utf8 secret path")))
+        .collect::<Result<Vec<_>>>()?;
+    exec::run_in(repo_root, "git", std::iter::once("add").chain(rels))
 }
 
 /// Content snapshot of status-listed files, keyed by repo-relative path.

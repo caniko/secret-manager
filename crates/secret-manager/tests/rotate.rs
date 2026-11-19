@@ -285,6 +285,41 @@ fn rotate_replaces_source_and_leaves_no_backup() {
 }
 
 #[test]
+fn an_ignored_or_unreadable_sidecar_refuses_before_any_change() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = TempRepo::new();
+    fs::create_dir_all(repo.repo().join("age/secrets/hosts/atlas")).unwrap();
+    fs::write(repo.repo().join(REL), "old-material\n").unwrap();
+    let sidecar = repo.repo().join(REL.replace(".age", ".meta.toml"));
+
+    // Ignored sidecar: staging would add the source alone.
+    fs::write(repo.repo().join(".gitignore"), "*.meta.toml\n").unwrap();
+    let out = repo.run(&["rotate", "--force", REL], &[]);
+    assert!(!out.status.success(), "an ignored sidecar must refuse");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("ignores"));
+    assert_eq!(read(&repo, REL), "old-material\n");
+    assert!(!sidecar.exists() && repo.cached_names().is_empty());
+    assert!(
+        !repo.log().contains("--force-generate"),
+        "nothing may be regenerated"
+    );
+    fs::remove_file(repo.repo().join(".gitignore")).unwrap();
+
+    // Unreadable sidecar: never mistaken for absent, never deleted.
+    fs::write(&sidecar, "schema = 1\nproject = \"keep\"\n").unwrap();
+    fs::set_permissions(&sidecar, fs::Permissions::from_mode(0o000)).unwrap();
+    let readable = fs::read(&sidecar).is_ok(); // root ignores modes
+    let out = repo.run(&["rotate", "--force", REL], &[]);
+    fs::set_permissions(&sidecar, fs::Permissions::from_mode(0o644)).unwrap();
+    if !readable {
+        assert!(!out.status.success(), "an unreadable sidecar must refuse");
+        assert_eq!(read(&repo, REL), "old-material\n");
+        assert!(fs::read_to_string(&sidecar).unwrap().contains("keep"));
+        assert!(!repo.log().contains("--force-generate"));
+    }
+}
+
+#[test]
 fn generate_failure_preserves_bytes_and_index() {
     let repo = TempRepo::new();
     fs::create_dir_all(repo.repo().join("age/secrets/hosts/atlas")).unwrap();

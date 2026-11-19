@@ -105,8 +105,18 @@ impl std::fmt::Display for Violation {
 fn store_files(root: &Path) -> (Vec<(PathBuf, bool)>, Vec<Violation>) {
     let mut files = Vec::new();
     let mut errors = Vec::new();
-    if !root.join(STORE).exists() {
-        return (files, errors);
+    // Only a store without age/secrets is empty; any other failure to look is
+    // an error, never "nothing there".
+    match std::fs::symlink_metadata(root.join(STORE)) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return (files, errors),
+        Err(error) => {
+            errors.push(Violation {
+                path: STORE.into(),
+                reason: format!("unreadable: {error}"),
+            });
+            return (files, errors);
+        }
+        Ok(_) => {}
     }
     for entry in walkdir::WalkDir::new(root.join(STORE)).follow_links(false) {
         match entry {
@@ -473,6 +483,18 @@ mod tests {
             "{violations:#?}"
         );
         assert!(built.is_err(), "a partial inventory must not be emitted");
+
+        // An inaccessible age/ is an error too, not an empty store.
+        let age = dir.path().join("age");
+        std::fs::set_permissions(&age, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let hidden = check(dir.path());
+        let built = build(dir.path(), &BTreeMap::new());
+        std::fs::set_permissions(&age, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            hidden.iter().any(|v| v.reason.contains("unreadable")),
+            "{hidden:#?}"
+        );
+        assert!(built.is_err());
         assert!(build(tempfile::tempdir().unwrap().path(), &BTreeMap::new()).is_ok());
     }
 
