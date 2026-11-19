@@ -194,12 +194,26 @@ impl RotateArgs {
             create_backup(secret_path, &backup_path, repo_root)?;
         }
 
+        // `git add` can stage some paths and still fail (sparse-checkout
+        // exclusion, an ignored path): a failure restores these two index
+        // entries exactly, whatever the cause.
+        let index_before = if self.no_stage {
+            None
+        } else {
+            Some(index_snapshot(repo_root, &[rel, &sidecar_rel])?)
+        };
         let outcome = regenerate(repo_root, rel, existed)
             .and_then(|()| validate_fresh(repo_root, secret_path))
             .and_then(|()| crate::meta::stamp_rotation(secret_path, self.expires.as_deref()))
-            // One `git add` for both; ignored paths were refused up front.
             .and_then(|()| stage_sources(repo_root, &[rel, &sidecar_rel], self.no_stage));
         if let Err(e) = outcome {
+            let e = match &index_before {
+                Some(snapshot) => match restore_index(repo_root, snapshot) {
+                    Ok(()) => e,
+                    Err(r) => anyhow!("{e}\n  and restoring the index entries also failed: {r}"),
+                },
+                None => e,
+            };
             let _ = match &sidecar_before {
                 Some(bytes) => fs::write(&sidecar, bytes),
                 None => fs::remove_file(&sidecar).or_else(|error| {
@@ -633,6 +647,70 @@ fn refuse_ignored(repo_root: &Path, rels: &[&Path]) -> Result<()> {
         ),
         _ => bail!("git check-ignore failed ({status})"),
     }
+}
+
+/// The index entries of some paths, to put back after a failed staging.
+struct IndexSnapshot {
+    /// `git ls-files -s -z` records of the paths that had an entry.
+    present: Vec<u8>,
+    /// Paths that had no entry.
+    absent: Vec<PathBuf>,
+}
+
+fn index_snapshot(repo_root: &Path, rels: &[&Path]) -> Result<IndexSnapshot> {
+    let mut snapshot = IndexSnapshot {
+        present: Vec::new(),
+        absent: Vec::new(),
+    };
+    for rel in rels {
+        let listed = std::process::Command::new("git")
+            .args(["ls-files", "-s", "-z", "--"])
+            .arg(rel)
+            .current_dir(repo_root)
+            .output()
+            .context("running git ls-files")?;
+        ensure!(
+            listed.status.success(),
+            "git ls-files failed ({})",
+            listed.status
+        );
+        if listed.stdout.is_empty() {
+            snapshot.absent.push(rel.to_path_buf());
+        } else {
+            snapshot.present.extend_from_slice(&listed.stdout);
+        }
+    }
+    Ok(snapshot)
+}
+
+/// Return the snapshot's paths to exactly their recorded index state.
+fn restore_index(repo_root: &Path, snapshot: &IndexSnapshot) -> Result<()> {
+    use std::io::Write;
+    if !snapshot.present.is_empty() {
+        let mut child = std::process::Command::new("git")
+            .args(["update-index", "-z", "--index-info"])
+            .current_dir(repo_root)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .context("running git update-index")?;
+        child
+            .stdin
+            .take()
+            .context("git update-index stdin")?
+            .write_all(&snapshot.present)?;
+        let status = child.wait()?;
+        ensure!(status.success(), "git update-index failed ({status})");
+    }
+    if !snapshot.absent.is_empty() {
+        let status = std::process::Command::new("git")
+            .args(["rm", "--cached", "-q", "--ignore-unmatch", "--"])
+            .args(&snapshot.absent)
+            .current_dir(repo_root)
+            .status()
+            .context("running git rm --cached")?;
+        ensure!(status.success(), "git rm --cached failed ({status})");
+    }
+    Ok(())
 }
 
 /// Stage several paths in one `git add`.

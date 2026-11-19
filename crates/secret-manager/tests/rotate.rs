@@ -320,6 +320,48 @@ fn an_ignored_or_unreadable_sidecar_refuses_before_any_change() {
 }
 
 #[test]
+fn a_partial_git_add_restores_the_index_entries() {
+    // Sparse-checkout exclusion of the sidecar passes check-ignore, yet `git
+    // add` stages the source and fails on the sidecar.
+    let repo = TempRepo::new();
+    fs::create_dir_all(repo.repo().join("age/secrets/hosts/atlas")).unwrap();
+    fs::write(repo.repo().join(REL), "old-material\n").unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(repo.repo())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out.stdout
+    };
+    git(&["add", "--", REL]);
+    let before = git(&["ls-files", "--stage"]);
+    git(&[
+        "sparse-checkout",
+        "set",
+        "--no-cone",
+        "/flake.nix",
+        &format!("/{REL}"),
+    ]);
+    let out = repo.run(&["rotate", "--force", REL], &[]);
+    assert!(!out.status.success(), "the sidecar cannot be staged");
+    assert_eq!(read(&repo, REL), "old-material\n");
+    assert_eq!(
+        git(&["ls-files", "--stage"]),
+        before,
+        "index entries restored"
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("restoring the index entries also failed")
+    );
+}
+
+#[test]
 fn generate_failure_preserves_bytes_and_index() {
     let repo = TempRepo::new();
     fs::create_dir_all(repo.repo().join("age/secrets/hosts/atlas")).unwrap();
