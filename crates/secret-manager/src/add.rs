@@ -68,6 +68,17 @@ pub struct ExecutionArgs {
     /// Skip `git add` staging where possible.
     #[arg(long, default_value_t = false)]
     pub no_stage: bool,
+
+    /// Place the source in the canonical layout,
+    /// `age/secrets/{home/<user>,root/hosts/<host>,root/modules}/<category>/<name>.age`,
+    /// and name it with the category-taking resolver. Without it, the historical paths.
+    #[arg(long, value_enum)]
+    pub category: Option<crate::layout::Category>,
+
+    /// Record when the new value expires, `YYYY-MM-DD` or `never`, in the source's
+    /// `.meta.toml` sidecar. Every write also stamps `rotated_at` with today's date.
+    #[arg(long, value_name = "YYYY-MM-DD|never", value_parser = crate::meta::parse_expires)]
+    pub expires: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -525,7 +536,7 @@ impl HmSshArgs {
                     algorithm: self.algorithm.clone(),
                 }),
                 targets: Vec::new(),
-                source_only_paths: vec![shared_secret_path(&self.name)],
+                source_only_paths: vec![shared_secret_path(&self.name, self.exec.category)?],
             });
         }
         let file = self
@@ -570,7 +581,7 @@ impl HmPasswordArgs {
                 vec![shared_home_target(&self.name, self.env.clone())?]
             };
             let source_only_paths = if targets.is_empty() {
-                vec![shared_secret_path(&self.name)]
+                vec![shared_secret_path(&self.name, self.exec.category)?]
             } else {
                 Vec::new()
             };
@@ -620,12 +631,12 @@ impl HmTextArgs {
                 .ok_or_else(|| anyhow!("hm text --bare requires --name"))?;
             validate_slug(&slug)?;
             let source_only_paths = if self.target.shared {
-                vec![shared_secret_path(&slug)]
+                vec![shared_secret_path(&slug, self.exec.category)?]
             } else {
                 let user = resolve_home_user(&self.target.user, env)?;
                 vec![
                     home_target(&user, &slug, Vec::new(), None)?
-                        .secret_path(&env.host_secret_dir()),
+                        .secret_path_for(&env.host_secret_dir(), self.exec.category)?,
                 ]
             };
             return Ok(AddPlan {
@@ -647,7 +658,7 @@ impl HmTextArgs {
                 vec![shared_home_target(&slug, self.env.clone())?]
             };
             let source_only_paths = if targets.is_empty() {
-                vec![shared_secret_path(&slug)]
+                vec![shared_secret_path(&slug, self.exec.category)?]
             } else {
                 Vec::new()
             };
@@ -696,7 +707,7 @@ impl HmFileArgs {
                 slug: slug.clone(),
                 source: source.clone(),
                 targets: Vec::new(),
-                source_only_paths: vec![shared_secret_path(&slug)],
+                source_only_paths: vec![shared_secret_path(&slug, self.exec.category)?],
             });
         }
         let file = self
@@ -801,7 +812,12 @@ impl NixosTextArgs {
                 slug: slug.clone(),
                 source: SourceKind::Plaintext,
                 targets: Vec::new(),
-                source_only_paths: vec![host_secret_path(env, &self.target.host, &slug)],
+                source_only_paths: vec![host_secret_path(
+                    env,
+                    &self.target.host,
+                    &slug,
+                    self.exec.category,
+                )?],
             });
         }
         if self.env.is_empty() {
@@ -868,7 +884,13 @@ impl NixosFileArgs {
 impl ForgejoSshArgs {
     pub fn run(self) -> Result<()> {
         let plan = self.build_plan()?;
-        run_forgejo_ssh_key_plan(&plan, self.exec.no_stage, self.exec.no_rekey)
+        run_forgejo_ssh_key_plan(
+            &plan,
+            self.exec.no_stage,
+            self.exec.no_rekey,
+            self.exec.category,
+            self.exec.expires.as_deref(),
+        )
     }
 
     fn build_plan(&self) -> Result<ForgejoSshKeyPlan> {
@@ -885,7 +907,12 @@ impl ForgejoSshArgs {
 impl ForgejoGpgKeyPairArgs {
     pub fn run(self) -> Result<()> {
         let plan = self.build_plan()?;
-        run_forgejo_gpg_key_pair_plan(&plan, self.exec.no_stage, self.exec.no_rekey)
+        run_forgejo_gpg_key_pair_plan(
+            &plan,
+            self.exec.no_stage,
+            self.exec.no_rekey,
+            self.exec.expires.as_deref(),
+        )
     }
 
     fn build_plan(&self) -> Result<ForgejoGpgKeyPairPlan> {
@@ -897,6 +924,7 @@ impl ForgejoGpgKeyPairArgs {
             self.from_file.clone(),
             self.from_age.clone(),
             self.rotate,
+            self.exec.category,
         )
     }
 }
@@ -991,6 +1019,8 @@ fn common_generate_ssh(algorithm: &str, exec: &ExecutionArgs) -> Result<CommonSo
     Ok(CommonSourceArgs {
         no_rekey: exec.no_rekey,
         no_stage: exec.no_stage,
+        category: exec.category,
+        expires: exec.expires.clone(),
         ..CommonSourceArgs::default()
     })
 }
@@ -1000,6 +1030,8 @@ fn common_generate_password(length: u32, exec: &ExecutionArgs) -> Result<CommonS
     Ok(CommonSourceArgs {
         no_rekey: exec.no_rekey,
         no_stage: exec.no_stage,
+        category: exec.category,
+        expires: exec.expires.clone(),
         ..CommonSourceArgs::default()
     })
 }
@@ -1009,6 +1041,8 @@ fn common_plaintext(from_file: Option<PathBuf>, exec: &ExecutionArgs) -> CommonS
         from_file,
         no_rekey: exec.no_rekey,
         no_stage: exec.no_stage,
+        category: exec.category,
+        expires: exec.expires.clone(),
         ..CommonSourceArgs::default()
     }
 }
@@ -1022,6 +1056,8 @@ fn common_plaintext_with_editor(
         editor_when_tty: true,
         no_rekey: exec.no_rekey,
         no_stage: exec.no_stage,
+        category: exec.category,
+        expires: exec.expires.clone(),
         ..CommonSourceArgs::default()
     }
 }
@@ -1041,6 +1077,8 @@ fn common_source(
         force_existing,
         no_rekey: exec.no_rekey,
         no_stage: exec.no_stage,
+        category: exec.category,
+        expires: exec.expires.clone(),
     }
 }
 
@@ -1051,16 +1089,31 @@ fn resolve_home_user(user: &Option<String>, env: &dyn StoreEnv) -> Result<String
     env.resolve_home_user()
 }
 
-fn host_secret_path(env: &dyn StoreEnv, host: &str, slug: &str) -> PathBuf {
-    env.host_secret_dir()
-        .join(format!("{}/{}.age", host, slug.replace('-', "_")))
+fn host_secret_path(
+    env: &dyn StoreEnv,
+    host: &str,
+    slug: &str,
+    category: Option<crate::layout::Category>,
+) -> Result<PathBuf> {
+    let name = slug.replace('-', "_");
+    match category {
+        Some(category) => {
+            crate::layout::source_path(crate::layout::Owner::Host(host), category, &name)
+        }
+        None => Ok(env.host_secret_dir().join(format!("{host}/{name}.age"))),
+    }
 }
 
-fn shared_secret_path(slug: &str) -> PathBuf {
-    PathBuf::from(format!(
-        "age/secrets/users/shared/{}.age",
-        slug.replace('-', "_")
-    ))
+fn shared_secret_path(slug: &str, category: Option<crate::layout::Category>) -> Result<PathBuf> {
+    let name = slug.replace('-', "_");
+    match category {
+        Some(category) => {
+            crate::layout::source_path(crate::layout::Owner::Home("shared"), category, &name)
+        }
+        None => Ok(PathBuf::from(format!(
+            "age/secrets/users/shared/{name}.age"
+        ))),
+    }
 }
 
 fn shared_home_target(slug: &str, env_vars: Vec<String>) -> Result<TargetSpec> {

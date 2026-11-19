@@ -120,6 +120,26 @@ impl TargetSpec {
         }
     }
 
+    /// The source path, in the canonical layout when `category` is given and
+    /// in the historical paths otherwise.
+    pub fn secret_path_for(
+        &self,
+        host_dir: &Path,
+        category: Option<crate::layout::Category>,
+    ) -> anyhow::Result<PathBuf> {
+        use crate::layout::{Owner, source_path};
+        let Some(category) = category else {
+            return Ok(self.secret_path(host_dir));
+        };
+        let (owner, slug) = match self {
+            TargetSpec::Home(t) => (Owner::Home(&t.user), &t.slug),
+            TargetSpec::SharedHome(t) => (Owner::Home("shared"), &t.slug),
+            TargetSpec::System(t) => (Owner::Host(&t.host), &t.slug),
+            TargetSpec::Forgejo(t) => (Owner::Module, &t.slug),
+        };
+        source_path(owner, category, &slug.replace('-', "_"))
+    }
+
     pub fn module_path(&self) -> PathBuf {
         match self {
             TargetSpec::Home(t) => PathBuf::from(format!(
@@ -171,20 +191,33 @@ pub fn render_modules(
     host_dir: &Path,
     targets: &[TargetSpec],
     generator: Option<&GeneratorSpec>,
-) -> Vec<RenderedModule> {
+    category: Option<crate::layout::Category>,
+) -> anyhow::Result<Vec<RenderedModule>> {
     targets
         .iter()
-        .map(|target| RenderedModule {
-            path: target.module_path(),
-            body: render_body(target, generator),
-            default_nix: target.default_nix(),
-            secret_path: target.secret_path(host_dir),
-            stack: target.stack(),
+        .map(|target| {
+            Ok(RenderedModule {
+                path: target.module_path(),
+                body: render_body_in(target, generator, category),
+                default_nix: target.default_nix(),
+                secret_path: target.secret_path_for(host_dir, category)?,
+                stack: target.stack(),
+            })
         })
         .collect()
 }
 
 pub fn render_body(target: &TargetSpec, generator: Option<&GeneratorSpec>) -> String {
+    render_body_in(target, generator, None)
+}
+
+/// [`render_body`], naming the source through the category-taking resolver
+/// forms when `category` is given.
+pub fn render_body_in(
+    target: &TargetSpec,
+    generator: Option<&GeneratorSpec>,
+    category: Option<crate::layout::Category>,
+) -> String {
     let age_name = match target {
         TargetSpec::Home(t) => &t.age_name,
         TargetSpec::SharedHome(t) => &t.age_name,
@@ -198,7 +231,7 @@ pub fn render_body(target: &TargetSpec, generator: Option<&GeneratorSpec>) -> St
         TargetSpec::Forgejo(_) => "forgejo",
     };
 
-    let source = render_source(&target.source_expr());
+    let source = render_source(&target.source_expr(), category);
     let generator_lines = render_generator(generator);
     let targets = render_targets(target);
 
@@ -234,21 +267,41 @@ fn render_generator(generator: Option<&GeneratorSpec>) -> String {
     }
 }
 
-fn render_source(source: &SourceExpr) -> String {
+/// The `source = …;` line a generated module carries for `target`.
+pub(crate) fn render_source_line(
+    target: &TargetSpec,
+    category: Option<crate::layout::Category>,
+) -> String {
+    format!(
+        "source = {};",
+        render_source(&target.source_expr(), category)
+    )
+}
+
+/// The resolver call naming a source. With a category it is the canonical
+/// layout's `secrets.user USER CATEGORY NAME`, `secrets.host HOST CATEGORY
+/// NAME` or `secrets.module CATEGORY NAME`; a module subpath keeps only its
+/// last component, the category taking the directory's place.
+fn render_source(source: &SourceExpr, category: Option<crate::layout::Category>) -> String {
+    let category = category.map(|c| format!(" \"{c}\"")).unwrap_or_default();
     match source {
         SourceExpr::User { user, slug } => {
             format!(
-                "secrets.user \"{}\" \"{}\"",
+                "secrets.user \"{}\"{category} \"{}\"",
                 nix_string(user),
                 nix_string(slug)
             )
         }
         SourceExpr::Host { host, slug } => {
             format!(
-                "secrets.host \"{}\" \"{}\"",
+                "secrets.host \"{}\"{category} \"{}\"",
                 nix_string(host),
                 nix_string(slug)
             )
+        }
+        SourceExpr::Module { subpath } if !category.is_empty() => {
+            let name = subpath.rsplit('/').next().unwrap_or(subpath);
+            format!("secrets.module{category} \"{}\"", nix_string(name))
         }
         SourceExpr::Module { subpath } => format!("secrets.module \"{}\"", nix_string(subpath)),
     }
@@ -358,6 +411,68 @@ pub fn camel(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::env::DEFAULT_HOST_SECRET_DIR;
+
+    #[test]
+    fn category_selects_canonical_paths_and_resolver_forms() {
+        use crate::layout::Category;
+        let home = TargetSpec::Home(HomeTarget {
+            user: "can".into(),
+            slug: "syndb-oa-github-secret".into(),
+            age_name: "can-syndb-oa-github-secret".into(),
+            env_vars: vec!["OA_GITHUB_SECRET".into()],
+            file_path: None,
+        });
+        let system = TargetSpec::System(SystemTarget {
+            host: "thething".into(),
+            slug: "vikunja-mailer".into(),
+            age_name: "thething-vikunja-mailer".into(),
+            env_vars: vec!["MAILER".into()],
+            services: Vec::new(),
+            file_path: None,
+        });
+        let forgejo = TargetSpec::Forgejo(ForgejoTarget {
+            slug: "runner-token".into(),
+            age_name: "actions-runner-token".into(),
+            credential_name: Some("token".into()),
+            instances: vec!["actions".into()],
+        });
+        let cases = [
+            (
+                &home,
+                Category::Oauth,
+                "age/secrets/home/can/oauth/syndb_oa_github_secret.age",
+                "source = secrets.user \"can\" \"oauth\" \"syndb-oa-github-secret\";",
+            ),
+            (
+                &system,
+                Category::App,
+                "age/secrets/root/hosts/thething/app/vikunja_mailer.age",
+                "source = secrets.host \"thething\" \"app\" \"vikunja-mailer\";",
+            ),
+            (
+                &forgejo,
+                Category::Forge,
+                "age/secrets/root/modules/forge/runner_token.age",
+                "source = secrets.module \"forge\" \"runner-token\";",
+            ),
+        ];
+        for (target, category, path, source) in cases {
+            let modules = render_modules(
+                host_dir(),
+                std::slice::from_ref(target),
+                None,
+                Some(category),
+            )
+            .unwrap();
+            assert_eq!(modules[0].secret_path, Path::new(path));
+            assert!(modules[0].body.contains(source), "{}", modules[0].body);
+            // Without a category: the historical path and two-argument form.
+            let legacy =
+                render_modules(host_dir(), std::slice::from_ref(target), None, None).unwrap();
+            assert_eq!(legacy[0].secret_path, target.secret_path(host_dir()));
+            assert_eq!(legacy[0].body, render_body(target, None));
+        }
+    }
 
     fn host_dir() -> &'static Path {
         Path::new(DEFAULT_HOST_SECRET_DIR)

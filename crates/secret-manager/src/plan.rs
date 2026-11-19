@@ -23,6 +23,10 @@ pub struct CommonSourceArgs {
     pub force_existing: bool,
     pub no_rekey: bool,
     pub no_stage: bool,
+    /// Place sources in the canonical layout under this category.
+    pub category: Option<crate::layout::Category>,
+    /// `YYYY-MM-DD` or `never`, recorded in the sidecar with the rotation date.
+    pub expires: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,7 +85,8 @@ pub fn run_plan(args: &CommonSourceArgs, plan: AddPlan, env: &dyn StoreEnv) -> R
             SourceKind::Generate(generator) => Some(generator),
             SourceKind::Plaintext | SourceKind::FromAge(_) | SourceKind::Rbw { .. } => None,
         },
-    );
+        args.category,
+    )?;
 
     if let SourceKind::Rbw { source, rotate } = &plan.source {
         return run_rbw_plan(&repo_root, args, &plan, &modules, (source, *rotate), env);
@@ -96,6 +101,7 @@ pub fn run_plan(args: &CommonSourceArgs, plan: AddPlan, env: &dyn StoreEnv) -> R
     match &plan.source {
         SourceKind::Generate(generator) => {
             generate_declared_secrets(&repo_root, &modules, &plan.source_only_paths, generator)?;
+            stamp_written_sources(&repo_root, &modules, &plan.source_only_paths, args)?;
             finish_generate(
                 &repo_root,
                 &modules,
@@ -106,6 +112,7 @@ pub fn run_plan(args: &CommonSourceArgs, plan: AddPlan, env: &dyn StoreEnv) -> R
             print_generated_summary(&repo_root, &modules, &plan.source_only_paths);
         }
         SourceKind::Plaintext | SourceKind::FromAge(_) | SourceKind::Rbw { .. } => {
+            stamp_written_sources(&repo_root, &modules, &plan.source_only_paths, args)?;
             let paths = touched_paths(&repo_root, &modules, &plan.source_only_paths, true);
             let refs = paths.iter().map(PathBuf::as_path).collect::<Vec<_>>();
             stage_and_rekey(&repo_root, &refs, args.no_stage, args.no_rekey)?;
@@ -113,6 +120,20 @@ pub fn run_plan(args: &CommonSourceArgs, plan: AddPlan, env: &dyn StoreEnv) -> R
         }
     }
 
+    Ok(())
+}
+
+/// Record the rotation date (and `--expires`) beside every source this run
+/// wrote. Sidecars are staged with their sources by `touched_paths`.
+fn stamp_written_sources(
+    repo_root: &Path,
+    modules: &[RenderedModule],
+    source_only_paths: &[PathBuf],
+    args: &CommonSourceArgs,
+) -> Result<()> {
+    for path in planned_secret_paths(modules, source_only_paths) {
+        crate::meta::stamp_rotation(&repo_root.join(path), args.expires.as_deref())?;
+    }
     Ok(())
 }
 
@@ -189,11 +210,13 @@ fn run_rbw_plan_with<G>(
             encryptor.encrypt_new(&destination, &payload)?;
         }
         drop(payload);
+        crate::meta::stamp_rotation(&destination, args.expires.as_deref())?;
         if !rotate {
             write_modules(root, modules)?;
         }
         let touched = if rotate {
-            vec![destination.clone()]
+            let sidecar = crate::meta::sidecar_path(&destination);
+            vec![destination.clone(), sidecar]
         } else {
             touched_paths(root, modules, &plan.source_only_paths, true)
         };
@@ -216,6 +239,7 @@ fn run_rbw_plan_with<G>(
 #[path = "plan/rbw_tests.rs"]
 mod rbw_tests;
 
+#[allow(clippy::too_many_arguments)] // flat CLI options, one call site
 pub fn build_forgejo_gpg_key_pair_plan(
     name: &str,
     cred: &str,
@@ -224,6 +248,7 @@ pub fn build_forgejo_gpg_key_pair_plan(
     from_file: Option<PathBuf>,
     from_age: Option<PathBuf>,
     rotate: bool,
+    category: Option<crate::layout::Category>,
 ) -> Result<ForgejoGpgKeyPairPlan> {
     validate_slug(name)?;
     validate_ident(cred, "cred")?;
@@ -251,11 +276,16 @@ pub fn build_forgejo_gpg_key_pair_plan(
         user_id,
         source,
         rotate,
-        secret_path: PathBuf::from(format!(
-            "age/secrets/modules/{}/{}.age",
-            module_dir.trim_matches('/'),
-            name
-        )),
+        secret_path: match category {
+            Some(category) => {
+                crate::layout::source_path(crate::layout::Owner::Module, category, name)?
+            }
+            None => PathBuf::from(format!(
+                "age/secrets/modules/{}/{}.age",
+                module_dir.trim_matches('/'),
+                name
+            )),
+        },
     })
 }
 
@@ -263,6 +293,7 @@ pub fn run_forgejo_gpg_key_pair_plan(
     plan: &ForgejoGpgKeyPairPlan,
     no_stage: bool,
     no_rekey: bool,
+    expires: Option<&str>,
 ) -> Result<()> {
     let repo_root = std::env::current_dir()?;
     let secret_path = repo_root.join(&plan.secret_path);
@@ -304,6 +335,9 @@ pub fn run_forgejo_gpg_key_pair_plan(
             display_rel(&repo_root, &secret_path)
         );
     }
+    if should_write_private {
+        crate::meta::stamp_rotation(&secret_path, expires)?;
+    }
 
     let private_key = view_age_secret(&plan.secret_path)?;
     validate_armored_private_gpg_key(&private_key)?;
@@ -311,7 +345,11 @@ pub fn run_forgejo_gpg_key_pair_plan(
     fs::write(&public_path, &public.public_key)?;
     fs::write(&fingerprint_path, format!("{}\n", public.fingerprint))?;
 
+    let sidecar = crate::meta::sidecar_path(&secret_path);
     let mut paths = vec![secret_path, public_path, fingerprint_path];
+    if sidecar.exists() {
+        paths.push(sidecar);
+    }
     paths.sort();
     stage_paths(&repo_root, &paths, no_stage)?;
 
@@ -387,6 +425,8 @@ pub fn run_forgejo_ssh_key_plan(
     plan: &ForgejoSshKeyPlan,
     no_stage: bool,
     no_rekey: bool,
+    category: Option<crate::layout::Category>,
+    expires: Option<&str>,
 ) -> Result<()> {
     let repo_root = std::env::current_dir()?;
     let generator = GeneratorSpec::SshKey {
@@ -396,7 +436,8 @@ pub fn run_forgejo_ssh_key_plan(
         Path::new(DEFAULT_HOST_SECRET_DIR),
         std::slice::from_ref(&plan.target),
         Some(&generator),
-    )
+        category,
+    )?
     .into_iter()
     .next()
     .ok_or_else(|| anyhow!("internal error: forgejo ssh-key plan rendered no module"))?;
@@ -408,7 +449,7 @@ pub fn run_forgejo_ssh_key_plan(
 
     if module_existed {
         let existing = fs::read_to_string(&module_path)?;
-        validate_existing_forgejo_ssh_key_module(&existing, plan)?;
+        validate_existing_forgejo_ssh_key_module(&existing, plan, category)?;
         write_forgejo_ssh_key_module(&repo_root, &module, &module.body, false)?;
     } else {
         if secret_path.exists() {
@@ -427,6 +468,9 @@ pub fn run_forgejo_ssh_key_plan(
     }
 
     let generated = generate_or_preserve_forgejo_ssh_key(&module, &secret_path, plan.rotate)?;
+    if generated {
+        crate::meta::stamp_rotation(&secret_path, expires)?;
+    }
     if generated && !no_rekey {
         exec::run("agenix", ["rekey", "-a"])?;
     } else if generated {
@@ -443,9 +487,13 @@ pub fn run_forgejo_ssh_key_plan(
     )?;
     fs::write(&module_path, body)?;
 
+    let sidecar = crate::meta::sidecar_path(&secret_path);
     let mut paths = vec![module_path, secret_path];
     if !module_existed {
         paths.push(default_nix);
+    }
+    if sidecar.exists() {
+        paths.push(sidecar);
     }
     let pub_path = repo_root.join(&module.secret_path).with_extension("pub");
     if pub_path.exists() {
@@ -464,11 +512,12 @@ pub fn run_forgejo_ssh_key_plan(
     Ok(())
 }
 
-fn validate_existing_forgejo_ssh_key_module(body: &str, plan: &ForgejoSshKeyPlan) -> Result<()> {
-    let source_line = format!(
-        "source = secrets.module \"forgejo-runner/{}\";",
-        nix_string(&plan.slug)
-    );
+fn validate_existing_forgejo_ssh_key_module(
+    body: &str,
+    plan: &ForgejoSshKeyPlan,
+    category: Option<crate::layout::Category>,
+) -> Result<()> {
+    let source_line = crate::render::render_source_line(&plan.target, category);
     let mk_secret_call = format!("{LIB_BINDING}.mkSecret");
     for required in [
         mk_secret_call.as_str(),
@@ -1062,18 +1111,26 @@ fn touched_paths(
         paths.insert(repo_root.join(&module.default_nix));
         if include_secret {
             paths.insert(repo_root.join(&module.secret_path));
-            let pub_path = repo_root.join(&module.secret_path).with_extension("pub");
-            if pub_path.exists() {
-                paths.insert(pub_path);
+            for sidecar in [
+                repo_root.join(&module.secret_path).with_extension("pub"),
+                crate::meta::sidecar_path(&repo_root.join(&module.secret_path)),
+            ] {
+                if sidecar.exists() {
+                    paths.insert(sidecar);
+                }
             }
         }
     }
     if include_secret {
         for source_path in source_only_paths {
             paths.insert(repo_root.join(source_path));
-            let pub_path = repo_root.join(source_path).with_extension("pub");
-            if pub_path.exists() {
-                paths.insert(pub_path);
+            for sidecar in [
+                repo_root.join(source_path).with_extension("pub"),
+                crate::meta::sidecar_path(&repo_root.join(source_path)),
+            ] {
+                if sidecar.exists() {
+                    paths.insert(sidecar);
+                }
             }
         }
     }

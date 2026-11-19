@@ -146,6 +146,48 @@ pub fn sidecar_path(source: &Path) -> PathBuf {
     source.with_extension("meta.toml")
 }
 
+/// clap value parser for `--expires`: a calendar date `YYYY-MM-DD` or `never`.
+pub fn parse_expires(value: &str) -> std::result::Result<String, String> {
+    if value == "never" || valid_date(value) {
+        Ok(value.to_owned())
+    } else {
+        Err("expected YYYY-MM-DD or `never`".into())
+    }
+}
+
+/// Today's UTC date as `YYYY-MM-DD` (civil-from-days, proleptic Gregorian).
+pub fn today() -> String {
+    let days = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() / 86_400) as i64;
+    civil_date(days)
+}
+
+fn civil_date(days: i64) -> String {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+/// After a value was written to `source`: stamp `rotated_at = today` and set
+/// `expiry` when given. Other fields are kept. Never called for an import,
+/// whose value has an unknown age.
+pub fn stamp_rotation(source: &Path, expires: Option<&str>) -> Result<()> {
+    let mut metadata = Metadata::load(source)?;
+    metadata.rotated_at = Some(today());
+    if let Some(expires) = expires {
+        metadata.expiry = Some(expires.to_owned());
+    }
+    metadata.save(source)
+}
+
 /// Metadata-only classification; does not alter the encrypted source or rotation date.
 #[derive(clap::Args, Debug)]
 pub struct ClassifyArgs {
@@ -206,6 +248,41 @@ impl ClassifyArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn civil_dates_and_rotation_stamp() {
+        assert_eq!(civil_date(0), "1970-01-01");
+        assert_eq!(civil_date(20_772), "2026-11-15");
+        assert_eq!(civil_date(-1), "1969-12-31");
+        assert_eq!(civil_date(11_016), "2000-02-29");
+        assert!(valid_date(&today()));
+        assert!(parse_expires("never").is_ok() && parse_expires("2027-02-13").is_ok());
+        assert!(parse_expires("2027-02-29").is_err() && parse_expires("soon").is_err());
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("token.age");
+        std::fs::write(&source, b"ciphertext").unwrap();
+        Metadata {
+            project: Some("syndb".into()),
+            ..Metadata::default()
+        }
+        .save(&source)
+        .unwrap();
+        stamp_rotation(&source, Some("never")).unwrap();
+        let stamped = Metadata::load(&source).unwrap();
+        assert_eq!(stamped.rotated_at.as_deref(), Some(today().as_str()));
+        assert_eq!(stamped.expiry.as_deref(), Some("never"));
+        assert_eq!(
+            stamped.project.as_deref(),
+            Some("syndb"),
+            "other fields kept"
+        );
+        stamp_rotation(&source, None).unwrap();
+        assert_eq!(
+            Metadata::load(&source).unwrap().expiry.as_deref(),
+            Some("never")
+        );
+    }
 
     #[test]
     fn metadata_validation_and_atomic_save() {
