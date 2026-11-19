@@ -51,6 +51,9 @@ enum Command {
     /// Classify a source without reading its encrypted value.
     Classify(meta::ClassifyArgs),
 
+    /// Print the value-free secret inventory as JSON, or check the store layout.
+    Inventory(secret_manager::inventory::InventoryArgs),
+
     /// Read collected sync targets and push each declared value to its
     /// declared forge Actions destinations.
     Sync(sync::SyncArgs),
@@ -106,6 +109,7 @@ fn main() -> anyhow::Result<()> {
         Command::Registry(cmd) => cmd.run(),
         Command::List => legacy::list(),
         Command::Classify(args) => args.run(),
+        Command::Inventory(args) => args.run(),
         Command::Sync(args) => args.run(),
         Command::Push(args) => args.run(),
         Command::Decrypt(args) => args.run(),

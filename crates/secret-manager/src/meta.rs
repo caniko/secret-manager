@@ -157,10 +157,26 @@ pub fn parse_expires(value: &str) -> std::result::Result<String, String> {
 
 /// Today's UTC date as `YYYY-MM-DD` (civil-from-days, proleptic Gregorian).
 pub fn today() -> String {
-    let days = std::time::SystemTime::now()
+    civil_date(epoch_seconds() / 86_400)
+}
+
+/// Now as an RFC 3339 UTC timestamp, `YYYY-MM-DDTHH:MM:SSZ`.
+pub fn utc_timestamp() -> String {
+    let seconds = epoch_seconds();
+    let day = seconds.rem_euclid(86_400);
+    format!(
+        "{}T{:02}:{:02}:{:02}Z",
+        civil_date(seconds.div_euclid(86_400)),
+        day / 3_600,
+        day % 3_600 / 60,
+        day % 60
+    )
+}
+
+fn epoch_seconds() -> i64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() / 86_400) as i64;
-    civil_date(days)
+        .map_or(0, |d| d.as_secs() as i64)
 }
 
 fn civil_date(days: i64) -> String {
@@ -192,7 +208,7 @@ pub fn stamp_rotation(source: &Path, expires: Option<&str>) -> Result<()> {
 #[derive(clap::Args, Debug)]
 pub struct ClassifyArgs {
     pub path: PathBuf,
-    #[arg(long)]
+    #[arg(long, value_name = "YYYY-MM-DD|never", value_parser = parse_expires)]
     pub expires: Option<String>,
     #[arg(long)]
     pub kind: Option<Kind>,

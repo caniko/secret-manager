@@ -15,6 +15,7 @@ pub mod github_app;
 pub mod github_token;
 pub mod gpg;
 pub mod guide;
+pub mod inventory;
 pub mod io;
 pub mod layout;
 pub mod legacy;
