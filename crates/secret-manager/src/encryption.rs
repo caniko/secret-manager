@@ -155,8 +155,8 @@ fn persist(path: &Path, ciphertext: &[u8], previous: Option<&[u8]>) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
     use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
 
     fn backend(root: &Path, script: &str) -> StreamEncryptor {
         let executable = root.join("encryptor");
