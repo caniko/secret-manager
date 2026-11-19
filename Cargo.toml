@@ -12,7 +12,7 @@ authors = ["caniko"]
 readme = "README.md"
 
 [workspace.dependencies]
-nix-manager-core = "0.4.5"
+nix-manager-core = "0.4.7"
 caniko-secret-manager-schema = { version = "=0.6.1", path = "crates/secret-manager-schema" }
 anyhow = "1"
 base64 = "0.23"

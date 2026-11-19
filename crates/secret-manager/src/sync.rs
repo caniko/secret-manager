@@ -1023,7 +1023,13 @@ fn member_values(
     record
         .members
         .iter()
-        .map(|member| cache.get(store, &SyncValue::Secret(member.source.clone()), session))
+        .map(|member| {
+            if member.allow_empty {
+                cache.get_secret_allowing_empty(store, &member.source, session)
+            } else {
+                cache.get(store, &SyncValue::Secret(member.source.clone()), session)
+            }
+        })
         .collect()
 }
 
@@ -1043,8 +1049,9 @@ impl SyncValueCache {
             SyncValue::Secret(secret) => {
                 let path = validated_secret_path(store, secret)?;
                 let key = SyncValueCacheKey::new(SyncValueCacheKind::Secret, path.clone());
-                // Rejects an empty payload and strips one trailing newline.
-                self.get_or_load(key, || {
+                // Strips one trailing newline; an empty value is refused even when
+                // an allowEmpty member of the same source cached it.
+                let value = self.get_or_load(key, || {
                     let session = decrypt_session.ok_or_else(|| {
                         anyhow!(
                             "encrypted sync target {} requires an age decrypt session",
@@ -1052,7 +1059,11 @@ impl SyncValueCache {
                         )
                     })?;
                     age::decrypt_with_session(&path, session)
-                })
+                })?;
+                if value.is_empty() {
+                    bail!("decrypted payload of {} is empty", path.display());
+                }
+                Ok(value)
             }
             SyncValue::Source(source) => {
                 let path = validated_source_path(store, source)?;
@@ -1060,6 +1071,27 @@ impl SyncValueCache {
                 self.get_or_load(key, || read_plaintext_source_path(&path))
             }
         }
+    }
+
+    /// A secret source whose empty value is accepted (a Kubernetes `allowEmpty`
+    /// member). Prefetched in the same plugin session as every other source.
+    fn get_secret_allowing_empty(
+        &mut self,
+        store: &Store,
+        secret: &str,
+        decrypt_session: Option<&age::DecryptSession>,
+    ) -> Result<zeroize::Zeroizing<String>> {
+        let path = validated_secret_path(store, secret)?;
+        let key = SyncValueCacheKey::new(SyncValueCacheKind::Secret, path.clone());
+        self.get_or_load(key, || {
+            let session = decrypt_session.ok_or_else(|| {
+                anyhow!(
+                    "encrypted sync target {} requires an age decrypt session",
+                    path.display()
+                )
+            })?;
+            age::decrypt_with_session_allowing_empty(&path, session)
+        })
     }
 
     fn get_or_load(

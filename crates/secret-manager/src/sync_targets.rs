@@ -184,6 +184,14 @@ pub struct KubernetesDestination {
     /// `opaque` only; defaults to [`KubernetesRender::Raw`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub render: Option<KubernetesRender>,
+    /// `opaque` only: deliver an empty decrypted value instead of refusing it.
+    /// Defaults to `false`.
+    #[serde(
+        default,
+        rename = "allowEmpty",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub allow_empty: Option<bool>,
 }
 
 /// Identity of one live Secret: `(context, namespace, name)`.
@@ -235,6 +243,10 @@ impl KubernetesDestination {
         self.render.unwrap_or_default()
     }
 
+    pub fn allows_empty(&self) -> bool {
+        self.allow_empty.unwrap_or(false)
+    }
+
     /// The Secret object this destination writes: members sharing it are
     /// applied together as one manifest.
     pub fn object(&self) -> KubernetesObject {
@@ -280,8 +292,10 @@ impl KubernetesDestination {
                 }
             }
             KubernetesFormat::Dockerconfigjson => {
-                if self.render.is_some() {
-                    bail!("Kubernetes `dockerconfigjson` secrets do not take `render`");
+                if self.render.is_some() || self.allow_empty.is_some() {
+                    bail!(
+                        "Kubernetes `dockerconfigjson` secrets do not take `render` or `allowEmpty`"
+                    );
                 }
                 if self.key.is_some() {
                     bail!(
