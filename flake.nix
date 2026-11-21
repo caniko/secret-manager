@@ -2,7 +2,7 @@
   description = "Declarative secret management for NixOS — resolve and render age/agenix secrets in Rust";
 
   inputs = {
-    harbor-rs.url = "git+https://github.com/caniko/harbor-rs.git?ref=trunk&rev=7f03d58b0e6e748b4817417ff21958e074ec6faf";
+    harbor-rs.url = "git+https://github.com/caniko/harbor-rs.git?ref=trunk&rev=33312a7129b202dbcc833532b6eb588bf8014ed4";
 
     nixpkgs.follows = "harbor-rs/nixpkgs";
     rust-overlay.follows = "harbor-rs/rust-overlay";
