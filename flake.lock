@@ -698,11 +698,11 @@
         "treefmt-nix": "treefmt-nix_2"
       },
       "locked": {
-        "lastModified": 1792683091,
-        "narHash": "sha256-Mo/NI0d+HF9ioM8g7C1nLHxvuLdqPhc24XZOFHF4Zc0=",
+        "lastModified": 1795247143,
+        "narHash": "sha256-3kcRO1PEkbHhjutfjvnhldSRhsk0sI3eH2NcVqag94Q=",
         "ref": "trunk",
-        "rev": "0fd1008ef63d031d44d54431f04615c3098a56ed",
-        "revCount": 53,
+        "rev": "0d98f0972a2172663c33ef2cf4096c68cac1a8f0",
+        "revCount": 73,
         "type": "git",
         "url": "https://github.com/caniko/harbor-meta.git"
       },
@@ -749,17 +749,17 @@
         "rust-overlay": "rust-overlay_2"
       },
       "locked": {
-        "lastModified": 1794304475,
-        "narHash": "sha256-Hb8H+UGcTHmUfX2+REmgvIaPYIRhWm3rcwa2tuZlcFg=",
+        "lastModified": 1795248565,
+        "narHash": "sha256-XYLD7lTIBn5IfFBFwMk0FqsgAD3z38PxtynQgIsl+oA=",
         "ref": "trunk",
-        "rev": "7f03d58b0e6e748b4817417ff21958e074ec6faf",
-        "revCount": 321,
+        "rev": "33312a7129b202dbcc833532b6eb588bf8014ed4",
+        "revCount": 366,
         "type": "git",
         "url": "https://github.com/caniko/harbor-rs.git"
       },
       "original": {
         "ref": "trunk",
-        "rev": "7f03d58b0e6e748b4817417ff21958e074ec6faf",
+        "rev": "33312a7129b202dbcc833532b6eb588bf8014ed4",
         "type": "git",
         "url": "https://github.com/caniko/harbor-rs.git"
       }
