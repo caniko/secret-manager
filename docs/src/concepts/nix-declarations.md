@@ -1,12 +1,11 @@
 # Nix Declarations
 
-The engine generates Nix modules that call `mkSecret` to declare each
-secret. These modules are consumed by the NixOS/home-manager
-configuration that calls `agenix`.
+The engine generates Nix modules for the NixOS/home-manager configuration
+that calls `agenix`. The modules declare each secret with `mkSecret`.
 
 ## mkSecret
 
-The core function that declares a single agenix secret:
+Declare one agenix secret:
 
 ```nix
 canixLib.mkSecret {
@@ -79,8 +78,8 @@ targets.forgejo.credential = {
 
 ## mkSharedSecret
 
-A convenience wrapper that produces a secret declaration for all three stacks
-from a single source file. Each stack is optional:
+Declare a secret for any of the three stacks from one source file.
+Each stack is optional:
 
 ```nix
 canixLib.mkSharedSecret {
@@ -103,7 +102,7 @@ canixLib.mkSharedSecret {
 
 ## Source expressions
 
-The `source` parameter resolves the `.age` file path:
+`source` resolves to the `.age` file:
 
 ```nix
 # User-scoped secret
@@ -119,7 +118,7 @@ secrets.module "forgejo-runner/copr-token"
 ## Generators
 
 `lib.mkGenerators {rotateCommand ? "secret-manager rotate"}` returns the
-agenix-rekey generators behind the names `mkSecret` emits
+agenix-rekey generators named by `mkSecret`
 (`strong-passphrase`, `strong-passphrase-48`, `strong-passphrase-64`,
 `ssh-ed25519-pub`, `ssh-rsa-pub`, `gpg-key-pair`) plus `minisign-key-pair`.
 Register them on every agenix module that evaluates these secrets:
@@ -130,5 +129,5 @@ age.generators = secret-manager.lib.mkGenerators {};
 
 Passphrases avoid every character special to a systemd `EnvironmentFile` or a
 shell `export`. `minisign-key-pair` depends on exactly one password secret and
-encrypts the key with it; `rotateCommand` is quoted in its error when that
-password has not been generated yet.
+encrypts the key with it. If the password is not yet generated, the error
+quotes `rotateCommand`.

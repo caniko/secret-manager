@@ -1,22 +1,22 @@
 # Importing from Bitwarden
 
-The `hm file`, `nixos file`, and `forgejo file` commands accept `--from-rbw`
-with an exact Bitwarden item UUID. Unlocking belongs to rbw and pinentry; the
-bridge never asks for or stores the vault password. Install rbw 1.15 or later
-and authenticate it before importing. See [Ownership Boundary](../concepts/ownership-boundary.md)
-for how vault import and store encryption in `secret-manager` are separated from
-`nix-provenance` and consumer `age/secrets/` repositories.
+Install and authenticate rbw 1.15 or later. Pass `--from-rbw` with the exact
+Bitwarden item UUID to `hm file`, `nixos file`, or `forgejo file`. rbw and
+pinentry unlock the vault; the bridge never asks for or stores its password.
+See [Ownership Boundary](../concepts/ownership-boundary.md) for the split between
+`secret-manager` (vault import and store encryption), `nix-provenance`, and
+consumer `age/secrets/` repositories.
 
 ```sh
 secret-manager hm file --shared --name service-token \
   --from-rbw 12345678-1234-1234-1234-123456789abc --rbw-field password
 ```
 
-The default field is `password`. Built-ins include `username`, `password`,
-`totp`, and `notes`. Select custom fields with `custom:NAME`; ambiguous or empty
-fields fail. `totp` returns the stored seed or URI, not a current one-time code.
+Built-in fields include `username`, `password` (default), `totp`, and `notes`.
+Use `custom:NAME` for custom fields; ambiguous or empty fields fail.
+`totp` returns the stored seed or URI, not a current one-time code.
 
-Build a JSON document from one item snapshot with repeated mappings:
+Repeat `--rbw-map` to build JSON from one item snapshot:
 
 ```sh
 secret-manager hm file --shared --name application-account \
@@ -25,16 +25,16 @@ secret-manager hm file --shared --name application-account \
   --rbw-map totpSecret=totp
 ```
 
-Only mapped fields enter the document. JSON escaping is automatic. All mapped
-fields are required; omit an optional mapping when it is absent. Application
-adapters own validation of their document and TOTP parameters before encryption.
-This generic projection preserves field values exactly.
+Only mapped fields enter the JSON, with automatic escaping and unchanged
+values. Mapped fields are required; omit mappings for absent optional fields.
+Each application adapter must validate its own document and TOTP parameters
+before encryption.
 
-By default rbw uses its encrypted local cache. `--rbw-sync` explicitly syncs
-first; a failed sync prevents importing stale data. `--rbw-timeout-seconds`
-sets a 1–300 second deadline per invocation, including pinentry interaction
-(default 120 seconds). Helper output is capped at 1 MiB and a selected document
-at 512 KiB. Child diagnostics are suppressed because they may contain secrets.
+rbw defaults to its encrypted local cache. `--rbw-sync` syncs first; failure
+blocks stale imports. `--rbw-timeout-seconds` sets a 1–300 second deadline per
+invocation, including pinentry (default 120 seconds). Limits: 1 MiB of helper
+output and 512 KiB per selected document. The bridge suppresses child
+diagnostics because they may contain secrets.
 
 ## Encryption policy
 
@@ -50,51 +50,51 @@ packages.agenix-stream-encryptor = secret-manager.lib.mkAgenixStreamEncryptor {
 };
 ```
 
-This adapter uses agenix-rekey's native master-encryption backend, including
-master identities, extra encryption recipients and configured age plugins.
-Select the same nodes and `agePackage` as the existing rekey workflow. Unsupported
-backend contracts fail during evaluation.
+The adapter uses agenix-rekey's native master-encryption backend: master
+identities, extra encryption recipients, and configured age plugins. Match
+the rekey workflow's nodes and `agePackage`. Evaluation rejects unsupported
+backend contracts.
 
-Set `SECRET_MANAGER_AGE_ENCRYPTOR` to its absolute executable path for the
-standalone CLI. Embedders can instead implement `StoreEnv::stream_encryptor`;
-resolve and realize public encryption policy before reading the vault, and
-release any Nix evaluation lease before subprocess work.
+For the standalone CLI, set `SECRET_MANAGER_AGE_ENCRYPTOR` to the absolute
+encryptor path. Embedders can implement `StoreEnv::stream_encryptor` instead.
+Resolve and realize public encryption policy before vault reads; release any
+Nix evaluation lease before running subprocesses.
 
-The bridge uses private stdout/stdin pipes and zeroizing owned credential
-buffers, disables core dumps, and writes only ciphertext to a mode-0600
-temporary file beside the destination. Installation is atomic and refuses an
-existing source by default. Vault contents never enter command arguments, Nix
-expressions, or a plaintext temporary file. Scoped staging and `agenix rekey`
-follow encryption; `--no-stage` and `--no-rekey` retain their existing meaning.
-Inherited agenix auto-staging is disabled; only newly distributed copies are
-staged, and existing work in the distribution directory is preserved.
+The bridge uses private stdout/stdin pipes and owned, zeroizing credential
+buffers. It disables core dumps and writes only ciphertext to a mode-0600
+temporary file beside the destination. Installation is atomic and rejects
+existing sources by default. No vault contents enter command arguments, Nix
+expressions, or plaintext temporary files. Scoped staging and `agenix rekey`
+follow encryption, subject to `--no-stage` and `--no-rekey`. The bridge disables
+inherited agenix auto-staging, stages only newly distributed copies, and
+preserves existing work in the distribution directory.
 
-Standalone RBW imports reexecute the original command in a no-swap user scope
-when needed, then verify the effective kernel limit and acquire a logind sleep
-inhibitor before vault lookup. The guard remains held through field projection,
-encryption, installation and rekey; unavailable protection fails before vault
-effects. Public encryption-policy preparation precedes this boundary.
+After preparing public encryption policy, standalone RBW imports rerun the
+original command in a no-swap user scope if needed. Before vault lookup, they
+verify the effective kernel limit and acquire a logind sleep inhibitor. Without
+protection they abort before affecting the vault; otherwise they hold the guard
+through field projection, encryption, installation, and rekey.
 
 ## Rotation and recovery
 
-Repeat the same import with `--rbw-rotate` to replace an existing source. Rotation
-requires an existing binary age v1 file and preserves module wiring. It cannot
-add a new home/system/runner target. RBW imports, generated rotations and adapters
-using `with_store_write_lock` share the existing secret-manager kernel lock.
+`--rbw-rotate` requires an existing binary age v1 source and replaces it in
+place. Rotation preserves module wiring and cannot add home/system/runner
+targets. RBW imports, generated rotations, and adapters using
+`with_store_write_lock` share the secret-manager kernel lock.
 
-Missing fields, lookup failure and encryption failure leave existing ciphertext
-intact. Source changes observed before vault lookup, after acquiring the lock,
-or before installation abort replacement. Direct editors and raw `agenix` calls
-do not automatically acquire this lock; concurrent writes through those paths
-are outside the cooperative preservation guarantee. Installation is an atomic
-rename, not filesystem compare-and-swap. A failed rekey retains the newly
-encrypted source: retry staging and `agenix rekey -a` before deploying. Never
-restore the old source after distributing a new one to some consumers.
+Missing fields, lookup failures, and encryption failures leave ciphertext
+intact. Replacement aborts if it detects a source change before vault lookup,
+after locking, or before installation. Direct editors and raw `agenix` calls
+do not automatically lock; concurrent writes through them are outside the
+cooperative guarantee. Installation uses atomic rename, not filesystem
+compare-and-swap. If rekey fails, the newly encrypted source remains in place;
+retry staging and `agenix rekey -a` before deploying. Never restore the old
+source after any consumer receives the new one.
 
 Library adapters must establish no-swap protection and acquire
-`protection::CredentialProtection` before `RbwSource::read()`, retain the guard
-until plaintext and credential helpers have been dropped, select `RbwItem::field()`, validate
-their own document in memory, then call `StreamEncryptor::encrypt_new()` or
-`encrypt_replace()`. Use `encryption::with_store_write_lock(root, operation)` to
-serialize installation, staging and rekey with the generic import/rotation path.
-Constrain destination paths to the intended store.
+`protection::CredentialProtection` before `RbwSource::read()`. Hold the guard
+until you drop plaintext and credential helpers. Select `RbwItem::field()`,
+validate the document in memory, then call `StreamEncryptor::encrypt_new()` or
+`encrypt_replace()`. Constrain destinations to the intended store. Use
+`encryption::with_store_write_lock(root, operation)` to serialize installation,
+staging, and rekey with the generic import/rotation path.
