@@ -13,6 +13,9 @@ keywords = ["nix", "agenix", "secrets", "schema"]
 categories = ["config"]
 include = ["Cargo.toml", "README.md", "LICENSE", "src/**"]
 
+[package.metadata.docs.rs]
+all-features = true
+
 [lib]
 name = "secret_manager_schema"
 path = "src/lib.rs"
