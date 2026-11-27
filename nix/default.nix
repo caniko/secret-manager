@@ -481,6 +481,8 @@ nix-manager-core.lib.mkManagerOutputs {
         nextest = cargo.craneLib.cargoNextest (testArgs
           // {
             nativeBuildInputs = [pkgs.git pkgs.openssl pkgs.rage pkgs.gnupg pkgs.minisign pkgs.whois];
+            # reqwest loads system roots at client construction, even for localhost HTTP tests.
+            SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
             partitions = 1;
             partitionType = "count";
           });
