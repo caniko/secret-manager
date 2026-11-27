@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-27
+
+### Added
+
+- `passphrase` and the standalone `secret-manager-passphrase` Nix package
+  generate strong passphrases without building the full CLI.
+- The `cifs-credentials` and `detritus-tokens` agenix-rekey generators render
+  CIFS login files and Detritus token configuration. `detritus-tokens` stores
+  the Argon2id hash, not the plaintext bearer token.
+- `layout::Category::Dns` gives DNS credentials their own store category.
+  Rust callers with exhaustive category matches must handle the new variant.
+- `graph` runs reusable secret-management actions in dependency order.
+  `release_signing` handles minisign key onboarding, and `github_pat` and
+  `dockerhub_pat` provide enrollment and verification helpers.
+- `verify` provides credential checks and hidden terminal input. Its `atomic`,
+  `yescrypt`, `purelymail`, and `dns` modules cover transactional file installs,
+  password hashing, mailbox operations, and DNS credential verification.
+
+### Changed
+
+- Documented the ownership boundary: `secret-manager` owns protected `rbw`
+  imports and `age` store operations, `nix-provenance` owns desktop login and
+  provisioning, and consumer repositories own ciphertext and recipient policy.
+
+### Fixed
+
+- GitHub App operations now use `ExclusiveFileLock` and validate the opened
+  descriptor before using the lock.
+
 ## [0.7.1] - 2026-11-19
 
 ### Fixed
@@ -379,7 +408,8 @@ runner-env add`), and Pkl evaluation via nix-pklx.
 - Corrected "foregejo" typos to "forgejo" in Nix module paths and source
   references.
 
-[Unreleased]: https://github.com/caniko/secret-manager/compare/0.7.1...HEAD
+[Unreleased]: https://github.com/caniko/secret-manager/compare/0.8.0...HEAD
+[0.8.0]: https://github.com/caniko/secret-manager/compare/0.7.1...0.8.0
 [0.7.1]: https://github.com/caniko/secret-manager/compare/0.7.0...0.7.1
 [0.7.0]: https://github.com/caniko/secret-manager/compare/0.6.1...0.7.0
 [0.6.1]: https://github.com/caniko/secret-manager/compare/0.6.0...0.6.1
