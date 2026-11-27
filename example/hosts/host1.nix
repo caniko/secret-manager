@@ -1,4 +1,4 @@
-{lib, ...}: {
+_: {
   services.secretSync = {
     enable = true;
     targets = {

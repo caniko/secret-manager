@@ -427,18 +427,8 @@ impl Publication<'_> {
             "checkpoint key fingerprint mismatch"
         );
         let source = source_path(&store.root, config)?;
-        use std::os::unix::fs::OpenOptionsExt;
         let lock_path = source.with_extension("publication-lock");
-        let publication_lock = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&lock_path)?;
-        state::private_metadata(&lock_path, false)?;
-        let _publication_lock = state::ExclusiveLock::acquire(publication_lock)
+        let _publication_lock = state::acquire_private_lock(&lock_path, "source publication")
             .context("another transaction owns publication of this source")?;
         let verification = api::verify(api, config, &issued.app, &key)?;
         let id_path = source.with_extension("app-id");

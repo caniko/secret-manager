@@ -39,7 +39,7 @@
 
     # Eval-only check: verify the collected sync targets are valid JSON
     checks = nixpkgs.lib.genAttrs ["x86_64-linux" "aarch64-linux"] (system: let
-      lib = nixpkgs.lib;
+      inherit (nixpkgs) lib;
       catalog = {
         with-sync = {
           source.relative = "age/secrets/with-sync.age";

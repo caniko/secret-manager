@@ -474,7 +474,11 @@ fn interrupted_publication_resumes_from_real_age_ciphertext_without_replacing_so
             assert!(duplicate >= 0);
             // SAFETY: take sole ownership of the successful dup result.
             inherited_publication_lock = Some(unsafe { fs::File::from_raw_fd(duplicate) });
-            assert!(state::try_lock_exclusive(&fs::File::open(lock).unwrap()).is_err());
+            assert!(
+                nix_manager_core::fs::ExclusiveFileLock::try_acquire(&lock)
+                    .unwrap()
+                    .is_none()
+            );
         }
         ensure!(calls != 2, "simulated variable publication failure");
         Ok(())
