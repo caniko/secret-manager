@@ -20,6 +20,7 @@ pub mod io;
 pub mod layout;
 pub mod legacy;
 pub mod meta;
+pub mod passphrase;
 pub mod pkl;
 pub mod plan;
 pub mod protection;

@@ -1,7 +1,8 @@
 # agenix-rekey generators for the names `mkSecret` emits (`strong-passphrase*`,
-# `ssh-*-pub`, `gpg-key-pair`) plus `minisign-key-pair`. Register the result as
-# `age.generators` on every agenix module (NixOS and Home Manager) that
-# evaluates secrets declaring `generator.script = "<name>"`.
+# `ssh-*-pub`, `gpg-key-pair`) plus `cifs-credentials`, `minisign-key-pair`,
+# and `detritus-tokens`. Register the result as `age.generators` on every
+# agenix module (NixOS and Home Manager) that evaluates secrets declaring
+# `generator.script = "<name>"`.
 #
 # Each value is an agenix-rekey generator function. agenix-rekey calls it with
 # `{ name, secret, lib, pkgs, file, deps, decrypt, ... }` and runs the returned
@@ -14,39 +15,35 @@
 # `rotateCommand` is the consumer's command for regenerating one secret; it
 # only appears in diagnostics.
 {rotateCommand ? "secret-manager rotate"}: let
+  passphrasePkg = pkgs:
+    pkgs.callPackage ./passphrase-package.nix {
+      passphraseSource = ../crates/secret-manager/src/passphrase.rs;
+    };
+
   # Single-line password, no trailing newline, uniform over an
   # env-file/shell-safe alphabet, guaranteed >=1 each of lower/upper/digit/
-  # symbol. The symbol set deliberately excludes every character that is
-  # special to a systemd `KEY=value` EnvironmentFile or a bash/nushell
-  # `export VAR="$val"` (no `$ " ' \` backtick `#`, no whitespace), so the same
-  # value is safe in every delivery target.
-  mkStrongPassphrase = len: {pkgs, ...}: ''
-    lower='abcdefghijklmnopqrstuvwxyz'
-    upper='ABCDEFGHIJKLMNOPQRSTUVWXYZ'
-    digit='0123456789'
-    # GNU tr treats a middle hyphen as a range, unlike the intended alphabet.
-    symbol='@%_+=.,:/?-'
-    alphabet="$lower$upper$digit$symbol"
-    len=${toString len}
-    while :; do
-      pw=""
-      # head -c bounds the read so the upstream closes cleanly (no SIGPIPE,
-      # safe under agenix-rekey's global `set -euo pipefail`). tr rejection-
-      # samples uniformly from the alphabet.
-      while [ "''${#pw}" -lt "$len" ]; do
-        chunk=$(LC_ALL=C ${pkgs.coreutils}/bin/head -c 256 /dev/urandom \
-          | LC_ALL=C ${pkgs.coreutils}/bin/tr -dc "$alphabet")
-        pw="$pw$chunk"
-      done
-      pw="''${pw:0:$len}"
-      case "$pw" in *[a-z]*) ;; *) continue ;; esac
-      case "$pw" in *[A-Z]*) ;; *) continue ;; esac
-      case "$pw" in *[0-9]*) ;; *) continue ;; esac
-      # `-` last in the bracket so it is a literal, not a range.
-      case "$pw" in *[@%_+=.,:/?-]*) ;; *) continue ;; esac
-      break
-    done
-    ${pkgs.coreutils}/bin/printf '%s' "$pw"
+  # symbol. The alphabet and its tests live with the implementation:
+  # crates/secret-manager/src/passphrase.rs.
+  mkStrongPassphrase = len: {pkgs, ...}: "${pkgs.lib.getExe (passphrasePkg pkgs)} ${toString len}\n";
+
+  # mount.cifs credentials file. Captures the 48-char strong passphrase into a
+  # variable and fails explicitly if generation fails or produces empty output,
+  # so an empty password is never emitted.
+  mkCifsCredentials = args @ {
+    pkgs,
+    lib,
+    secret,
+    ...
+  }: ''
+    (
+      pw=$(${mkStrongPassphrase 48 args}) || exit 1
+      if [ -z "$pw" ]; then
+        echo "cifs-credentials: passphrase generator produced no output" >&2
+        exit 1
+      fi
+      builtin printf 'username=%s\npassword=%s\n' \
+        ${lib.escapeShellArg secret.settings.username} "$pw" || exit 1
+    )
   '';
 
   # ed25519 (or rsa-4096) private key to stdout (becomes the `.age` plaintext),
@@ -139,19 +136,72 @@
           echo "minisign-key-pair: password secret $dep decrypted to nothing" >&2
           exit 1
         fi
-        ${pkgs.coreutils}/bin/printf '%s\n%s\n' "$password" "$password" \
+        builtin printf '%s\n%s\n' "$password" "$password" \
           | ${pkgs.minisign}/bin/minisign -G -p "$tmp/key.pub" -s "$tmp/key" >/dev/null || exit 1
         ${pkgs.coreutils}/bin/install -m 0644 "$tmp/key.pub" \
           ${lib.escapeShellArg (lib.removeSuffix ".age" file + ".pub")} || exit 1
         ${pkgs.coreutils}/bin/cat "$tmp/key" || exit 1
       )
     '';
+  # Detritus tokens.toml entry for the plaintext bearer secret it depends on
+  # (`generator.dependencies = [ <bearer secret> ]` or attrset, exactly one):
+  # detritusd gets only the Argon2id PHC hash, the bearer's consumer gets the
+  # bearer. `settings.id` and `settings.project` name the entry; the source
+  # prefix is `<project>/`. `settings.can_purge` opts the token into source
+  # deletion. Fails explicitly on every step for the same reason as
+  # mkMinisignKeyPair.
+  mkDetritusTokens = {
+    pkgs,
+    lib,
+    deps,
+    decrypt,
+    secret,
+    ...
+  }: let
+    depList =
+      if builtins.isAttrs deps
+      then builtins.attrValues deps
+      else deps;
+  in
+    assert lib.assertMsg (builtins.length depList == 1)
+    "detritus-tokens: depend on exactly one bearer secret"; ''
+      (
+        dep=${lib.escapeShellArg (lib.head depList).file}
+        if [ ! -s "$dep" ]; then
+          echo "detritus-tokens: bearer secret $dep is missing; run \`"${lib.escapeShellArg rotateCommand}"\` on it first" >&2
+          exit 1
+        fi
+        bearer=$(${decrypt} "$dep") || exit 1
+        if [ -z "$bearer" ]; then
+          echo "detritus-tokens: bearer secret $dep decrypted to nothing" >&2
+          exit 1
+        fi
+        salt=$(${pkgs.coreutils}/bin/head -c 16 /dev/urandom | ${pkgs.coreutils}/bin/base64 | ${pkgs.coreutils}/bin/tr -d '=') || exit 1
+        if [ -z "$salt" ]; then
+          echo "detritus-tokens: failed to generate salt" >&2
+          exit 1
+        fi
+        hash=$(builtin printf '%s' "$bearer" | ${pkgs.libargon2}/bin/argon2 "$salt" -id -t 2 -m 16 -p 1 -e) || exit 1
+        case "$hash" in
+          '$argon2id$'*) ;;
+          *)
+            echo "detritus-tokens: argon2 produced no PHC hash" >&2
+            exit 1
+            ;;
+        esac
+        builtin printf '[[token]]\nid = %s\nsecret = "%s"\nproject = %s\nsource_prefix = %s\n${lib.optionalString (secret.settings.can_purge or false) "can_purge = true\\n"}' \
+          ${lib.escapeShellArg (builtins.toJSON secret.settings.id)} "$hash" \
+          ${lib.escapeShellArg (builtins.toJSON secret.settings.project)} ${lib.escapeShellArg (builtins.toJSON "${secret.settings.project}/")} || exit 1
+      )
+    '';
 in {
   strong-passphrase = mkStrongPassphrase 32;
   strong-passphrase-48 = mkStrongPassphrase 48;
   strong-passphrase-64 = mkStrongPassphrase 64;
+  cifs-credentials = mkCifsCredentials;
   ssh-ed25519-pub = mkSshKey "ed25519";
   ssh-rsa-pub = mkSshKey "rsa";
   gpg-key-pair = mkGpgKeyPair;
   minisign-key-pair = mkMinisignKeyPair;
+  detritus-tokens = mkDetritusTokens;
 }
