@@ -5,12 +5,13 @@ use super::{
     now,
 };
 use anyhow::{Context, Result, ensure};
+use nix_manager_core::fs::ExclusiveFileLock;
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     os::{
-        fd::AsRawFd,
+        fd::{AsFd, AsRawFd, BorrowedFd},
         unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     },
     path::{Path, PathBuf},
@@ -37,47 +38,7 @@ pub(super) struct State {
 pub(super) struct Transaction {
     pub directory: PathBuf,
     pub state: State,
-    _lock: ExclusiveLock,
-}
-
-/// Explicitly release the owner's shared open file description before close.
-/// Concurrent helper forks may retain that description until their next exec.
-pub(super) struct ExclusiveLock(File);
-
-impl ExclusiveLock {
-    pub(super) fn acquire(file: File) -> std::io::Result<Self> {
-        try_lock_exclusive(&file)?;
-        Ok(Self(file))
-    }
-}
-
-impl Drop for ExclusiveLock {
-    fn drop(&mut self) {
-        // Close alone leaves a flock held by a helper's inherited open file
-        // description until exec. Release this owner's lock before closing it.
-        let _ = flock(&self.0, libc::LOCK_UN);
-    }
-}
-
-// These locks must also work for consumers using Rust 1.88, before std's
-// File locking API was stabilized. Keep the nonblocking flock semantics and
-// explicit unlock of the shared open file description.
-pub(super) fn try_lock_exclusive(file: &File) -> std::io::Result<()> {
-    flock(file, libc::LOCK_EX | libc::LOCK_NB)
-}
-
-fn flock(file: &File, operation: libc::c_int) -> std::io::Result<()> {
-    loop {
-        // SAFETY: file owns a live descriptor throughout this call. flock
-        // borrows that descriptor and does not consume or access Rust memory.
-        if unsafe { libc::flock(file.as_raw_fd(), operation) } == 0 {
-            return Ok(());
-        }
-        let error = std::io::Error::last_os_error();
-        if error.kind() != std::io::ErrorKind::Interrupted {
-            return Err(error);
-        }
-    }
+    _lock: ExclusiveFileLock,
 }
 
 impl Transaction {
@@ -92,16 +53,9 @@ impl Transaction {
         }
         private_metadata(directory, true)?;
         let directory = directory.canonicalize()?;
-        let lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(directory.join("lock"))?;
-        private_metadata(&directory.join("lock"), false)?;
-        let lock = ExclusiveLock::acquire(lock).context("GitHub App transaction is busy")?;
+        let lock_path = directory.join("lock");
+        let lock = acquire_private_lock(&lock_path, "GitHub App transaction")
+            .context("GitHub App transaction is busy")?;
         let policy_sha256 = sha256(&serde_json::to_vec(config)?);
         let path = directory.join("state.json");
         let state = if path.exists() {
@@ -182,6 +136,41 @@ impl Transaction {
         );
         Ok(path)
     }
+}
+
+/// Create a private lock anchor, acquire an exclusive nonblocking flock via
+/// `ExclusiveFileLock`, and verify descriptor-level ownership and mode on the
+/// held file descriptor (eliminating path-level TOCTOU between anchor checks
+/// and lock acquisition).
+pub(super) fn acquire_private_lock(path: &Path, operation: &str) -> Result<ExclusiveFileLock> {
+    OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    let lock = ExclusiveFileLock::acquire(path, operation)?;
+    private_fd_metadata(lock.as_fd())?;
+    Ok(lock)
+}
+
+fn private_fd_metadata(fd: BorrowedFd<'_>) -> Result<()> {
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::zeroed();
+    // SAFETY: `fd` is a valid borrowed descriptor for this call and
+    // `stat.as_mut_ptr()` points to writable stack storage for `libc::stat`.
+    if unsafe { libc::fstat(fd.as_raw_fd(), stat.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("inspect lock descriptor metadata");
+    }
+    // SAFETY: `libc::fstat` succeeded and initialized `stat`.
+    let stat = unsafe { stat.assume_init() };
+    ensure!(
+        (stat.st_mode & libc::S_IFMT) == libc::S_IFREG
+            && stat.st_uid == unsafe { libc::geteuid() }
+            && stat.st_mode & 0o077 == 0,
+        "credential/transaction path must be an operator-owned private regular file or directory"
+    );
+    Ok(())
 }
 
 pub(super) fn private_metadata(path: &Path, directory: bool) -> Result<()> {
@@ -273,7 +262,7 @@ mod tests {
         let transaction = Transaction::open(&directory, root.path(), &config).unwrap();
         // A concurrent helper can inherit the open file description between
         // fork and exec, even though Rust opens the descriptor CLOEXEC.
-        let inherited = transaction._lock.0.try_clone().unwrap();
+        let inherited = transaction._lock.as_fd().try_clone_to_owned().unwrap();
         assert!(Transaction::open(&directory, root.path(), &config).is_err());
         drop(transaction);
         let reopened = Transaction::open(&directory, root.path(), &config).unwrap();
@@ -282,5 +271,42 @@ mod tests {
         assert!(Transaction::open(&directory, root.path(), &config).is_err());
         drop(reopened);
         assert!(Transaction::open(&directory, root.path(), &config).is_ok());
+    }
+
+    #[test]
+    fn acquire_private_lock_refuses_symlinks_and_non_private_modes() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target");
+        fs::write(&target, []).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+        let link = root.path().join("link.lock");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(acquire_private_lock(&link, "test").is_err());
+
+        let loose = root.path().join("loose.lock");
+        fs::write(&loose, []).unwrap();
+        fs::set_permissions(&loose, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(acquire_private_lock(&loose, "test").is_err());
+        // Failed acquisition must not leave the file locked.
+        assert!(ExclusiveFileLock::try_acquire(&loose).unwrap().is_some());
+    }
+
+    #[test]
+    fn acquire_private_lock_is_nonblocking_and_releases_on_drop() {
+        let root = tempfile::tempdir().unwrap();
+        let lock_path = root.path().join("private.lock");
+        let lock = acquire_private_lock(&lock_path, "test").unwrap();
+        assert!(
+            ExclusiveFileLock::try_acquire(&lock_path)
+                .unwrap()
+                .is_none()
+        );
+        assert!(acquire_private_lock(&lock_path, "test").is_err());
+        drop(lock);
+        assert!(
+            ExclusiveFileLock::try_acquire(&lock_path)
+                .unwrap()
+                .is_some()
+        );
     }
 }

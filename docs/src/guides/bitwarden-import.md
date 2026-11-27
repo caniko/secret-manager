@@ -3,7 +3,9 @@
 The `hm file`, `nixos file`, and `forgejo file` commands accept `--from-rbw`
 with an exact Bitwarden item UUID. Unlocking belongs to rbw and pinentry; the
 bridge never asks for or stores the vault password. Install rbw 1.15 or later
-and authenticate it before importing.
+and authenticate it before importing. See [Ownership Boundary](../concepts/ownership-boundary.md)
+for how vault import and store encryption in `secret-manager` are separated from
+`nix-provenance` and consumer `age/secrets/` repositories.
 
 ```sh
 secret-manager hm file --shared --name service-token \

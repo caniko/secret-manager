@@ -22,6 +22,7 @@
 - [Target Stacks](./concepts/targets.md)
 - [Nix Declarations](./concepts/nix-declarations.md)
 - [Sync Targets](./concepts/sync-targets.md)
+- [Ownership Boundary](./concepts/ownership-boundary.md)
 
 # Reference
 

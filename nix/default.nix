@@ -269,7 +269,14 @@ nix-manager-core.lib.mkManagerOutputs {
 
     generatorChecksFor = pkgs: let
       generators = secretLib.mkGenerators {rotateCommand = "example rotate";};
+      passphrasePkg = pkgs.callPackage ./passphrase-package.nix {
+        passphraseSource = ../crates/secret-manager/src/passphrase.rs;
+      };
       script = name: pkgs.writeText name (generators.${name} {inherit pkgs;});
+      fakeDecrypt = pkgs.writeShellScript "fake-decrypt" ''
+        echo "$@" >> "$DECRYPT_LOG"
+        exec ${pkgs.coreutils}/bin/cat "$@"
+      '';
       # The password dependency is a plaintext file and `decrypt` is `cat`.
       password = {
         name = "password";
@@ -284,6 +291,27 @@ nix-manager-core.lib.mkManagerOutputs {
         };
       minisignScript = minisignWith [password];
       minisign = pkgs.writeText "minisign-key-pair" minisignScript;
+      cifs = pkgs.writeText "cifs-credentials" (generators.cifs-credentials {
+        inherit pkgs lib;
+        secret.settings.username = "backup";
+      });
+      bearer = {
+        name = "bearer";
+        host = "nixos:check";
+        file = "bearer";
+      };
+      detritusWith = deps: settings:
+        generators.detritus-tokens {
+          inherit pkgs lib deps;
+          decrypt = "${fakeDecrypt}";
+          secret.settings =
+            {
+              id = "regicide-prod";
+              project = "regicide";
+            }
+            // settings;
+        };
+      detritusTokens = settings: pkgs.writeText "detritus-tokens" (detritusWith [bearer] settings);
       # A public half that cannot be written must fail before the private key
       # is emitted.
       unwritable = name:
@@ -292,7 +320,8 @@ nix-manager-core.lib.mkManagerOutputs {
           file = "missing/key.age";
         });
     in
-      assert minisignWith {inherit password;} == minisignScript; {
+      assert minisignWith {inherit password;} == minisignScript;
+      assert detritusWith {inherit bearer;} {} == detritusWith [bearer] {}; {
         generator-minisign = pkgs.runCommand "secret-manager-generator-minisign" {nativeBuildInputs = [pkgs.minisign];} ''
           # Run like agenix does: inside a command substitution, where `set -e`
           # is not in force, so the generator must fail on its own.
@@ -321,6 +350,77 @@ nix-manager-core.lib.mkManagerOutputs {
             echo 'minisign-key-pair: key signed with the wrong password' >&2
             exit 1
           fi
+          touch "$out"
+        '';
+        generator-cifs-credentials = pkgs.runCommand "secret-manager-generator-cifs-credentials" {} ''
+          creds=$(${lib.getExe pkgs.bash} ${cifs} </dev/null)
+          ${lib.getExe pkgs.python3} - "$creds" <<'PY'
+          import string, sys
+          lines = sys.argv[1].splitlines()
+          assert len(lines) == 2, f"expected 2 lines, got {len(lines)}"
+          assert lines[0] == "username=backup", f"unexpected username line: {lines[0]!r}"
+          assert lines[1].startswith("password="), f"unexpected password line: {lines[1]!r}"
+          pw = lines[1].removeprefix("password=")
+          symbols = "@%_+=.,:/?-"
+          alphabet = set(string.ascii_letters + string.digits + symbols)
+          assert len(pw) == 48, f"expected 48-char password, got {len(pw)}"
+          assert set(pw) <= alphabet, "unsafe character in cifs password"
+          for cat in (string.ascii_lowercase, string.ascii_uppercase, string.digits, symbols):
+              assert set(pw) & set(cat), "missing character class in cifs password"
+          PY
+          # Failing or empty passphrase generator must fail and emit nothing.
+          for replacement in ${pkgs.coreutils}/bin/false ${pkgs.coreutils}/bin/true; do
+            broken=$(mktemp)
+            sed "s|${lib.getExe passphrasePkg}|$replacement|g" ${cifs} > "$broken"
+            if out_bad=$(${lib.getExe pkgs.bash} "$broken" </dev/null 2>/dev/null); then
+              echo "cifs-credentials: succeeded when passphrase generator was $replacement" >&2
+              exit 1
+            fi
+            test -z "$out_bad"
+            rm -f "$broken"
+          done
+          touch "$out"
+        '';
+        generator-detritus-tokens = pkgs.runCommand "secret-manager-generator-detritus-tokens" {nativeBuildInputs = [pkgs.libargon2];} ''
+          generate() { tokens=$(${lib.getExe pkgs.bash} "''${1:-${detritusTokens {}}}" </dev/null); }
+          export DECRYPT_LOG="$PWD/decrypt.log"
+          for broken in missing empty; do
+            rm -f bearer
+            if [ "$broken" = empty ]; then : > bearer; fi
+            if generate 2>err; then
+              echo "detritus-tokens: succeeded with a $broken bearer secret" >&2
+              exit 1
+            fi
+            if [ "$broken" = missing ]; then grep -qF 'run `example rotate` on it first' err; fi
+          done
+          printf '%s' 'correct-Horse.battery9' > bearer
+          : > "$DECRYPT_LOG"
+          generate
+          if [ "$(wc -l < "$DECRYPT_LOG")" != 1 ]; then
+            echo "detritus-tokens: expected exactly one decrypt, got:" >&2
+            cat "$DECRYPT_LOG" >&2
+            exit 1
+          fi
+          printf '%s\n' "$tokens" > tokens.toml
+          grep -qx '\[\[token\]\]' tokens.toml
+          grep -qx 'id = "regicide-prod"' tokens.toml
+          grep -qx 'project = "regicide"' tokens.toml
+          grep -qx 'source_prefix = "regicide/"' tokens.toml
+          if grep -q 'correct-Horse' tokens.toml; then
+            echo 'detritus-tokens: plaintext bearer leaked into tokens.toml' >&2
+            exit 1
+          fi
+          # Recompute the PHC hash from its own salt: it must verify the bearer
+          # and reject another one. The 22-byte salt encodes to 30 unpadded chars.
+          hash=$(sed -n 's/^secret = "\(.*\)"$/\1/p' tokens.toml)
+          salt=$(printf '%s==' "$(printf '%s' "$hash" | cut -d'$' -f5)" | base64 -d)
+          [ "$(printf '%s' 'correct-Horse.battery9' | argon2 "$salt" -id -t 2 -m 16 -p 1 -e)" = "$hash" ]
+          [ "$(printf '%s' 'wrong' | argon2 "$salt" -id -t 2 -m 16 -p 1 -e)" != "$hash" ]
+          if grep -q '^can_purge' tokens.toml; then exit 1; fi
+          generate ${detritusTokens {can_purge = false;}}
+          if grep -q '^can_purge' <<< "$tokens"; then exit 1; fi
+          generate ${detritusTokens {can_purge = true;}}
+          grep -qx 'can_purge = true' <<< "$tokens"
           touch "$out"
         '';
         generator-public-key-write = pkgs.runCommand "secret-manager-generator-public-key-write" {} ''
@@ -380,7 +480,9 @@ nix-manager-core.lib.mkManagerOutputs {
           });
         nextest = cargo.craneLib.cargoNextest (testArgs
           // {
-            nativeBuildInputs = [pkgs.git pkgs.openssl pkgs.rage pkgs.gnupg];
+            nativeBuildInputs = [pkgs.git pkgs.openssl pkgs.rage pkgs.gnupg pkgs.minisign pkgs.whois];
+            # reqwest loads system roots at client construction, even for localhost HTTP tests.
+            SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
             partitions = 1;
             partitionType = "count";
           });
@@ -416,10 +518,14 @@ nix-manager-core.lib.mkManagerOutputs {
           cp -r docs/book "$out"
         '';
       };
+      secret-manager-passphrase = pkgs.callPackage ./passphrase-package.nix {
+        passphraseSource = ../crates/secret-manager/src/passphrase.rs;
+      };
     in
       {
         inherit docs;
         inherit pklx;
+        inherit secret-manager-passphrase;
         site = pkgs.runCommand "secret-manager-site" {} ''
           mkdir -p $out
           cp -rL --no-preserve=mode ${docs}/. $out/
