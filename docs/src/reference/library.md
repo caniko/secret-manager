@@ -1,50 +1,48 @@
+# Library API
+
+The CLI uses the `secret_manager` library.
+
 ## Schema crate
 
-Registry data types live in a separate, dependency-light crate so data
-repositories can decode them without the engine:
+Data repositories can decode registry types without the engine using a
+separate, dependency-light schema crate:
 
 ```toml
 [dependencies]
 secret-manager-schema = { package = "caniko-secret-manager-schema", version = "0.7.1" }
 ```
 
-`secret_manager_schema::accounts::AccountCatalogue` decodes switchable service
-accounts: several accounts per credential service, a fleet default, and
-per-host and per-user overrides. `select(service, host, user)` returns the host
-override, else the user override, else the default; `validate` checks that
-every default and override names a registered account. The matching Pkl
-classes (`Account`, `AccountService`, `AccountHost`, `AccountCatalogue`) are in
-`pkl/SecretRegistry.pkl`.
+`secret_manager_schema::accounts::AccountCatalogue` decodes multiple switchable
+accounts per credential service, with a fleet default and per-host and per-user
+overrides. `select(service, host, user)` picks host override → user override →
+default. `validate` requires each default and override to name a registered
+account. Pkl counterparts: `Account`, `AccountService`, `AccountHost`, and
+`AccountCatalogue` in `pkl/SecretRegistry.pkl`.
 
-`secret_manager_schema::rotation::RotationCatalogue` decodes manual rotation
-guides: a title, numbered steps, provider URLs, the command that stores the new
-value, and an expiry kind (`Expiry::Cadence` by default, `Never` for a value
-created without an end date, `Provider` with the id of the provider that
-reports the expiry). `for_secret(path)` finds the guide for a store-relative
-secret path, and `validate` re-checks the key slug, that every URL starts with
-`https://` — the URLs are handed to a browser launcher — and that `provider` is
-set exactly for `Expiry::Provider` and the cadence fields are unset for
-`Expiry::Never`. The matching Pkl classes (`RotationGuide`, `RotationCatalogue`)
-are in `pkl/SecretRegistry.pkl`.
+`secret_manager_schema::rotation::RotationCatalogue` decodes manual guides:
+title, numbered steps, provider URLs, the command to store the new value, and
+expiry (`Expiry::Cadence` by default, `Never` if created without an end date,
+`Provider` with the ID of the provider reporting expiry). `for_secret(path)`
+looks up a guide by store-relative secret path. `validate` rechecks the key slug,
+requires every catalogue URL to start with `https://`, requires `provider`
+exactly for `Expiry::Provider`, and forbids cadence fields for `Expiry::Never`.
+Pkl counterparts: `RotationGuide` and `RotationCatalogue`
+in `pkl/SecretRegistry.pkl`.
 
-# Library API
+## Engine crate
 
-The `secret_manager` library provides the building blocks used by the CLI.
-
-The registry package is `caniko-secret-manager`. Use a Cargo package alias to
-retain the existing library imports:
+Alias the `caniko-secret-manager` Cargo package to keep existing library imports:
 
 ```toml
 [dependencies]
 secret-manager = { package = "caniko-secret-manager", version = "0.4.0" }
 ```
 
-The minimum supported Rust compiler is 1.88. Public Forgejo authentication
-types now use Forgejo API 0.11; callers exchanging those types must use the
-same generation. The Reqwest 0.13 blocking client retains JSON, Rustls,
-HTTP/2, charset decoding and system proxy discovery. Persisted version-1
-sync-state records retain their destination identities across the TOML 1.1
-migration, including GitHub environment ownership.
+Minimum Rust: 1.88. Callers exchanging public Forgejo authentication types must
+match Forgejo API 0.11. The Reqwest 0.13 blocking client retains JSON, Rustls,
+HTTP/2, charset decoding, and system proxy discovery. The TOML 1.1 migration
+preserves destination identities in persisted version-1 sync-state records,
+including GitHub environment ownership.
 
 ## Modules
 
@@ -72,8 +70,6 @@ pub struct Store {
 }
 ```
 
-Methods:
-
 - `Store::current_dir()` — root at cwd
 - `Store::discover()` — from `$SECRET_MANAGER_STORE` or nearest `flake.nix`
 - `store.master_identities()` — sorted `age/master-*.pub` / `age/master_*.pub` stubs
@@ -90,12 +86,11 @@ pub enum TargetSpec {
 }
 ```
 
-Each variant encodes the source expression, secret path, module path,
-and delivery targets.
+Each variant holds the source expression, secret and module paths, and delivery targets.
 
 ### `RenderedModule`
 
-The output of rendering a target spec into a Nix module file:
+Nix module file rendered from a target spec:
 
 ```rust,ignore
 pub struct RenderedModule {
@@ -130,8 +125,8 @@ pub fn render_modules(
 ) -> Vec<RenderedModule>
 ```
 
-Renders a set of targets into Nix modules by calling `mkSecret` with the
-appropriate source expressions and delivery targets.
+Renders targets into Nix modules that call `mkSecret` with their source
+expressions and delivery targets.
 
 ### `render_body`
 
@@ -139,7 +134,7 @@ appropriate source expressions and delivery targets.
 pub fn render_body(target: &TargetSpec, generator: Option<&GeneratorSpec>) -> String
 ```
 
-Renders a single target into the body of a Nix module.
+Renders one target as a Nix module body.
 
 ### `run_plan`
 
@@ -148,7 +143,7 @@ pub fn run_plan(args: &CommonSourceArgs, plan: AddPlan) -> Result<()>
 ```
 
 Executes an `AddPlan`: validates destinations, prepares secret sources,
-writes modules, runs generation or encryption, stages, and rekegs.
+writes modules, generates or encrypts secrets, stages, and rekeys.
 
 ### `camel`
 
@@ -156,7 +151,7 @@ writes modules, runs generation or encryption, stages, and rekegs.
 pub fn camel(s: &str) -> String
 ```
 
-Converts kebab-case and snake_case to CamelCase used for age name derivation.
+Converts kebab-case and snake_case to CamelCase for age names.
 
 Example: `"nix-trusted"` → `"NixTrusted"`, `"copr-token"` → `"CoprToken"`.
 
@@ -166,9 +161,9 @@ Example: `"nix-trusted"` → `"NixTrusted"`, `"copr-token"` → `"CoprToken"`.
 pub fn default_forgejo_age_name(instance: &str, slug: &str) -> String
 ```
 
-Derives the default agenix secret name for a Forgejo credential.
+Default agenix secret name for a Forgejo credential:
 
-Example: `("codeberg", "copr-token")` → `"forgejoRunnerCodebergCoprToken"`
+`("codeberg", "copr-token")` → `"forgejoRunnerCodebergCoprToken"`
 
 ### `default_forgejo_ssh_key_age_name`
 
@@ -176,6 +171,6 @@ Example: `("codeberg", "copr-token")` → `"forgejoRunnerCodebergCoprToken"`
 pub fn default_forgejo_ssh_key_age_name(slug: &str) -> String
 ```
 
-Derives the default agenix secret name for a Forgejo SSH key.
+Default agenix secret name for a Forgejo SSH key:
 
-Example: `"aur-ssh-key"` → `"forgejoActionsAurSshKey"`
+`"aur-ssh-key"` → `"forgejoActionsAurSshKey"`

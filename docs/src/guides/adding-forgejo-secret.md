@@ -1,7 +1,7 @@
 # Adding a Forgejo Secret
 
-The `forgejo` subcommand manages secrets for Forgejo Actions runners and
-Codeberg/Forgejo CI credential stores.
+Use `forgejo` for Forgejo Actions runner secrets and Codeberg/Forgejo CI
+credential stores.
 
 ## Secret types
 
@@ -15,8 +15,8 @@ Codeberg/Forgejo CI credential stores.
 
 ## SSH deploy key
 
-Generate an Ed25519 key for a Forgejo Actions runner, optionally inject the
-public key as a runner credential:
+Generate an Ed25519 key for Forgejo Actions, with optional public-key injection
+as a runner credential:
 
 ```sh
 # Source only (no runner credential)
@@ -31,13 +31,13 @@ secret-manager forgejo ssh \
   --instance codeberg --instance nixTrusted
 ```
 
-The public key is printed to stdout and embedded as a Nix comment in the
-generated module.
+The command prints the public key to stdout and embeds it as a Nix comment
+in the generated module.
 
 ## GPG key pair
 
-Store only the armored OpenPGP private key as an agenix secret. The command
-derives plaintext `.asc` and `.fingerprint` files beside the encrypted source.
+Only the armored OpenPGP private key becomes an agenix secret. The command
+derives plaintext `.asc` and `.fingerprint` files next to it.
 
 ```sh
 secret-manager forgejo gpg-key-pair \
@@ -46,13 +46,13 @@ secret-manager forgejo gpg-key-pair \
   --from-age age/secrets/modules/repos/apt/modde-apt-repo-gpg-key.age
 ```
 
-New keys are generated when neither `--from-age` nor `--from-file` is passed.
-Use `--rotate` to replace an existing private-key source.
+Omit `--from-age` and `--from-file` to generate a key. Use `--rotate` to replace
+an existing private-key source.
 
 A Nix `mkSecret { generator = "gpg-key-pair"; userId = "Name <email>"; … }`
-passes `userId` to the generator as `age.secrets.<name>.settings.userId`. Forges
-mark a signature verified only when the key UID carries the committer's
-verified email, so set it for signing identities.
+passes `userId` as `age.secrets.<name>.settings.userId` to the generator. Set it
+for signing identities: forges only mark signatures verified if the key UID
+includes the committer's verified email.
 
 ## Passphrase credential
 
@@ -72,7 +72,7 @@ echo "my-token" | secret-manager forgejo text \
   --instance codeberg
 ```
 
-The slug defaults from the `--cred` value (e.g. `COPR_TOKEN` becomes `copr`).
+The slug defaults from `--cred`: `COPR_TOKEN` becomes `copr`.
 
 ## File credential
 
@@ -86,7 +86,7 @@ secret-manager forgejo file \
 
 ## Key rotation
 
-Pass `--rotate` to force regeneration of an existing SSH key:
+Use `--rotate` to force regeneration of an existing SSH key:
 
 ```sh
 secret-manager forgejo ssh \

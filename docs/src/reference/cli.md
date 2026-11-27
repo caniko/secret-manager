@@ -10,10 +10,10 @@ Declarative secret management for Nix store repositories.
 
 ### `github app` — GitHub-issued App credentials
 
-`enroll` serves a local manifest form and callback on `127.0.0.1`. Open the
-printed URL in an authenticated GitHub browser, register the app, then authorize
-its **selected-repository** installation. The conversion response is encrypted
-before parsing or publication; the CLI never generates an app private key.
+`enroll` serves the manifest form and callback on `127.0.0.1`. Open the
+printed URL while signed in to GitHub, register the app, then authorize its
+**selected-repository** installation. The CLI encrypts the conversion response
+before parsing or publication and never generates an app private key.
 
 ```sh
 secret-manager github app enroll --config review-app.json \
@@ -21,11 +21,11 @@ secret-manager github app enroll --config review-app.json \
   --identity age/master_identities/master_nitro3c_identity.pub
 ```
 
-The transaction's parent directory must already exist. The CLI creates the
-transaction directory with mode `0700`; files use `0600`. Keep it outside tracked
-source trees. The manifest callback must complete within one hour; the default
-listener deadline is 900 seconds (`--timeout-seconds`, maximum 3500). `--port`
-chooses a loopback port. Retries reuse the original port and policy/store binding.
+Create the transaction's parent directory outside tracked source trees. The
+CLI creates the transaction directory at mode `0700` and files at `0600`. The
+manifest callback must finish within one hour. `--timeout-seconds` sets the
+listener deadline (default 900 seconds, maximum 3500); `--port` selects a
+loopback port. Retries reuse the original port and policy/store binding.
 
 The public policy is JSON:
 
@@ -49,11 +49,11 @@ The public policy is JSON:
 }
 ```
 
-Use real public age recipients. The app owner must match the repository owner;
-permissions must match the declaration, with only GitHub's automatic
-`metadata: read` permitted additionally. The issued slug must match the declared
-slug. If GitHub assigns a different slug, retain the encrypted checkpoint and
-import a settings-issued key with a corrected policy in a fresh transaction.
+Use real public age recipients. Require matching app and repository owners,
+declared permissions (plus only GitHub's automatic `metadata: read`), and an
+issued slug matching the declaration. If GitHub assigns another slug, keep the
+encrypted checkpoint and import a settings-issued key in a fresh transaction
+with a corrected policy.
 
 For an already registered app or a settings-issued replacement key:
 
@@ -68,52 +68,52 @@ secret-manager github app verify --config review-app.json --store /path/to/canix
   --transaction /private/state/review-app --identity /private/age-identity
 ```
 
-`import` requires an operator-owned private PEM file and verifies its JWT against
-GitHub `/app`. It retains the original file; remove it through your normal private
-credential handling after encrypted adoption. App-key generation/revocation is a
-GitHub settings operation; this CLI automates adoption and publication.
+`import` verifies the JWT from an operator-owned private PEM file against
+GitHub `/app`. It keeps the original PEM; remove it through your usual private
+credential handling after encrypted adoption. Key generation/revocation stays
+in GitHub settings; the CLI adopts and publishes keys.
 
-If an import stops after saving `issued.age` but before saving its digest, retry
-with the same transaction, PEM and age identity. Recovery binds the retained
-ciphertext to the pending transaction and checks the original app identity and
-key fingerprint before completing adoption. A recorded digest mismatch or an
-unbound checkpoint in a completed transaction is refused.
+If import saves `issued.age` but stops before recording its digest, retry with
+the same transaction, PEM, and age identity. Recovery binds the ciphertext to
+the pending transaction and checks the original app identity and key
+fingerprint before adoption. Import rejects a recorded digest mismatch or an
+unbound checkpoint in a completed transaction.
 
 `installation` prints the authorization URL. With `--installation-id`, it can
-add the declared repository to an existing selected installation using the
-operator's authenticated `gh` account. It verifies app/installation ownership and
-repository administration before mutation, then verifies token scope afterward.
+add the declared repository to an existing selected installation using your
+authenticated `gh` account. It checks app/installation ownership and repository
+administration before the change, then verifies token scope.
 
 `publish` verifies the encrypted checkpoint, authenticates the app, checks the
-installation, mints an exactly-one-repository token and revokes that verification
-token. It writes the encrypted source and adjacent `.app-id` / `.app-slug` public
-files, then uses `gh` stdin to set the named repository secret and variables.
-Failed token revocation refuses publication or a successful verification receipt.
-If verification and revocation both fail, the diagnostic reports both outcomes.
-Partial publication is retryable using the same transaction. `--replace-key`
-permits an explicit verified rotation and retains the previous ciphertext in
-`previous.age`. Publication is serialized per source.
+installation, and mints and revokes a verification token scoped to exactly one
+repository. Failed revocation blocks publication and a successful verification
+receipt. If verification also fails, the diagnostic reports both outcomes.
+`publish` writes the encrypted source and adjacent public `.app-id` / `.app-slug`
+files, then sets the named repository secret and variables through `gh` stdin.
+Retry partial publication with the same transaction. `--replace-key` explicitly
+allows verified rotation and keeps the prior ciphertext in `previous.age`.
+Publication is serialized per source.
 
-The JSON receipt contains IDs, public-key fingerprint, policy/checkpoint/source
-hashes, token expiry and successful slot names. It contains no PEM, JWT or token.
-Its `actionsSlotQualified` stays `false`: GitHub does not return stored Actions
-secret plaintext, so the trusted hosted workflow must prove destination use.
+The JSON receipt lists IDs, public-key fingerprint, policy/checkpoint/source
+hashes, token expiry, and successful slot names, never PEM, JWT, or token.
+`actionsSlotQualified` stays `false`: GitHub withholds stored Actions secret
+plaintext, so the trusted hosted workflow must prove destination use.
 `verify` checks the encrypted source credential, not the installed Actions slot.
 
-If a crash follows manifest exchange, retry `enroll` with the same transaction:
-an encrypted response can be recovered. If no ciphertext exists, the consumed
-code has an ambiguous outcome; inspect GitHub settings and import an issued key
-in a fresh transaction. Never replay that conversion blindly.
+After a post-exchange crash, retry `enroll` with the same transaction to recover
+the encrypted manifest response. Without ciphertext, the consumed code's
+outcome is ambiguous: inspect GitHub settings and import an issued key in a
+fresh transaction. Never replay the conversion blindly.
 
-`gh` must already be authenticated to `github.com`; age identities use the
-existing `--identity` / `SECRET_MANAGER_AGE_IDENTITIES` contract. Canix hardware
-identity stubs under `age/master_identities/` should be passed explicitly.
-Declaration of `services.secretSync.targets` does not schedule execution.
+Authenticate `gh` to `github.com` first. Use the existing `--identity` /
+`SECRET_MANAGER_AGE_IDENTITIES` contract; pass Canix hardware identity stubs
+under `age/master_identities/` explicitly. Declaring `services.secretSync.targets`
+does not schedule execution.
 
 ### `github token` — Account tokens through the device flow
 
-Mint a GitHub OAuth token for an account (for example a bot user) and store it
-as agenix sources without plaintext touching the store:
+Mint a GitHub OAuth token for an account (such as a bot) and save agenix
+sources without writing plaintext to the store:
 
 ```sh
 SECRET_MANAGER_AGE_ENCRYPTOR=$(nix build --no-link --print-out-paths .#agenix-stream-encryptor)/bin/agenix-stream-encryptor \
@@ -123,17 +123,16 @@ secret-manager github token --login canikroid \
   --env-out age/secrets/users/can/canikroid_github_env.age
 ```
 
-The command prints a one-time code; authorize it at
-<https://github.com/login/device> in a browser signed in as `--login`. It then
-verifies the token authenticates as that login with every requested scope
-(`admin:x` implies `write:x`/`read:x`), encrypts the bare token to `--out` and
-`<ENV_NAME>=<token>` to `--env-out`, and exits. Nothing is stored on a login or
-scope mismatch.
+Authorize the printed one-time code at <https://github.com/login/device> while
+signed in as `--login`. The command checks that the token authenticates as
+that login with every requested scope (`admin:x` implies `write:x`/`read:x`).
+It encrypts the bare token to `--out` and `<ENV_NAME>=<token>` to `--env-out`,
+then exits. A login or scope mismatch stores nothing.
 
-`gh` runs in a private temporary config directory under `$XDG_RUNTIME_DIR`,
-removed on exit, so the token never reaches your own `gh` login or keyring.
-Existing sources are refused unless `--rotate` is given. Stage the sources and
-run `agenix rekey` afterwards.
+`gh` runs against a private temporary config directory under `$XDG_RUNTIME_DIR`;
+`secret-manager` removes it when the token command returns, keeping the token
+out of your `gh` login and keyring. Without `--rotate`, the command refuses
+existing sources. Then stage the sources and run `agenix rekey`.
 
 | Flag                  | Description                                                                       |
 | --------------------- | --------------------------------------------------------------------------------- |
@@ -148,8 +147,8 @@ run `agenix rekey` afterwards.
 
 ### `claude token` — Claude Code subscription tokens
 
-Store a long-lived Claude Code token for headless runners
-(`CLAUDE_CODE_OAUTH_TOKEN`) in one step:
+Store a long-lived Claude Code token (`CLAUDE_CODE_OAUTH_TOKEN`) for headless
+runners in one step:
 
 ```sh
 SECRET_MANAGER_AGE_ENCRYPTOR=$(nix build --no-link --print-out-paths .#agenix-stream-encryptor)/bin/agenix-stream-encryptor \
@@ -157,24 +156,25 @@ secret-manager claude token --out age/secrets/root/hosts/atlas/paperclip_operati
 ```
 
 The command runs native `claude setup-token` and waits up to 15 minutes for
-browser authorization. Only browser interaction is needed: both output channels
-are captured privately in bounded, zeroizing memory, never printed or saved as
-plaintext. No token copy/paste or controlling terminal is required. Native output
-must contain one unique, valid `sk-ant-oat01-` token; changed, ambiguous or
-malformed output fails closed without storage. The token is encrypted with the store's
-agenix master policy, the source is staged, and `agenix rekey` distributes it.
-With `--secret NAME` (the secret's agenix attribute) only that secret's
-rekeyed copies are staged, so unrelated uncommitted rekeyed changes do not
-block it. Tokens last one year; renew with `--rotate`.
+browser authorization. Authorization needs only the browser, not a controlling
+terminal or token copy/paste. The CLI captures both output channels in private,
+bounded, zeroizing memory without printing or saving plaintext. Output must
+contain one unique, valid `sk-ant-oat01-` token. Changed, ambiguous, or
+malformed output fails closed without storage.
+The command encrypts the token under the store's agenix master policy, stages
+the source, and distributes it with `agenix rekey`. `--secret NAME` (the
+agenix attribute) stages only that secret's rekeyed copies, so unrelated
+uncommitted rekeyed changes don't block it. Tokens last one year; renew with
+`--rotate`.
 
-Native terminal framing outside the token paragraph is ignored. Color styling
-and private display modes are handled without changing token text; editing
-controls inside token data, incomplete sequences and ambiguous tokens are rejected.
+The parser ignores native terminal framing outside the token paragraph and
+handles color and private display modes without changing token text. It rejects
+editing controls inside token data, incomplete sequences, and ambiguous tokens.
 
-Encryption/rekey may still require security-key or pinentry approval. A native
-browser-launch or authorization failure does not fall back to printing a URL or
-token. If rekey fails after encryption, retain the encrypted source and retry
-`agenix rekey -a`, rather than minting again. Host deployment remains separate.
+Encryption/rekey may still need security-key or pinentry approval. Native
+browser-launch or authorization failure never falls back to printing a URL
+or token. If rekey fails after encryption, keep the encrypted source and retry
+`agenix rekey -a` instead of minting again. Deploy to hosts separately.
 
 | Flag               | Description                                                                       |
 | ------------------ | --------------------------------------------------------------------------------- |
@@ -204,25 +204,25 @@ secret-manager gpg publish nomad.asc --codefloe --github --codeberg
 | `--check`                            | Read back registration; fail if any selected account is missing the key |
 | `--expected-fingerprint FINGERPRINT` | Require this full fingerprint before contacting a forge                 |
 
-Choose at least one destination. The command accepts exactly one public primary
-key in one ASCII-armored block, rejects private-key packets, and inspects it with
-GnuPG in an isolated temporary keyring. It does not import into your keyring.
-Relative file paths resolve from the working directory; no secret store is needed.
+Choose at least one destination. Supply exactly one public primary key in one
+ASCII-armored block. The command rejects private-key packets and inspects the
+key with GnuPG in an isolated temporary keyring, not yours. Relative paths
+resolve from the working directory; no secret store is needed.
 
-Forgejo destinations reuse `fj` authentication in its existing auth store.
-Tokens need `read:user` for listing and `write:user` for registration. GitHub
-reuses `gh` authentication; classic/OAuth tokens need `read:gpg_key` and
-`write:gpg_key`, respectively.
+Forgejo uses the existing `fj` auth store: tokens need `read:user` to list and
+`write:user` to register. GitHub reuses `gh` authentication: classic/OAuth
+tokens need `read:gpg_key` to list and `write:gpg_key` to register.
 
-Retries are idempotent: an existing key is accepted only after matching its full
-fingerprint from the API's public-key packets. Every destination is attempted
-even if another fails, and incomplete publication exits nonzero. After a failed
-POST, a read-back checks whether registration succeeded before reporting failure.
+Retries are idempotent: the command accepts an existing key only if its full
+fingerprint matches the one derived from the API's public-key packets. It
+tries every destination even after a failure and exits nonzero for incomplete
+publication. After a failed POST, it reads back registration before reporting
+failure.
 
-Output reports registration, signing capability, email verification, and
-Forgejo's key-ownership verification separately. Uploading a key does not perform
-Forgejo's proof-of-possession challenge or verify an account email. Codefloe
-account registration uses its Forgejo API, independently of Crow CI credentials.
+Output distinguishes registration, signing capability, email verification, and
+Forgejo key-ownership verification. Upload does not complete Forgejo's
+proof-of-possession challenge or verify account email. Codefloe account
+registration uses its Forgejo API, not Crow CI credentials.
 
 ### `hm` — Home-manager secrets
 
@@ -239,21 +239,21 @@ Add an agenix secret for a home-manager target.
 
 **Options (shared):**
 
-| Flag                      | Description                                                                                                                              |
-| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `--name <SLUG>`           | Secret slug                                                                                                                              |
-| `--user <USER>`           | Home-manager user (default: current login user)                                                                                          |
-| `--shared`                | Store under `age/secrets/users/shared/`                                                                                                  |
-| `--env <VAR>`             | Environment variable names                                                                                                               |
-| `--file <PATH>`           | File path within the home profile                                                                                                        |
-| `--from-file <PATH>`      | Read plaintext from file                                                                                                                 |
-| `--from-age <PATH>`       | Adopt an existing encrypted .age file                                                                                                    |
-| `--algorithm <ALGO>`      | SSH key algorithm (`ed25519`, `rsa`)                                                                                                     |
-| `--length <N>`            | Passphrase length (32, 48, 64)                                                                                                           |
-| `--no-rekey`              | Skip `agenix rekey -a`                                                                                                                   |
-| `--no-stage`              | Skip `git add`                                                                                                                           |
-| `--category <CATEGORY>`   | Place the source in the canonical layout (see [`inventory`](#inventory--secret-inventory)) and name it with the category-taking resolver |
-| `--expires <DATE\|never>` | Record the expiry in the `.meta.toml` sidecar; every write also stamps `rotated_at`                                                      |
+| Flag                      | Description                                                                                              |
+| ------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `--name <SLUG>`           | Secret slug                                                                                              |
+| `--user <USER>`           | Home-manager user (default: current login user)                                                          |
+| `--shared`                | Store under `age/secrets/users/shared/`                                                                  |
+| `--env <VAR>`             | Environment variable names                                                                               |
+| `--file <PATH>`           | File path within the home profile                                                                        |
+| `--from-file <PATH>`      | Read plaintext from file                                                                                 |
+| `--from-age <PATH>`       | Adopt an existing encrypted .age file                                                                    |
+| `--algorithm <ALGO>`      | SSH key algorithm (`ed25519`, `rsa`)                                                                     |
+| `--length <N>`            | Passphrase length (32, 48, 64)                                                                           |
+| `--no-rekey`              | Skip `agenix rekey -a`                                                                                   |
+| `--no-stage`              | Skip `git add`                                                                                           |
+| `--category <CATEGORY>`   | Use the canonical layout ([`inventory`](#inventory--secret-inventory)) and category-taking name resolver |
+| `--expires <DATE\|never>` | Set expiry in `.meta.toml`; every write stamps `rotated_at`                                              |
 
 ### `nixos` — NixOS host secrets
 
@@ -270,21 +270,21 @@ Add an agenix secret for a NixOS host target.
 
 **Options (shared):**
 
-| Flag                      | Description                                                                                                                              |
-| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `--name <SLUG>`           | Secret slug                                                                                                                              |
-| `--host <HOST>`           | NixOS host name                                                                                                                          |
-| `--env <VAR>`             | Environment variable names                                                                                                               |
-| `--service <NAME>`        | Systemd service names (required with `--env`)                                                                                            |
-| `--file <PATH>`           | File path on the host                                                                                                                    |
-| `--from-file <PATH>`      | Read plaintext from file                                                                                                                 |
-| `--from-age <PATH>`       | Adopt an existing encrypted .age file                                                                                                    |
-| `--algorithm <ALGO>`      | SSH key algorithm                                                                                                                        |
-| `--length <N>`            | Passphrase length                                                                                                                        |
-| `--no-rekey`              | Skip `agenix rekey -a`                                                                                                                   |
-| `--no-stage`              | Skip `git add`                                                                                                                           |
-| `--category <CATEGORY>`   | Place the source in the canonical layout (see [`inventory`](#inventory--secret-inventory)) and name it with the category-taking resolver |
-| `--expires <DATE\|never>` | Record the expiry in the `.meta.toml` sidecar; every write also stamps `rotated_at`                                                      |
+| Flag                      | Description                                                                                              |
+| ------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `--name <SLUG>`           | Secret slug                                                                                              |
+| `--host <HOST>`           | NixOS host name                                                                                          |
+| `--env <VAR>`             | Environment variable names                                                                               |
+| `--service <NAME>`        | Systemd service names (required with `--env`)                                                            |
+| `--file <PATH>`           | File path on the host                                                                                    |
+| `--from-file <PATH>`      | Read plaintext from file                                                                                 |
+| `--from-age <PATH>`       | Adopt an existing encrypted .age file                                                                    |
+| `--algorithm <ALGO>`      | SSH key algorithm                                                                                        |
+| `--length <N>`            | Passphrase length                                                                                        |
+| `--no-rekey`              | Skip `agenix rekey -a`                                                                                   |
+| `--no-stage`              | Skip `git add`                                                                                           |
+| `--category <CATEGORY>`   | Use the canonical layout ([`inventory`](#inventory--secret-inventory)) and category-taking name resolver |
+| `--expires <DATE\|never>` | Set expiry in `.meta.toml`; every write stamps `rotated_at`                                              |
 
 ### `forgejo` — Forgejo Actions secrets
 
@@ -302,22 +302,22 @@ Add an agenix secret for Forgejo Actions or runner credentials.
 
 **Options (shared):**
 
-| Flag                      | Description                                                                                                                              |
-| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `--name <SLUG>`           | Secret slug                                                                                                                              |
-| `--cred <NAME>`           | Runner credential name                                                                                                                   |
-| `--instance <INSTANCE>`   | Runner instance (repeatable)                                                                                                             |
-| `--pubkey-var <VAR>`      | Nix variable name for the generated public key                                                                                           |
-| `--module-dir <DIR>`      | Module-secret directory for `gpg-key-pair` sources                                                                                       |
-| `--user-id <UID>`         | OpenPGP user ID for newly generated keys                                                                                                 |
-| `--rotate`                | Force SSH key rotation                                                                                                                   |
-| `--from-file <PATH>`      | Read plaintext from file                                                                                                                 |
-| `--from-age <PATH>`       | Adopt an existing encrypted .age file                                                                                                    |
-| `--length <N>`            | Passphrase length                                                                                                                        |
-| `--no-rekey`              | Skip `agenix rekey -a`                                                                                                                   |
-| `--no-stage`              | Skip `git add`                                                                                                                           |
-| `--category <CATEGORY>`   | Place the source in the canonical layout (see [`inventory`](#inventory--secret-inventory)) and name it with the category-taking resolver |
-| `--expires <DATE\|never>` | Record the expiry in the `.meta.toml` sidecar; every write also stamps `rotated_at`                                                      |
+| Flag                      | Description                                                                                              |
+| ------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `--name <SLUG>`           | Secret slug                                                                                              |
+| `--cred <NAME>`           | Runner credential name                                                                                   |
+| `--instance <INSTANCE>`   | Runner instance (repeatable)                                                                             |
+| `--pubkey-var <VAR>`      | Nix variable name for the generated public key                                                           |
+| `--module-dir <DIR>`      | Module-secret directory for `gpg-key-pair` sources                                                       |
+| `--user-id <UID>`         | OpenPGP user ID for newly generated keys                                                                 |
+| `--rotate`                | Force SSH key rotation                                                                                   |
+| `--from-file <PATH>`      | Read plaintext from file                                                                                 |
+| `--from-age <PATH>`       | Adopt an existing encrypted .age file                                                                    |
+| `--length <N>`            | Passphrase length                                                                                        |
+| `--no-rekey`              | Skip `agenix rekey -a`                                                                                   |
+| `--no-stage`              | Skip `git add`                                                                                           |
+| `--category <CATEGORY>`   | Use the canonical layout ([`inventory`](#inventory--secret-inventory)) and category-taking name resolver |
+| `--expires <DATE\|never>` | Set expiry in `.meta.toml`; every write stamps `rotated_at`                                              |
 
 ### `list` — List secrets
 
@@ -329,9 +329,9 @@ secret-manager list
 
 ### `classify` — Secret metadata
 
-Edit a source's `<name>.meta.toml` sidecar without reading the value: no
-decryption and no hardware key. It never touches `rotated_at`; that is stamped
-only by a write.
+Edit `<name>.meta.toml` without reading or decrypting the source or using a
+hardware key. `classify` leaves `rotated_at` unchanged; only a source write
+stamps it.
 
 ```sh
 secret-manager classify age/secrets/home/can/cloud/syndb_cloudflare_pages_token.age \
@@ -354,7 +354,7 @@ Without a sidecar, a source's kind defaults by category: `external` for `ai`,
 
 ### `inventory` — Secret inventory
 
-Print one JSON document describing every source in the canonical layout:
+Print one JSON document for all sources in the canonical layout:
 
 ```
 age/secrets/home/<user>/<category>/<name>.age
@@ -364,8 +364,8 @@ age/secrets/root/modules/<category>/<name>.age
 ```
 
 Categories: `signing`, `ssh`, `ai`, `forge`, `registry`, `oauth`, `cloud`,
-`app`, `system`. It reads paths and sidecars only; no value, hash or length
-appears.
+`app`, `system`. Inventory reads only paths and sidecars; it omits values,
+hashes, and lengths.
 
 ```sh
 secret-manager inventory --output json
@@ -373,18 +373,18 @@ secret-manager inventory --write /var/lib/secret-inventory/inventory.json --mode
 secret-manager inventory --check
 ```
 
-Each entry carries `id` (the path without `age/secrets/` and `.age`), `tree`,
+Each entry includes `id` (path without `age/secrets/` and `.age`), `tree`,
 `scope`, `category`, `project`, `kind`, `custodian`, `expiry` (`{"type":"at",
 "date":…}`, `{"type":"never"}` or `{"type":"unknown"}`), `rotatedAt`,
-`rotation` and `consumers`. A `home/<user>` source is held by that user unless
-its sidecar names another custodian. `--consumers FILE` supplies consumers as a
-JSON object from id to an array, copied verbatim. `--write` replaces the file
-atomically with `--mode`.
+`rotation` and `consumers`. `home/<user>` defaults to that user as custodian
+unless overridden in its sidecar. `--consumers FILE` takes a JSON object mapping
+IDs to arrays and copies them verbatim. `--write` atomically replaces the file
+with `--mode`.
 
-`--check` instead reports, and exits non-zero on, any source outside the
-layout, a symlink alias, a sidecar without its source, a name repeated within a
-scope, a `home/shared` or `root/` source without a custodian, and an unreadable
-sidecar.
+Instead of emitting inventory JSON, `--check` reports and exits nonzero for
+sources outside the layout, symlink aliases, orphaned sidecars, repeated names
+within a scope, missing custodians under `home/shared` or `root/`, and
+unreadable sidecars.
 
 ### `push` — Push to CI secret stores
 
@@ -401,58 +401,54 @@ secret-manager push <SECRET.age> \
 
 ### `sync` — Push declared sync targets
 
-Read a collected `services.secretSync` JSON document and push each declared
-target to Codeberg/Forgejo, Codefloe, or GitHub Actions scopes, or to
-Kubernetes Secrets. Codeberg/Forgejo targets support repository, organization,
-and authenticated-user scopes; Codefloe and GitHub targets are
-repository-scoped; Kubernetes targets name a `kubectl` context, namespace and
-Secret (see [Sync Targets](../concepts/sync-targets.md#kubernetes-secrets)).
-Encrypted `secret` targets are pushed as Actions secrets; plaintext `source`
-targets are pushed as Actions variables. Kubernetes accepts encrypted `secret`
-targets only.
+Push targets from collected `services.secretSync` JSON. In Actions, encrypted
+`secret` targets become secrets and plaintext `source` targets become variables.
+Codeberg/Forgejo supports repository, organization, and authenticated-user
+scopes; Codefloe supports only repository scope; GitHub supports repository and
+environment scopes. Kubernetes accepts only encrypted `secret` targets, each
+with a `kubectl` context, namespace, and Secret (see
+[Sync Targets](../concepts/sync-targets.md#kubernetes-secrets)).
 
 ```sh
 secret-manager sync --dry-run
 secret-manager sync --identity <IDENTITY.pub>
 ```
 
-By default, `sync` discovers the nearest flake root and evaluates that flake's
-`secret-manager.lib.collect` output over `nixosConfigurations`. Use `--dry-run`
-to print the planned pushes without decrypting or contacting the forge.
+By default, `sync` finds the nearest flake root and evaluates its
+`secret-manager.lib.collect` output over `nixosConfigurations`. `--dry-run`
+prints planned pushes without decrypting or contacting the forge.
 
-For portable scripts, pass an explicit collected JSON document:
+For portable scripts, pass collected JSON explicitly:
 
 ```sh
 secret-manager sync --config sync-targets.json --identity <IDENTITY.pub>
 ```
 
-If `--config` is omitted and stdin is not a terminal, `sync` reads the JSON
-document from stdin. Pass `--no-flake` to disable flake auto-detection and
-require one of those explicit input paths.
+Without `--config`, `sync` reads JSON from non-terminal stdin. `--no-flake`
+disables flake auto-detection and requires `--config` or non-terminal stdin.
 
-`sync` records the remote Actions secrets and variables it manages in
-`<secret-store>/.secret-manager/sync-state.toml` by default. Pass
-`--state <PATH>` to use a different state file. Entries that were previously
-managed but no longer appear in the collected config are reported as stale.
-They are only deleted from their configured forge when `--prune` is passed.
-`--target` only narrows which targets are pushed: staleness is always judged
-against the complete collected config, and `--prune` cannot be combined with
-`--target`. A Kubernetes Secret is applied whole, so `--target` also selects
-every target that writes a Secret a selected target writes.
+`sync` tracks managed remote Actions secrets and variables in
+`<secret-store>/.secret-manager/sync-state.toml` by default. Override it with
+`--state <PATH>`. Sync reports previously managed entries absent from the
+collected config as stale and deletes them from their configured forge only
+with `--prune`. `--target` narrows pushes, not staleness checks (which use the
+full collected config), and cannot be combined with `--prune`. Kubernetes
+Secrets apply whole: `--target` includes all targets that write the same
+Secret as a selected target.
 
-The state file is version 2. A version 1 file upgrades when read and is
-rewritten after the next successful sync; a version 1 binary refuses a
-version 2 file, so upgrade every workstation that syncs.
+Sync upgrades version 1 state on read and rewrites it as version 2 after the
+next successful sync. Version 1 binaries reject version 2 files, so upgrade
+every workstation that syncs.
 
-Three Kubernetes-only modes take over existing live Secrets. Each is exclusive
-with `--check`, `--dry-run`, `--prune` and the others, and refuses non-Kubernetes
-targets:
+Three modes help take over live Kubernetes Secrets. They reject non-Kubernetes
+targets and are mutually exclusive with each other, `--check`, `--dry-run`,
+and `--prune`:
 
-| Flag       | Effect                                                                                                                                                                                                                                                                                                                                                                                                              |
-| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--verify` | Decrypts, reads each live Secret and prints `equal`, `different`, `missing-live` or `undeclared-live` per key, plus `foreign-manager <name>` for any other field manager owning `data`. Exits non-zero unless every declared key is `equal` and nothing is undeclared. Applies nothing                                                                                                                              |
-| `--import` | For each `raw` opaque member whose source file is missing, encrypts the live key to the master recipients at the declared path, creating its directory. Never overwrites, needs no hardware key and prints key names only. Needs `SECRET_MANAGER_AGE_ENCRYPTOR` (an embedding frontend may pass the encryptor instead). Not available for `render` members or `dockerconfigjson`                                    |
-| `--adopt`  | Re-verifies, then applies under the read `resourceVersion` (a Secret changed since the read is a conflict and nothing is applied), then removes every other field manager's `data` ownership with one JSON patch that tests the new `resourceVersion`. Afterwards this field manager is the only data owner, so removing a member later deletes its key. Refuses unless every key is `equal` and none is undeclared |
+| Flag       | Effect                                                                                                                                                                                                                                                                                                                                                             |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `--verify` | Decrypts and reads each live Secret. Prints `equal`, `different`, `missing-live`, or `undeclared-live` per key, plus `foreign-manager <name>` for other managers owning `data`. Exits nonzero unless all declared keys are `equal` and none are undeclared. Applies nothing                                                                                        |
+| `--import` | For each `raw` opaque member missing its source, encrypts the live key to the master recipients at the declared path, creating the directory. Never overwrites, needs no hardware key, and prints only key names. Requires `SECRET_MANAGER_AGE_ENCRYPTOR` or an encryptor from the embedding frontend. Unavailable for `render` members or `dockerconfigjson`      |
+| `--adopt`  | Re-verifies; refuses unless all keys are `equal` and none are undeclared. Applies under the read `resourceVersion` (changes since read conflict without applying). One JSON patch tests the new `resourceVersion` and removes all other field managers' `data` ownership. As sole data owner, this manager deletes a member's key when the member is later removed |
 
 ### `decrypt` — Decrypt to stdout
 
@@ -490,8 +486,8 @@ secret-manager gerrit-cookies <INPUT_FILE> <SECRET.age>
 
 ### `guide` — Manual rotation guides
 
-Print how to replace one credential by hand, and hand its provider pages to
-`xdg-open`. Without a key, list every guide in the catalogue.
+Print manual replacement steps and open provider pages with `xdg-open`.
+Without a key, list all guides in the catalogue.
 
 ```sh
 secret-manager guide --catalogue lib/secrets/Rotations.pkl [KEY] [--no-browser]
@@ -502,19 +498,17 @@ secret-manager guide --catalogue lib/secrets/Rotations.pkl [KEY] [--no-browser]
 | `--catalogue <PATH>` | Pkl file whose module-level `guides` is the catalogue |
 | `--no-browser`       | Print the provider pages instead of opening them      |
 
-The catalogue is decoded by `caniko-secret-manager-schema` and re-validated
-before use: keys must match `^[a-z0-9][a-z0-9._-]*$` and every URL must start
-with `https://` (the URLs reach the opener, so this is a trust boundary).
-Opening a page is best effort: a missing `xdg-open` never fails the command,
-and the URLs are printed either way.
+The command decodes the catalogue with `caniko-secret-manager-schema` and
+revalidates it before use: keys must match `^[a-z0-9][a-z0-9._-]*$` and every
+URL must start with `https://` because it reaches the opener. Opening is best
+effort: missing `xdg-open` never fails the command, and URLs print either way.
 
-A guide's `expiry` says how the credential ends. `cadence` (the default) prints
-the replacement interval, `never` prints `expiry: never expires` for a value
-created without an end date, and `provider` prints
-`expiry: provider-reported (<id>)` for a credential whose provider reports its
-own expiry. `provider` is required exactly when `expiry = "provider"`, and
-`cadenceDays`/`warnDays` are unset for `never`; validation rejects the other
-combinations.
+A guide's `expiry` controls what it prints: `cadence` (default) prints the
+replacement interval; `never` prints `expiry: never expires` for a value
+created without an end date; `provider` prints `expiry: provider-reported (<id>)`
+when the provider reports expiry. Set `provider` if and only if
+`expiry = "provider"`. Leave `cadenceDays`/`warnDays` unset for `never`;
+validation rejects other combinations.
 
 ## Global flags
 
