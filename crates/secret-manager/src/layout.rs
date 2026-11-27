@@ -20,6 +20,7 @@ pub enum Category {
     Registry,
     Oauth,
     Cloud,
+    Dns,
     App,
     System,
 }
@@ -170,6 +171,14 @@ mod tests {
             assert_eq!(id.category, Category::Oauth);
             assert_eq!(id.name, "client_secret");
         }
+        let dns_path = source_path(Owner::Module, Category::Dns, "dns_desec_apply").unwrap();
+        assert_eq!(
+            dns_path,
+            Path::new("age/secrets/root/modules/dns/dns_desec_apply.age")
+        );
+        assert_eq!(parse(&dns_path).unwrap().category, Category::Dns);
+        assert_eq!("dns".parse::<Category>().unwrap(), Category::Dns);
+        assert_eq!(Category::Dns.to_string(), "dns");
         for path in [
             "/age/secrets/home/can/oauth/a.age",
             "age/secrets/home/../oauth/a.age",
