@@ -239,21 +239,21 @@ Add an agenix secret for a home-manager target.
 
 **Options (shared):**
 
-| Flag                      | Description                                                                                                                              |
-| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `--name <SLUG>`           | Secret slug                                                                                                                              |
-| `--user <USER>`           | Home-manager user (default: current login user)                                                                                          |
-| `--shared`                | Store under `age/secrets/users/shared/`                                                                                                  |
-| `--env <VAR>`             | Environment variable names                                                                                                               |
-| `--file <PATH>`           | File path within the home profile                                                                                                        |
-| `--from-file <PATH>`      | Read plaintext from file                                                                                                                 |
-| `--from-age <PATH>`       | Adopt an existing encrypted .age file                                                                                                    |
-| `--algorithm <ALGO>`      | SSH key algorithm (`ed25519`, `rsa`)                                                                                                     |
-| `--length <N>`            | Passphrase length (32, 48, 64)                                                                                                           |
-| `--no-rekey`              | Skip `agenix rekey -a`                                                                                                                   |
-| `--no-stage`              | Skip `git add`                                                                                                                           |
+| Flag                      | Description                                                                                              |
+| ------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `--name <SLUG>`           | Secret slug                                                                                              |
+| `--user <USER>`           | Home-manager user (default: current login user)                                                          |
+| `--shared`                | Store under `age/secrets/users/shared/`                                                                  |
+| `--env <VAR>`             | Environment variable names                                                                               |
+| `--file <PATH>`           | File path within the home profile                                                                        |
+| `--from-file <PATH>`      | Read plaintext from file                                                                                 |
+| `--from-age <PATH>`       | Adopt an existing encrypted .age file                                                                    |
+| `--algorithm <ALGO>`      | SSH key algorithm (`ed25519`, `rsa`)                                                                     |
+| `--length <N>`            | Passphrase length (32, 48, 64)                                                                           |
+| `--no-rekey`              | Skip `agenix rekey -a`                                                                                   |
+| `--no-stage`              | Skip `git add`                                                                                           |
 | `--category <CATEGORY>`   | Use the canonical layout ([`inventory`](#inventory--secret-inventory)) and category-taking name resolver |
-| `--expires <DATE\|never>` | Set expiry in `.meta.toml`; every write stamps `rotated_at` |
+| `--expires <DATE\|never>` | Set expiry in `.meta.toml`; every write stamps `rotated_at`                                              |
 
 ### `nixos` — NixOS host secrets
 
@@ -270,21 +270,21 @@ Add an agenix secret for a NixOS host target.
 
 **Options (shared):**
 
-| Flag                      | Description                                                                                                                              |
-| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `--name <SLUG>`           | Secret slug                                                                                                                              |
-| `--host <HOST>`           | NixOS host name                                                                                                                          |
-| `--env <VAR>`             | Environment variable names                                                                                                               |
-| `--service <NAME>`        | Systemd service names (required with `--env`)                                                                                            |
-| `--file <PATH>`           | File path on the host                                                                                                                    |
-| `--from-file <PATH>`      | Read plaintext from file                                                                                                                 |
-| `--from-age <PATH>`       | Adopt an existing encrypted .age file                                                                                                    |
-| `--algorithm <ALGO>`      | SSH key algorithm                                                                                                                        |
-| `--length <N>`            | Passphrase length                                                                                                                        |
-| `--no-rekey`              | Skip `agenix rekey -a`                                                                                                                   |
-| `--no-stage`              | Skip `git add`                                                                                                                           |
+| Flag                      | Description                                                                                              |
+| ------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `--name <SLUG>`           | Secret slug                                                                                              |
+| `--host <HOST>`           | NixOS host name                                                                                          |
+| `--env <VAR>`             | Environment variable names                                                                               |
+| `--service <NAME>`        | Systemd service names (required with `--env`)                                                            |
+| `--file <PATH>`           | File path on the host                                                                                    |
+| `--from-file <PATH>`      | Read plaintext from file                                                                                 |
+| `--from-age <PATH>`       | Adopt an existing encrypted .age file                                                                    |
+| `--algorithm <ALGO>`      | SSH key algorithm                                                                                        |
+| `--length <N>`            | Passphrase length                                                                                        |
+| `--no-rekey`              | Skip `agenix rekey -a`                                                                                   |
+| `--no-stage`              | Skip `git add`                                                                                           |
 | `--category <CATEGORY>`   | Use the canonical layout ([`inventory`](#inventory--secret-inventory)) and category-taking name resolver |
-| `--expires <DATE\|never>` | Set expiry in `.meta.toml`; every write stamps `rotated_at` |
+| `--expires <DATE\|never>` | Set expiry in `.meta.toml`; every write stamps `rotated_at`                                              |
 
 ### `forgejo` — Forgejo Actions secrets
 
@@ -302,22 +302,22 @@ Add an agenix secret for Forgejo Actions or runner credentials.
 
 **Options (shared):**
 
-| Flag                      | Description                                                                                                                              |
-| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `--name <SLUG>`           | Secret slug                                                                                                                              |
-| `--cred <NAME>`           | Runner credential name                                                                                                                   |
-| `--instance <INSTANCE>`   | Runner instance (repeatable)                                                                                                             |
-| `--pubkey-var <VAR>`      | Nix variable name for the generated public key                                                                                           |
-| `--module-dir <DIR>`      | Module-secret directory for `gpg-key-pair` sources                                                                                       |
-| `--user-id <UID>`         | OpenPGP user ID for newly generated keys                                                                                                 |
-| `--rotate`                | Force SSH key rotation                                                                                                                   |
-| `--from-file <PATH>`      | Read plaintext from file                                                                                                                 |
-| `--from-age <PATH>`       | Adopt an existing encrypted .age file                                                                                                    |
-| `--length <N>`            | Passphrase length                                                                                                                        |
-| `--no-rekey`              | Skip `agenix rekey -a`                                                                                                                   |
-| `--no-stage`              | Skip `git add`                                                                                                                           |
+| Flag                      | Description                                                                                              |
+| ------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `--name <SLUG>`           | Secret slug                                                                                              |
+| `--cred <NAME>`           | Runner credential name                                                                                   |
+| `--instance <INSTANCE>`   | Runner instance (repeatable)                                                                             |
+| `--pubkey-var <VAR>`      | Nix variable name for the generated public key                                                           |
+| `--module-dir <DIR>`      | Module-secret directory for `gpg-key-pair` sources                                                       |
+| `--user-id <UID>`         | OpenPGP user ID for newly generated keys                                                                 |
+| `--rotate`                | Force SSH key rotation                                                                                   |
+| `--from-file <PATH>`      | Read plaintext from file                                                                                 |
+| `--from-age <PATH>`       | Adopt an existing encrypted .age file                                                                    |
+| `--length <N>`            | Passphrase length                                                                                        |
+| `--no-rekey`              | Skip `agenix rekey -a`                                                                                   |
+| `--no-stage`              | Skip `git add`                                                                                           |
 | `--category <CATEGORY>`   | Use the canonical layout ([`inventory`](#inventory--secret-inventory)) and category-taking name resolver |
-| `--expires <DATE\|never>` | Set expiry in `.meta.toml`; every write stamps `rotated_at` |
+| `--expires <DATE\|never>` | Set expiry in `.meta.toml`; every write stamps `rotated_at`                                              |
 
 ### `list` — List secrets
 
@@ -444,10 +444,10 @@ Three modes help take over live Kubernetes Secrets. They reject non-Kubernetes
 targets and are mutually exclusive with each other, `--check`, `--dry-run`,
 and `--prune`:
 
-| Flag       | Effect                                                                                                                                                                                                                                                                                                                                                                                                              |
-| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--verify` | Decrypts and reads each live Secret. Prints `equal`, `different`, `missing-live`, or `undeclared-live` per key, plus `foreign-manager <name>` for other managers owning `data`. Exits nonzero unless all declared keys are `equal` and none are undeclared. Applies nothing |
-| `--import` | For each `raw` opaque member missing its source, encrypts the live key to the master recipients at the declared path, creating the directory. Never overwrites, needs no hardware key, and prints only key names. Requires `SECRET_MANAGER_AGE_ENCRYPTOR` or an encryptor from the embedding frontend. Unavailable for `render` members or `dockerconfigjson` |
+| Flag       | Effect                                                                                                                                                                                                                                                                                                                                                             |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `--verify` | Decrypts and reads each live Secret. Prints `equal`, `different`, `missing-live`, or `undeclared-live` per key, plus `foreign-manager <name>` for other managers owning `data`. Exits nonzero unless all declared keys are `equal` and none are undeclared. Applies nothing                                                                                        |
+| `--import` | For each `raw` opaque member missing its source, encrypts the live key to the master recipients at the declared path, creating the directory. Never overwrites, needs no hardware key, and prints only key names. Requires `SECRET_MANAGER_AGE_ENCRYPTOR` or an encryptor from the embedding frontend. Unavailable for `render` members or `dockerconfigjson`      |
 | `--adopt`  | Re-verifies; refuses unless all keys are `equal` and none are undeclared. Applies under the read `resourceVersion` (changes since read conflict without applying). One JSON patch tests the new `resourceVersion` and removes all other field managers' `data` ownership. As sole data owner, this manager deletes a member's key when the member is later removed |
 
 ### `decrypt` — Decrypt to stdout
